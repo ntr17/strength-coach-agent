@@ -224,10 +224,12 @@ def parse_coach_focus_markers(email_text: str) -> tuple[str, list[dict]]:
     categories = ["TRACKING", "LANDMARK", "FOLLOWUP", "CONCERN", "RESOLVED"]
     clean = email_text
     for cat in categories:
-        pattern = rf'\[{cat}:\s*(.*?)\]'
-        for match in re.finditer(pattern, email_text, re.IGNORECASE | re.DOTALL):
+        # Use [^\]]* (no inner brackets) to avoid greedy capture when item contains
+        # a ] character (e.g. set/rep notation like [3x5] or bracketed lift names).
+        pattern = rf'\[{cat}:\s*([^\]]*)\]'
+        for match in re.finditer(pattern, email_text, re.IGNORECASE):
             markers.append({"category": cat, "item": match.group(1).strip()})
-        clean = re.sub(pattern, '', clean, flags=re.IGNORECASE | re.DOTALL)
+        clean = re.sub(pattern, '', clean, flags=re.IGNORECASE)
     return clean.strip(), markers
 
 
@@ -351,11 +353,12 @@ def write_coach_state_summaries(
     program_data: dict,
     week_num: int,
     dry_run: bool = False,
+    is_weekly_summary: bool = False,
 ) -> None:
     """
     Write compressed domain summaries to the Coach State tab.
     Called at the end of each run so next run starts from a bounded context.
-    Mostly pure Python; NUTRITION domain uses a lightweight Haiku call.
+    Mostly pure Python; NUTRITION domain uses a lightweight Haiku call (weekly only).
     """
     try:
         from memory import upsert_coach_state
@@ -435,21 +438,22 @@ def write_coach_state_summaries(
             sched_summary = f"Week {week_num}: {done}/{total} days completed"
             _write_state(upsert_coach_state, "SCHEDULE", sched_summary, "HIGH", dry_run)
 
-        # --- NUTRITION domain (Haiku, weekly-ish — only on is_weekly_summary days) ---
-        # Skip on non-weekly runs to save budget (this is a derived insight, not critical daily)
-        try:
-            from health_agent import generate_nutrition_summary
-            health_log_for_nutrition = memory_data.get("health_log", [])
-            if health_log_for_nutrition:
-                fatigue = projections.get("fatigue") if projections else None
-                athlete_profile = memory_data.get("athlete_profile", "")
-                nutrition_summary = generate_nutrition_summary(
-                    health_log_for_nutrition, fatigue, athlete_profile
-                )
-                if nutrition_summary:
-                    _write_state(upsert_coach_state, "NUTRITION", nutrition_summary, "MEDIUM", dry_run)
-        except Exception as e:
-            print(f"  NUTRITION Coach State write failed (non-fatal): {e}")
+        # --- NUTRITION domain (Haiku, weekly only — derived insight, not critical daily) ---
+        # Skip on daily runs to save budget (~$0.002/run × 30d = $0.06/mo)
+        if is_weekly_summary:
+            try:
+                from health_agent import generate_nutrition_summary
+                health_log_for_nutrition = memory_data.get("health_log", [])
+                if health_log_for_nutrition:
+                    fatigue = projections.get("fatigue") if projections else None
+                    athlete_profile = memory_data.get("athlete_profile", "")
+                    nutrition_summary = generate_nutrition_summary(
+                        health_log_for_nutrition, fatigue, athlete_profile
+                    )
+                    if nutrition_summary:
+                        _write_state(upsert_coach_state, "NUTRITION", nutrition_summary, "MEDIUM", dry_run)
+            except Exception as e:
+                print(f"  NUTRITION Coach State write failed (non-fatal): {e}")
 
     except Exception as e:
         print(f"  Coach State write failed (non-fatal): {e}")
@@ -497,9 +501,12 @@ def _extract_commit_markers(email_text: str) -> tuple[str, list[dict]]:
         raw = match.group(1).strip()
         due_date = ""
         if " | due: " in raw.lower():
-            parts = raw.rsplit(" | due: ", 1)
-            commitment = parts[0].strip()
-            due_date = parts[1].strip()
+            # rsplit on the lowercased version to find the split point, then
+            # extract from original to preserve commitment text casing.
+            raw_lower = raw.lower()
+            split_idx = raw_lower.rfind(" | due: ")
+            commitment = raw[:split_idx].strip()
+            due_date = raw[split_idx + len(" | due: "):].strip()
         else:
             commitment = raw
         if commitment:
@@ -840,18 +847,28 @@ def compute_session_quality(program_data: dict, lift_history: list[dict]) -> dic
     done = sum(1 for ex in exercises if ex.get("done"))
     completion_pct = done / total if total else 0
 
-    # RPE alignment: gather from lift_history for this session's exercises
+    # RPE alignment: check exercise notes directly first (most reliable path),
+    # then fall back to lift_history lookup (column name may vary).
     rpe_values = []
-    session_day = last_session.get("label", "")
-    for row in reversed(lift_history[-30:]):
-        if session_day.lower() in row.get("Day", "").lower():
-            notes = (row.get("Notes", "") or "").strip()
-            m = _re.search(r"@?RPE\s*(\d+(?:\.\d+)?)", notes, _re.IGNORECASE)
-            if m:
-                try:
-                    rpe_values.append(float(m.group(1)))
-                except (ValueError, TypeError):
-                    pass
+    for ex in exercises:
+        note = (ex.get("session_note") or ex.get("notes") or "").strip()
+        m = _re.search(r"@?RPE\s*(\d+(?:\.\d+)?)", note, _re.IGNORECASE)
+        if m:
+            try:
+                rpe_values.append(float(m.group(1)))
+            except (ValueError, TypeError):
+                pass
+    if not rpe_values:
+        session_day = last_session.get("label", "")
+        for row in reversed(lift_history[-30:]):
+            if session_day.lower() in row.get("Day", "").lower():
+                notes = (row.get("Notes", "") or "").strip()
+                m = _re.search(r"@?RPE\s*(\d+(?:\.\d+)?)", notes, _re.IGNORECASE)
+                if m:
+                    try:
+                        rpe_values.append(float(m.group(1)))
+                    except (ValueError, TypeError):
+                        pass
 
     rpe_alignment = 0.7  # neutral default if no RPE data
     if rpe_values:
@@ -1145,7 +1162,7 @@ def run(week_num: int = None, dry_run: bool = False, no_sync: bool = False,
                 note = (f"{spike['lift']}: volume spike {spike['pct_increase']}% "
                         f"({spike['from_tonnage']}→{spike['to_tonnage']}kg tonnage "
                         f"{spike['from_week']}→{spike['to_week']}) — injury risk window")
-                if "volume spike" not in " ".join(open_items_text):
+                if not any(spike['lift'].lower() in t and "volume spike" in t for t in open_items_text):
                     append_coach_focus("CONCERN", note, priority="HIGH", last_mentioned=str(today))
                     print(f"    [Volume spike] {note[:80]}")
         # Deload auto-detection + smart proposal
@@ -1513,6 +1530,7 @@ def run(week_num: int = None, dry_run: bool = False, no_sync: bool = False,
         program_data=program_data,
         week_num=week_num,
         dry_run=dry_run or no_sync,
+        is_weekly_summary=is_weekly_summary,
     )
 
     # Write LAST_EMAIL domain so Telegram bot knows what was said and what was asked
