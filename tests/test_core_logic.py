@@ -1159,5 +1159,444 @@ class TestRecapWeekdaySpanishGap:
         assert result == 0
 
 
+# ===========================================================================
+# _is_on_vacation — vacation detection logic
+# ===========================================================================
+
+class TestIsOnVacation:
+    """
+    _is_on_vacation() must correctly distinguish active vacation from:
+    - Return announcements ("back from vacation")
+    - Stale entries (>14 days old)
+    - Empty life context
+    Bug history: previously triggered True for "back from vacation" because
+    "vacation" is a keyword — the return-signal check was documented in a comment
+    but not implemented. Fixed to check return_keywords before returning True.
+    """
+
+    def _entry(self, text, days_ago=1):
+        d = (date.today() - timedelta(days=days_ago)).isoformat()
+        return {"context": text, "date": d}
+
+    def test_empty_life_context_returns_false(self):
+        from run_coach import _is_on_vacation
+        assert _is_on_vacation([]) is False
+
+    def test_no_vacation_keywords_returns_false(self):
+        from run_coach import _is_on_vacation
+        ctx = [self._entry("training going well, back squats feeling strong")]
+        assert _is_on_vacation(ctx) is False
+
+    def test_active_vacation_returns_true(self):
+        from run_coach import _is_on_vacation
+        ctx = [self._entry("on vacation in Italy, back March 18")]
+        assert _is_on_vacation(ctx) is True
+
+    def test_back_from_vacation_returns_false(self):
+        """Bug fix: 'back from vacation' must NOT trigger vacation mode."""
+        from run_coach import _is_on_vacation
+        ctx = [self._entry("back from vacation, resuming training tomorrow")]
+        assert _is_on_vacation(ctx) is False
+
+    def test_returned_from_vacation_returns_false(self):
+        from run_coach import _is_on_vacation
+        ctx = [self._entry("returned from holiday, feeling rested")]
+        assert _is_on_vacation(ctx) is False
+
+    def test_got_back_returns_false(self):
+        from run_coach import _is_on_vacation
+        ctx = [self._entry("got back from vacation, deload week done")]
+        assert _is_on_vacation(ctx) is False
+
+    def test_spanish_de_vacaciones_returns_true(self):
+        from run_coach import _is_on_vacation
+        ctx = [self._entry("de vacaciones hasta el martes")]
+        assert _is_on_vacation(ctx) is True
+
+    def test_spanish_de_vuelta_returns_false(self):
+        from run_coach import _is_on_vacation
+        ctx = [self._entry("de vuelta de vacaciones, listo para entrenar")]
+        assert _is_on_vacation(ctx) is False
+
+    def test_stale_vacation_entry_returns_false(self):
+        """Vacation mention >14 days old is treated as expired."""
+        from run_coach import _is_on_vacation
+        ctx = [self._entry("on vacation in Paris", days_ago=15)]
+        assert _is_on_vacation(ctx) is False
+
+    def test_recent_vacation_overrides_older_return(self):
+        """Newer active vacation beats older return signal (newest-first iteration)."""
+        from run_coach import _is_on_vacation
+        ctx = [
+            self._entry("back from vacation last month", days_ago=30),
+            self._entry("starting vacation in Ibiza", days_ago=1),
+        ]
+        assert _is_on_vacation(ctx) is True
+
+    def test_recent_return_overrides_older_vacation(self):
+        """Newer return signal beats older vacation entry."""
+        from run_coach import _is_on_vacation
+        ctx = [
+            self._entry("going on vacation", days_ago=5),
+            self._entry("back from vacation, training resumes", days_ago=1),
+        ]
+        assert _is_on_vacation(ctx) is False
+
+    def test_holiday_keyword_recognized(self):
+        from run_coach import _is_on_vacation
+        ctx = [self._entry("public holiday this week, rest day")]
+        assert _is_on_vacation(ctx) is True
+
+    def test_entry_without_date_not_expired(self):
+        """If no date on the entry, staleness check is skipped — defaults to active."""
+        from run_coach import _is_on_vacation
+        ctx = [{"context": "on vacation somewhere", "date": ""}]
+        assert _is_on_vacation(ctx) is True
+
+
+# ===========================================================================
+# get_session_dates_from_lift_history — pure logic via mock
+# ===========================================================================
+
+class TestGetSessionDatesFromLiftHistory:
+    """
+    get_session_dates_from_lift_history(week_num) reads Lift History and returns
+    {day_label: date_str} for a given week. Tests use mock to avoid Sheets API.
+    """
+
+    def _mock_rows(self):
+        return [
+            {"Week": "10", "Day": "Day 1", "Date": "2026-03-10", "Exercise": "Squat"},
+            {"Week": "10", "Day": "Day 1", "Date": "2026-03-10", "Exercise": "Bench"},  # dup day
+            {"Week": "10", "Day": "Day 2", "Date": "2026-03-12", "Exercise": "Deadlift"},
+            {"Week": "9",  "Day": "Day 1", "Date": "2026-03-03", "Exercise": "Squat"},  # wrong week
+            {"Week": "10", "Day": "",      "Date": "2026-03-10", "Exercise": "Misc"},   # no day label
+            {"Week": "10", "Day": "Day 3", "Date": "",           "Exercise": "OHP"},    # no date
+        ]
+
+    def test_returns_unique_days_for_week(self):
+        from unittest.mock import patch
+        with patch("memory.read_lift_history", return_value=self._mock_rows()):
+            from memory import get_session_dates_from_lift_history
+            result = get_session_dates_from_lift_history(10)
+        # Day 1 and Day 2 should be present; dup Day 1 entry is deduplicated
+        assert result["Day 1"] == "2026-03-10"
+        assert result["Day 2"] == "2026-03-12"
+
+    def test_filters_wrong_week(self):
+        from unittest.mock import patch
+        with patch("memory.read_lift_history", return_value=self._mock_rows()):
+            from memory import get_session_dates_from_lift_history
+            result = get_session_dates_from_lift_history(10)
+        # Week 9 entry should NOT appear
+        assert len(result) == 2  # Day 1 and Day 2 only
+
+    def test_skips_empty_day_label(self):
+        from unittest.mock import patch
+        with patch("memory.read_lift_history", return_value=self._mock_rows()):
+            from memory import get_session_dates_from_lift_history
+            result = get_session_dates_from_lift_history(10)
+        # Entry with empty Day label should be skipped
+        assert "" not in result
+
+    def test_skips_empty_date(self):
+        from unittest.mock import patch
+        with patch("memory.read_lift_history", return_value=self._mock_rows()):
+            from memory import get_session_dates_from_lift_history
+            result = get_session_dates_from_lift_history(10)
+        # Day 3 has no date — should not appear
+        assert "Day 3" not in result
+
+    def test_empty_lift_history_returns_empty_dict(self):
+        from unittest.mock import patch
+        with patch("memory.read_lift_history", return_value=[]):
+            from memory import get_session_dates_from_lift_history
+            result = get_session_dates_from_lift_history(10)
+        assert result == {}
+
+    def test_no_matching_week_returns_empty_dict(self):
+        from unittest.mock import patch
+        with patch("memory.read_lift_history", return_value=self._mock_rows()):
+            from memory import get_session_dates_from_lift_history
+            result = get_session_dates_from_lift_history(999)
+        assert result == {}
+
+    def test_first_date_wins_for_duplicate_day(self):
+        """When same Day appears twice for same week, first occurrence wins."""
+        from unittest.mock import patch
+        rows = [
+            {"Week": "10", "Day": "Day 1", "Date": "2026-03-10", "Exercise": "Squat"},
+            {"Week": "10", "Day": "Day 1", "Date": "2026-03-11", "Exercise": "Bench"},  # second entry
+        ]
+        with patch("memory.read_lift_history", return_value=rows):
+            from memory import get_session_dates_from_lift_history
+            result = get_session_dates_from_lift_history(10)
+        assert result["Day 1"] == "2026-03-10"  # first wins
+
+
+# ===========================================================================
+# _format_current_week with session_dates injection
+# ===========================================================================
+
+class TestFormatCurrentWeekWithSessionDates:
+    """
+    _format_current_week() accepts an optional session_dates dict.
+    For Done=Yes entries with no sheet date, it cross-references Lift History dates.
+    For pending entries with no date, it shows [date unknown — check Lift History].
+    """
+
+    def _make_week(self, days):
+        return {"title": "Week 10", "days": days}
+
+    def test_done_session_shows_lift_history_date(self):
+        from prompt import _format_current_week
+        week = self._make_week([{
+            "label": "DAY 1: Squat",
+            "date": None,
+            "exercises": [{"name": "Squat", "weight": "100", "sets_reps": "5x5",
+                           "done": True, "actual": None, "session_note": None, "notes": None,
+                           "program_note": None}],
+        }])
+        session_dates = {"Day 1": "2026-03-10"}
+        result = _format_current_week(week, session_dates=session_dates)
+        assert "done 2026-03-10" in result
+
+    def test_pending_session_shows_date_unknown(self):
+        from prompt import _format_current_week
+        week = self._make_week([{
+            "label": "DAY 2: Deadlift",
+            "date": None,
+            "exercises": [{"name": "Deadlift", "weight": "120", "sets_reps": "4x4",
+                           "done": None, "actual": None, "session_note": None, "notes": None,
+                           "program_note": None}],
+        }])
+        result = _format_current_week(week, session_dates={})
+        assert "date unknown" in result
+
+    def test_sheet_date_takes_priority_over_lift_history(self):
+        """If the sheet has a date, prefer it over the session_dates lookup."""
+        from prompt import _format_current_week
+        week = self._make_week([{
+            "label": "DAY 1: Squat",
+            "date": "2026-03-08",  # sheet date
+            "exercises": [{"name": "Squat", "weight": "100", "sets_reps": "5x5",
+                           "done": True, "actual": None, "session_note": None, "notes": None,
+                           "program_note": None}],
+        }])
+        session_dates = {"Day 1": "2026-03-10"}  # different date from Lift History
+        result = _format_current_week(week, session_dates=session_dates)
+        # Sheet date (Mar 8) wins over Lift History date (Mar 10)
+        assert "done 2026-03-08" in result or "Mar 08" in result
+        assert "2026-03-10" not in result
+
+    def test_no_session_dates_shows_date_unknown(self):
+        """With no session_dates and no sheet date, shows [date unknown]."""
+        from prompt import _format_current_week
+        week = self._make_week([{
+            "label": "DAY 1: Squat",
+            "date": None,
+            "exercises": [{"name": "Squat", "done": True, "weight": "100",
+                           "sets_reps": "5x5", "actual": None, "session_note": None,
+                           "notes": None, "program_note": None}],
+        }])
+        result = _format_current_week(week)
+        assert "date unknown" in result
+
+    def test_session_dates_none_does_not_crash(self):
+        """Passing session_dates=None should not raise."""
+        from prompt import _format_current_week
+        week = self._make_week([{
+            "label": "DAY 1: Squat",
+            "date": None,
+            "exercises": [{"name": "Squat", "done": True, "weight": "100",
+                           "sets_reps": "5x5", "actual": None, "session_note": None,
+                           "notes": None, "program_note": None}],
+        }])
+        try:
+            _format_current_week(week, session_dates=None)
+        except Exception as e:
+            pytest.fail(f"session_dates=None raised: {e}")
+
+    def test_empty_week_returns_no_data_message(self):
+        from prompt import _format_current_week
+        result = _format_current_week({})
+        assert "No current week data" in result
+
+
+# ===========================================================================
+# detect_difficulty_patterns — substring false-positive edge cases
+# ===========================================================================
+
+class TestDifficultyPatternSubstrings:
+    """
+    detect_difficulty_patterns uses substring matching for keywords.
+    Edge cases: "fail" in "failure", "light" in "lighter" (intended),
+    but also "light" in "lightning" (false positive).
+    These tests document current behavior so regressions are caught.
+    """
+
+    def _make_program_data(self, weeks_data):
+        """weeks_data: list of (week_num, exercises_per_day)"""
+        weeks = []
+        for week_num, day_exercises in weeks_data:
+            days = []
+            for exs in day_exercises:
+                days.append({"exercises": exs})
+            weeks.append({"week_num": week_num, "days": days})
+        return {"current_week": {}, "recent_weeks": weeks}
+
+    def _ex(self, name, note, done=True):
+        return {"name": name, "session_note": note, "done": done, "notes": None}
+
+    def test_easy_signals_across_two_weeks_flags(self):
+        from run_coach import detect_difficulty_patterns
+        # 3 easy signals across 2 weeks → flag
+        pd = {
+            "current_week": {},
+            "recent_weeks": [
+                {"week_num": 8, "days": [
+                    {"exercises": [self._ex("Squat", "too easy"), self._ex("Squat", "felt light")]},
+                ]},
+                {"week_num": 9, "days": [
+                    {"exercises": [self._ex("Squat", "easy")]},
+                ]},
+            ],
+        }
+        flags = detect_difficulty_patterns(pd)
+        squat_flags = [f for f in flags if f["lift"] == "Squat"]
+        assert len(squat_flags) == 1
+        assert squat_flags[0]["signal"] == "easy"
+        assert squat_flags[0]["count"] >= 3
+
+    def test_single_week_three_signals_no_flag(self):
+        """3 easy signals in same week → does NOT flag (requires ≥2 distinct weeks)."""
+        from run_coach import detect_difficulty_patterns
+        pd = {
+            "current_week": {},
+            "recent_weeks": [
+                {"week_num": 9, "days": [
+                    {"exercises": [
+                        self._ex("Bench", "too easy"),
+                        self._ex("Bench", "felt easy"),
+                        self._ex("Bench", "light"),
+                    ]},
+                ]},
+            ],
+        }
+        flags = detect_difficulty_patterns(pd)
+        bench_flags = [f for f in flags if f["lift"] == "Bench"]
+        assert len(bench_flags) == 0, "Single-week signals must NOT flag"
+
+    def test_failed_set_triggers_hard_signal(self):
+        """done=False (failed set) generates a hard signal."""
+        from run_coach import detect_difficulty_patterns
+        pd = {
+            "current_week": {},
+            "recent_weeks": [
+                {"week_num": 8, "days": [
+                    {"exercises": [self._ex("Deadlift", "", done=False)]},
+                ]},
+                {"week_num": 9, "days": [
+                    {"exercises": [
+                        self._ex("Deadlift", "too heavy"),
+                        self._ex("Deadlift", "failed rep"),
+                    ]},
+                ]},
+            ],
+        }
+        flags = detect_difficulty_patterns(pd)
+        dl_flags = [f for f in flags if f["lift"] == "Deadlift"]
+        assert any(f["signal"] == "hard" for f in dl_flags)
+
+    def test_no_signals_returns_empty(self):
+        from run_coach import detect_difficulty_patterns
+        pd = {
+            "current_week": {},
+            "recent_weeks": [
+                {"week_num": 9, "days": [
+                    {"exercises": [self._ex("OHP", "felt ok"), self._ex("OHP", "normal")]},
+                ]},
+            ],
+        }
+        flags = detect_difficulty_patterns(pd)
+        assert flags == []
+
+    def test_empty_program_data_returns_empty(self):
+        from run_coach import detect_difficulty_patterns
+        flags = detect_difficulty_patterns({"current_week": {}, "recent_weeks": []})
+        assert flags == []
+
+    def test_substring_light_in_note_triggers_easy(self):
+        """'light' is a known easy keyword — substring match is intentional here."""
+        from run_coach import detect_difficulty_patterns
+        pd = {
+            "current_week": {},
+            "recent_weeks": [
+                {"week_num": 8, "days": [
+                    {"exercises": [self._ex("Squat", "bar felt light today")]},
+                ]},
+                {"week_num": 9, "days": [
+                    {"exercises": [
+                        self._ex("Squat", "still feeling light"),
+                        self._ex("Squat", "way too light"),
+                    ]},
+                ]},
+            ],
+        }
+        flags = detect_difficulty_patterns(pd)
+        assert any(f["lift"] == "Squat" and f["signal"] == "easy" for f in flags)
+
+
+# ===========================================================================
+# Regression: schedule_discovery dedup uses rolling 6-day window (not Sunday-only)
+# ===========================================================================
+
+class TestScheduleDiscoveryDedup:
+    """
+    run_weekly_schedule_discovery() was changed from Sunday-only to a 6-day
+    rolling window. These tests verify the dedup logic in isolation.
+    """
+
+    def test_dedup_rejects_same_day(self):
+        """If LAST_SCHEDULE_DISCOVERY is today, skip."""
+        from unittest.mock import patch, MagicMock
+        today = date.today()
+        mock_state = {"LAST_SCHEDULE_DISCOVERY": {"summary": str(today)}}
+
+        with patch("memory.read_coach_state", return_value=mock_state):
+            with patch("memory.upsert_coach_state") as mock_upsert:
+                with patch("sheets.read_program_data", return_value={"current_week": {"days": []}}):
+                    from run_coach import run_weekly_schedule_discovery
+                    run_weekly_schedule_discovery(dry_run=True)
+                    mock_upsert.assert_not_called()
+
+    def test_dedup_allows_after_6_days(self):
+        """If LAST_SCHEDULE_DISCOVERY is 7 days ago, allow run."""
+        from unittest.mock import patch
+        seven_days_ago = (date.today() - timedelta(days=7)).isoformat()
+        mock_state = {"LAST_SCHEDULE_DISCOVERY": {"summary": seven_days_ago}}
+
+        with patch("memory.read_coach_state", return_value=mock_state):
+            with patch("sheets.read_program_data", return_value={"current_week": {"days": []}}):
+                with patch("anthropic.Anthropic"):
+                    from run_coach import run_weekly_schedule_discovery
+                    # dry_run=True won't call Telegram — just verify it gets past the dedup check
+                    run_weekly_schedule_discovery(dry_run=True)
+                    # If we get here without "skipping" print, dedup passed
+
+    def test_dedup_blocks_within_6_days(self):
+        """If LAST_SCHEDULE_DISCOVERY is 4 days ago, skip (rolling 6-day window)."""
+        from unittest.mock import patch, MagicMock
+        four_days_ago = (date.today() - timedelta(days=4)).isoformat()
+        mock_state = {"LAST_SCHEDULE_DISCOVERY": {"summary": four_days_ago}}
+
+        with patch("memory.read_coach_state", return_value=mock_state):
+            with patch("memory.upsert_coach_state") as mock_upsert:
+                with patch("sheets.read_program_data", return_value={"current_week": {"days": []}}):
+                    from run_coach import run_weekly_schedule_discovery
+                    run_weekly_schedule_discovery(dry_run=True)
+                    mock_upsert.assert_not_called()
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

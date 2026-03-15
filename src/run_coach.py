@@ -1972,14 +1972,42 @@ def run_weekly_schedule_discovery(dry_run: bool = False):
 # ---------------------------------------------------------------------------
 
 def _is_on_vacation(life_context: list[dict]) -> bool:
-    """Return True if recent Life Context mentions an active vacation/holiday."""
-    keywords = ("vacation", "holiday", "vacaciones", "holidays", "away")
+    """
+    Return True if the most recent vacation-related Life Context entry indicates
+    an ACTIVE vacation (not a return announcement or a stale mention).
+
+    Logic (newest-first):
+    1. If the entry has a return signal ("back from", "returned", etc.) → False
+    2. If the entry is > 14 days old → treat as stale/expired → False
+    3. Otherwise → True (active vacation)
+
+    This prevents both "back from vacation" and old entries from triggering vacation mode.
+    """
+    vacation_keywords = ("vacation", "holiday", "vacaciones", "holidays", "de vacaciones")
+    return_keywords = ("back from", "returned from", "back home", "de vuelta",
+                       "regresé", "already back", "got back", "came back", "just back",
+                       "back to training", "resuming", "volviendo")
+
+    today = date.today()
+
     for entry in reversed(life_context[-10:]):
         text = entry.get("context", "").lower()
-        if any(k in text for k in keywords):
-            # Crude check: if there's a "until" or "back" date and it's in the past, skip
-            # Otherwise treat as potentially active
-            return True
+        if not any(k in text for k in vacation_keywords):
+            continue
+        # Found the most recent vacation mention — check for return signal first
+        if any(k in text for k in return_keywords):
+            return False  # "back from vacation" → vacation over
+        # Check age — vacations don't last forever without an explicit update
+        entry_date_str = entry.get("date", "")
+        if entry_date_str:
+            try:
+                entry_date = date.fromisoformat(entry_date_str[:10])
+                if (today - entry_date).days > 14:
+                    return False  # stale mention (>14 days) → treat as inactive
+            except (ValueError, TypeError):
+                pass
+        return True  # recent vacation mention without return signal → active
+
     return False
 
 
