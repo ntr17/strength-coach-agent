@@ -8,11 +8,9 @@ to the Coach Memory Sheet (Strategic Plan + Planning Notes tabs).
 This is invisible to the athlete. It silently informs daily emails.
 """
 
-import json
 import re
 import sys
 from datetime import date
-from typing import Optional
 
 import anthropic
 
@@ -274,6 +272,87 @@ def run_planning_pass(program_data: dict, memory_data: dict, week_num: int,
         print(f"  [DRY RUN] Would append {len(notes)} chars of planning notes.")
 
     return phases, notes
+
+
+# ---------------------------------------------------------------------------
+# Telegram log summarization — weekly compression to prevent prompt bloat
+# ---------------------------------------------------------------------------
+
+def run_telegram_summarization(memory_data: dict, dry_run: bool = False) -> str:
+    """
+    Summarize Telegram Log entries older than 14 days into a TELEGRAM_HISTORY
+    Coach State domain. Prevents prompt bloat as months of conversation accumulate.
+
+    Called weekly from run_think() on Sundays.
+    Uses Haiku (cheap) — the summary is ~3-5 sentences, not a verbatim transcript.
+    Returns the summary text (empty string if nothing to summarize).
+    """
+    from datetime import timedelta
+    from memory import read_telegram_log_since, upsert_coach_state, read_coach_state
+
+    today = date.today()
+    cutoff = today - timedelta(days=14)
+
+    # Check existing TELEGRAM_HISTORY so we can append rather than replace
+    existing_state = memory_data.get("coach_state") or read_coach_state()
+    existing_summary = existing_state.get("TELEGRAM_HISTORY", {}).get("summary", "")
+
+    # Read older entries (before cutoff). We read all and filter locally.
+    all_log = memory_data.get("telegram_log", [])
+    if not all_log:
+        print("  Telegram summarization: no log entries — skipping.")
+        return ""
+
+    old_entries = []
+    for entry in all_log:
+        try:
+            from datetime import datetime as _dt
+            entry_date = _dt.strptime(entry.get("Date", "")[:10], "%Y-%m-%d").date()
+            if entry_date < cutoff:
+                old_entries.append(entry)
+        except (ValueError, TypeError):
+            pass
+
+    if not old_entries:
+        print("  Telegram summarization: no entries older than 14 days — skipping.")
+        return ""
+
+    # Build condensed message log for Haiku
+    log_lines = []
+    for e in old_entries[-150:]:  # cap at 150 to keep prompt size bounded
+        direction = "Nacho" if e.get("Direction", "").upper() == "IN" else "Coach"
+        log_lines.append(f"  [{e.get('Date', '')}] {direction}: {e.get('Message', '').strip()[:200]}")
+    log_text = "\n".join(log_lines)
+
+    prompt = (
+        f"Summarize the following Telegram coaching conversation history from the past weeks.\n"
+        f"Focus on: key training events mentioned, athlete concerns raised, coach advice given, "
+        f"patterns in athlete mood/performance, any recurring topics or unresolved threads.\n"
+        f"Write 4-6 dense sentences. No headers, just a paragraph.\n\n"
+        f"EXISTING SUMMARY (from previous compression — extend it, don't discard it):\n"
+        f"{existing_summary or '(none yet)'}\n\n"
+        f"NEW MESSAGES TO INCORPORATE (older than 14 days):\n{log_text}"
+    )
+
+    print(f"  Telegram summarization: compressing {len(old_entries)} old entries with Haiku...")
+    if dry_run:
+        print(f"  [DRY RUN] Would compress {len(old_entries)} entries into TELEGRAM_HISTORY.")
+        return f"[DRY RUN] {len(old_entries)} entries would be summarized."
+
+    try:
+        client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+        result = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=500,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        summary = result.content[0].text.strip()
+        upsert_coach_state("TELEGRAM_HISTORY", summary, "MEDIUM")
+        print(f"  TELEGRAM_HISTORY Coach State written ({len(summary)} chars).")
+        return summary
+    except Exception as e:
+        print(f"  Telegram summarization failed (non-fatal): {e}")
+        return ""
 
 
 # ---------------------------------------------------------------------------

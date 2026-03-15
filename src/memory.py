@@ -44,6 +44,7 @@ TAB_COACH_FOCUS = "Coach Focus"
 TAB_COACH_STATE = "Coach State"
 TAB_ATHLETE_PREFS = "Athlete Preferences"
 TAB_TRACKED_LIFTS = "Tracked Lifts"
+TAB_COMMITMENTS = "Commitments"
 
 LIFT_HISTORY_HEADERS = ["Date", "Week", "Day", "Exercise", "Prescribed Weight",
                          "Actual Weight/Reps", "Completed", "Notes", "Est 1RM"]
@@ -77,6 +78,12 @@ ATHLETE_PREFS_HEADERS = ["Category", "Preference", "Source", "Added Date"]
 # Tracked lifts — which exercises the coach monitors as key lifts.
 # Replaces the hardcoded KEY_LIFTS list: coach can add/remove lifts dynamically via Telegram.
 TRACKED_LIFTS_HEADERS = ["Name", "Domain", "Match Pattern", "Type", "Active", "Added", "Notes"]
+
+# Commitments — explicit coach promises to follow up on something specific.
+# Separate from Coach Focus (which is reactive / observation-based).
+# This is proactive: coach said "I'll check X" → it must happen.
+COMMITMENTS_HEADERS = ["Date Added", "Commitment", "Due Date", "Status", "Resolved Date", "Notes"]
+# Status: OPEN | RESOLVED | DEFERRED
 # Name: display name, e.g. "Squat"
 # Domain: Coach State domain key (uppercase, no spaces), e.g. "SQUAT"
 # Match Pattern: substring matched against "Exercise" column in Lift History (case-insensitive)
@@ -136,39 +143,145 @@ def read_long_term_goals() -> str:
     return "\n".join(lines)
 
 
-def read_lift_history(limit: int = 80) -> list[dict]:
-    """Read last N rows of Lift History."""
+def get_tab_row_count(tab_name: str) -> int:
+    """Return the number of data rows in a tab (excluding header). 0 if missing."""
+    sheet = _get_memory_sheet()
+    try:
+        ws = sheet.worksheet(tab_name)
+    except gspread.WorksheetNotFound:
+        return 0
+    rows = ws.get_all_values()
+    return max(0, len(rows) - 1)
+
+
+def archive_old_rows(tab_name: str, before_date: date,
+                     archive_tab_name: str = None) -> int:
+    """
+    Move rows whose Date column is older than before_date to an archive tab.
+    Creates the archive tab if it doesn't exist.
+    Returns count of rows moved.
+    Safe to call even if the tab has few rows — returns 0 without doing anything.
+    """
+    sheet = _get_memory_sheet()
+    try:
+        ws = sheet.worksheet(tab_name)
+    except gspread.WorksheetNotFound:
+        return 0
+
+    rows = ws.get_all_values()
+    if len(rows) <= 1:
+        return 0
+
+    headers = rows[0]
+    archive_name = archive_tab_name or f"{tab_name} Archive"
+    date_col_idx = 0  # Date is always column A
+
+    old_rows = []
+    keep_row_indices = []  # 1-indexed in gspread (row 1 = header)
+
+    for i, row in enumerate(rows[1:], start=2):
+        if not any(row):
+            continue
+        date_str = row[date_col_idx].strip() if row else ""
+        try:
+            row_date = datetime.strptime(date_str[:10], "%Y-%m-%d").date()
+            if row_date < before_date:
+                old_rows.append(row)
+            else:
+                keep_row_indices.append(i)
+        except (ValueError, TypeError):
+            keep_row_indices.append(i)  # keep rows with unparseable dates
+
+    if not old_rows:
+        return 0
+
+    # Write to archive tab
+    try:
+        archive_ws = sheet.worksheet(archive_name)
+    except gspread.WorksheetNotFound:
+        archive_ws = sheet.add_worksheet(title=archive_name, rows=2000, cols=len(headers) + 2)
+        archive_ws.append_row(headers)
+        print(f"    [Archive] Created tab '{archive_name}'")
+
+    archive_ws.append_rows(old_rows)
+
+    # Rebuild source tab: keep header + non-old rows
+    keep_data = [rows[i - 1] for i in keep_row_indices]  # 0-indexed in rows list
+    # Clear all data rows and rewrite
+    if len(rows) > 1:
+        ws.delete_rows(2, len(rows))
+    if keep_data:
+        ws.append_rows(keep_data)
+
+    print(f"    [Archive] Moved {len(old_rows)} rows from '{tab_name}' → '{archive_name}'")
+    return len(old_rows)
+
+
+def read_lift_history(limit: int = 80, after_date: date = None) -> list[dict]:
+    """
+    Read last N rows of Lift History.
+    after_date: if provided, only return rows on or after that date.
+    Warns if tab exceeds 500 rows (scalability indicator).
+    """
     sheet = _get_memory_sheet()
     ws = _get_tab(sheet, TAB_LIFT_HISTORY)
     rows = ws.get_all_values()
     if len(rows) <= 1:
         return []
 
+    total_data_rows = len(rows) - 1
+    if total_data_rows > 500:
+        print(f"  [ScaleWarning] Lift History has {total_data_rows} rows "
+              f"— consider archiving rows > 1 year old with archive_old_rows()")
+
     headers = rows[0]
     entries = []
     for row in rows[1:]:
         if not any(row):
             continue
         entry = dict(zip(headers, row + [""] * (len(headers) - len(row))))
+        if after_date:
+            try:
+                row_date = datetime.strptime(entry.get("Date", "")[:10], "%Y-%m-%d").date()
+                if row_date < after_date:
+                    continue
+            except (ValueError, TypeError):
+                pass
         entries.append(entry)
 
     return entries[-limit:]
 
 
-def read_health_log(limit: int = 30) -> list[dict]:
-    """Read last N rows of Health Log."""
+def read_health_log(limit: int = 30, after_date: date = None) -> list[dict]:
+    """
+    Read last N rows of Health Log.
+    after_date: if provided, only return rows on or after that date.
+    Warns if tab exceeds 500 rows.
+    """
     sheet = _get_memory_sheet()
     ws = _get_tab(sheet, TAB_HEALTH_LOG)
     rows = ws.get_all_values()
     if len(rows) <= 1:
         return []
 
+    total_data_rows = len(rows) - 1
+    if total_data_rows > 500:
+        print(f"  [ScaleWarning] Health Log has {total_data_rows} rows "
+              f"— consider archiving rows > 1 year old with archive_old_rows()")
+
     headers = rows[0]
     entries = []
     for row in rows[1:]:
         if not any(row):
             continue
         entry = dict(zip(headers, row + [""] * (len(headers) - len(row))))
+        if after_date:
+            try:
+                row_date = datetime.strptime(entry.get("Date", "")[:10], "%Y-%m-%d").date()
+                if row_date < after_date:
+                    continue
+            except (ValueError, TypeError):
+                pass
         entries.append(entry)
 
     return entries[-limit:]
@@ -993,6 +1106,7 @@ def read_all() -> dict:
         "coach_state": read_coach_state(),
         "athlete_preferences": read_athlete_preferences(),
         "tracked_lifts": read_tracked_lifts(),
+        "commitments": read_commitments(),
     }
 
 
@@ -1316,6 +1430,85 @@ def sync_health_log(program_data: dict) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
+# Commitments — explicit coach promises tracked to completion
+# ---------------------------------------------------------------------------
+
+def read_commitments(status_filter: str = "OPEN") -> list[dict]:
+    """
+    Read Commitments. status_filter=None returns all, 'OPEN' returns pending items.
+    Returns list of dicts with keys: Date Added, Commitment, Due Date, Status, Resolved Date, Notes.
+    """
+    sheet = _get_memory_sheet()
+    try:
+        ws = sheet.worksheet(TAB_COMMITMENTS)
+    except gspread.WorksheetNotFound:
+        return []
+    rows = ws.get_all_values()
+    if len(rows) <= 1:
+        return []
+    headers = rows[0]
+    entries = []
+    for row in rows[1:]:
+        if not any(row):
+            continue
+        entry = dict(zip(headers, row + [""] * (len(headers) - len(row))))
+        if entry.get("Commitment", "").startswith("#"):
+            continue
+        if status_filter is None or entry.get("Status", "OPEN").upper() == status_filter.upper():
+            entries.append(entry)
+    return entries
+
+
+def append_commitment(commitment: str, due_date: str = "", notes: str = "") -> None:
+    """
+    Log a new coach commitment (an explicit promise to follow up).
+    commitment: what the coach promised, e.g. "Check if Nacho's elbow recovered by next week"
+    due_date: YYYY-MM-DD when this should be followed up, blank = open-ended
+    """
+    sheet = _get_memory_sheet()
+    try:
+        ws = sheet.worksheet(TAB_COMMITMENTS)
+    except gspread.WorksheetNotFound:
+        ws = sheet.add_worksheet(title=TAB_COMMITMENTS, rows=500, cols=len(COMMITMENTS_HEADERS) + 2)
+        ws.append_row(COMMITMENTS_HEADERS)
+    today = str(date.today())
+    ws.append_row([today, commitment, due_date, "OPEN", "", notes])
+
+
+def resolve_commitment(commitment_substring: str, resolved_notes: str = "") -> bool:
+    """
+    Mark a commitment as RESOLVED by substring match on the Commitment text.
+    Returns True if found and resolved.
+    """
+    sheet = _get_memory_sheet()
+    try:
+        ws = sheet.worksheet(TAB_COMMITMENTS)
+    except gspread.WorksheetNotFound:
+        return False
+    rows = ws.get_all_values()
+    if len(rows) <= 1:
+        return False
+    headers = rows[0]
+    commit_col = headers.index("Commitment") + 1 if "Commitment" in headers else 2
+    status_col = headers.index("Status") + 1 if "Status" in headers else 4
+    resolved_col = headers.index("Resolved Date") + 1 if "Resolved Date" in headers else 5
+    notes_col = headers.index("Notes") + 1 if "Notes" in headers else 6
+
+    needle = commitment_substring.lower()
+    today = str(date.today())
+    for i, row in enumerate(rows[1:], start=2):
+        if len(row) >= commit_col and needle in row[commit_col - 1].lower():
+            current_status = row[status_col - 1].upper().strip() if len(row) >= status_col else ""
+            if current_status != "RESOLVED":
+                ws.update_cell(i, status_col, "RESOLVED")
+                ws.update_cell(i, resolved_col, today)
+                if resolved_notes:
+                    ws.update_cell(i, notes_col, resolved_notes)
+                return True
+    return False
+
+
+# ---------------------------------------------------------------------------
 # Setup: create the Coach Memory Sheet structure
 # ---------------------------------------------------------------------------
 
@@ -1394,6 +1587,11 @@ def setup_memory_sheet() -> None:
     ensure_tab(TAB_ATHLETE_PREFS, ATHLETE_PREFS_HEADERS, [
         ["# Explicit preferences from athlete. Category: OUTPUT | TOPICS | STYLE | SCHEDULE", "", "", ""],
         ["# Examples: OUTPUT | no weekly charts | Telegram | 2026-03-07", "", "", ""],
+    ])
+
+    ensure_tab(TAB_COMMITMENTS, COMMITMENTS_HEADERS, [
+        ["# Explicit coach promises to follow up. Status: OPEN|RESOLVED|DEFERRED.", "", "", "", "", ""],
+        ["# Added automatically when coach says 'I'll check X' or 'I'll follow up on Y'.", "", "", "", "", ""],
     ])
 
     # Tracked Lifts: seed with current KEY_LIFTS if tab doesn't exist yet

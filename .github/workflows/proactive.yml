@@ -2,8 +2,10 @@ name: Proactive Check-in
 
 on:
   schedule:
-    - cron: '0 8 * * *'   # 09:00 CET (10:00 CEST) — morning check
-    - cron: '0 14 * * *'  # 15:00 CET (16:00 CEST) — afternoon check
+    - cron: '0 7 * * *'   # 08:00 CET (09:00 CEST) — pre-session brief
+    - cron: '0 8 * * *'   # 09:00 CET (10:00 CEST) — morning proactive check
+    - cron: '0 13 * * *'  # 14:00 CET (15:00 CEST) — post-session check-in
+    - cron: '0 14 * * *'  # 15:00 CET (16:00 CEST) — afternoon proactive check
   workflow_dispatch:
 
 jobs:
@@ -31,10 +33,22 @@ jobs:
           echo "$GOOGLE_CREDENTIALS_B64" | base64 -d > config/credentials.json
           echo "$GOOGLE_TOKEN_B64" | base64 -d > config/token.json
 
-      - name: Run proactive check-in
+      - name: Run session brief or proactive check-in or post-session check
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          PROGRAM_SHEET_ID: ${{ secrets.PROGRAM_SHEET_ID }}
           MEMORY_SHEET_ID: ${{ secrets.MEMORY_SHEET_ID }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: python src/run_coach.py --proactive
+        run: |
+          HOUR=$(date -u +%H)
+          if [ "$HOUR" = "07" ]; then
+            echo "07:00 UTC — running pre-session brief..."
+            python src/run_coach.py --brief
+          elif [ "$HOUR" = "13" ]; then
+            echo "13:00 UTC — running post-session check-in..."
+            python src/run_coach.py --post-session
+          else
+            echo "${HOUR}:00 UTC — running proactive check-in..."
+            python src/run_coach.py --proactive
+          fi

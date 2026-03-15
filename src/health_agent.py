@@ -232,3 +232,56 @@ Respond with either the Telegram message text or NO_OUTREACH."""
     if result.upper().startswith("NO_OUTREACH") or result.upper() == "NO":
         return ""
     return result
+
+
+def generate_nutrition_summary(health_log: list, training_load: dict = None,
+                                athlete_profile: str = "") -> str:
+    """
+    Generate a NUTRITION Coach State domain summary.
+    Called weekly from write_coach_state_summaries().
+
+    Analyzes health log trends (food quality, bodyweight, sleep) alongside training
+    load (volume, fatigue) to produce actionable nutrition recommendations.
+
+    Returns a 2-3 sentence summary for storage in Coach State as NUTRITION domain.
+    Budget: Haiku, max 300 tokens.
+    """
+    if not health_log:
+        return ""
+
+    # Summarize health data
+    log_text = _format_health_log(health_log, limit=14)
+
+    # Training load summary
+    load_text = ""
+    if training_load:
+        tsb = training_load.get("TSB")
+        ctl = training_load.get("CTL")
+        atl = training_load.get("ATL")
+        if tsb is not None:
+            load_text = f"Current training load: TSB={tsb:+.1f}, CTL={ctl:.1f}, ATL={atl:.1f}"
+            if training_load.get("deload_recommended"):
+                load_text += " — DELOAD week recommended"
+
+    prompt = (
+        f"You are {ATHLETE_NAME}'s nutrition and health coach.\n\n"
+        f"ATHLETE PROFILE: {athlete_profile[:300] if athlete_profile else 'Insulin resistance, golfer elbow, finance professional, trains 4x/week'}\n\n"
+        f"RECENT HEALTH LOG (14 days):\n{log_text}\n\n"
+        f"TRAINING LOAD: {load_text or 'not available'}\n\n"
+        f"Write 2-3 sentences covering: current carb timing recommendations given training load, "
+        f"protein target adequacy based on bodyweight trend, and one actionable nutrition focus for "
+        f"this week. Be specific to the data — don't give generic advice. "
+        f"Note insulin resistance implications when relevant."
+    )
+
+    try:
+        client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+        response = client.messages.create(
+            model=HAIKU_MODEL,
+            max_tokens=300,
+            messages=[{"role": "user", "content": prompt}]
+        )
+        return response.content[0].text.strip()
+    except Exception as e:
+        print(f"  Nutrition summary generation failed (non-fatal): {e}")
+        return ""

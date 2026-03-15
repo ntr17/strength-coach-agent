@@ -3,7 +3,7 @@ Builds the Claude prompt from all available context.
 System prompt is stable. User message is assembled dynamically each run.
 """
 
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Optional
 
 from config import ATHLETE_NAME, KEY_LIFTS, compute_current_week, resolve_program_start_date
@@ -37,6 +37,7 @@ The athlete can shift channels at any time: "reach me on Telegram", "send progra
 - [FOLLOWUP: question?] — a question you want answered. If it ends with "?", it will be sent to Telegram automatically. Don't ask the same question twice across channels.
 - [RESOLVED: text matching what you were tracking] — close an open item
 - [TELEGRAM: brief message] — send a proactive Telegram message right now (alerts, reactions, quick check-ins)
+- [COMMIT: what you promised to follow up on | due: YYYY-MM-DD] — log an explicit promise. Use when you say "I'll check X next week", "I'll revisit Y if Z happens", "I'll follow up on your elbow". Due date is optional.
 
 **Email format:**
 - Natural prose. No section headers. No bullet lists unless they genuinely help.
@@ -741,7 +742,7 @@ def _format_coach_state(coach_state: dict) -> str:
     if not coach_state:
         return ""
     domain_order = ["PROGRAM", "SQUAT", "BENCH", "DEADLIFT", "OHP", "HEALTH", "SCHEDULE",
-                    "LIFESTYLE", "GOALS"]
+                    "NUTRITION", "SESSION_QUALITY", "LIFESTYLE", "GOALS", "ATHLETE_MODEL"]
     lines = []
     seen = set()
     for domain in domain_order:
@@ -774,6 +775,89 @@ def _format_athlete_preferences(prefs: list[dict]) -> str:
         source = p.get("Source", "").strip()
         if pref and not pref.startswith("#"):
             lines.append(f"  [{cat}] {pref}" + (f" (from {source})" if source else ""))
+    return "\n".join(lines)
+
+
+def _format_commitments(commitments: list[dict]) -> str:
+    """
+    Format open coach commitments for the prompt.
+    These are explicit promises the coach made — they must be followed up on.
+    """
+    open_items = [c for c in commitments
+                  if c.get("Status", "OPEN").upper() == "OPEN"
+                  and not c.get("Commitment", "").startswith("#")]
+    if not open_items:
+        return ""
+    lines = []
+    today = date.today()
+    for c in open_items:
+        text = c.get("Commitment", "").strip()
+        due = c.get("Due Date", "").strip()
+        added = c.get("Date Added", "").strip()
+        overdue = ""
+        if due:
+            try:
+                due_date = datetime.strptime(due[:10], "%Y-%m-%d").date()
+                if due_date < today:
+                    overdue = " [OVERDUE]"
+                elif due_date <= today + timedelta(days=3):
+                    overdue = " [DUE SOON]"
+            except (ValueError, TypeError):
+                pass
+        lines.append(
+            f"  • {text}{overdue}"
+            + (f" (due: {due})" if due else f" (committed: {added})")
+        )
+    return "\n".join(lines)
+
+
+def _extract_travel_context(memory_data: dict) -> str:
+    """
+    Dynamically extract the athlete's current travel/schedule context from:
+    1. Coach Focus items with travel keywords
+    2. Life Context entries mentioning travel
+    3. Coach State SCHEDULE domain
+
+    Returns a concise travel context string, or "" if no travel signals found.
+    This replaces any hardcoded "travels Mon-Thu biweekly" assumption.
+    """
+    travel_keywords = {"travel", "trip", "flight", "hotel", "away", "business", "viaje",
+                       "volar", "vuelo", "hotel", "oficina", "madrid", "london", "paris"}
+    lines = []
+
+    # Check Coach State SCHEDULE domain
+    coach_state = memory_data.get("coach_state", {})
+    schedule_state = coach_state.get("SCHEDULE", {}).get("summary", "")
+    if schedule_state and any(kw in schedule_state.lower() for kw in travel_keywords):
+        lines.append(f"  Schedule: {schedule_state}")
+
+    # Check recent Life Context
+    life_ctx = memory_data.get("life_context", [])
+    for entry in life_ctx[-10:]:
+        ctx = entry.get("context", "").lower()
+        if any(kw in ctx for kw in travel_keywords):
+            lines.append(f"  [{entry.get('date', '')}] {entry.get('context', '')[:120]}")
+
+    # Check Coach Focus OPEN items with travel keywords
+    coach_focus = memory_data.get("coach_focus", [])
+    for item in coach_focus:
+        if item.get("Status", "") != "OPEN":
+            continue
+        text = item.get("Item", "").lower()
+        if any(kw in text for kw in travel_keywords):
+            lines.append(f"  [{item.get('Category', '')}] {item.get('Item', '')[:120]}")
+
+    # Check recent Telegram log for travel mentions
+    tg_log = memory_data.get("telegram_log", [])
+    travel_mentions = []
+    for entry in reversed(tg_log[-30:]):
+        msg = entry.get("Message", "").lower()
+        if any(kw in msg for kw in travel_keywords) and entry.get("Direction", "") == "IN":
+            travel_mentions.append(f"  [{entry.get('Date', '')}] {entry.get('Message', '')[:100]}")
+            if len(travel_mentions) >= 3:
+                break
+    lines.extend(reversed(travel_mentions))
+
     return "\n".join(lines)
 
 
@@ -981,6 +1065,16 @@ def build_prompt(program_data: dict, memory_data: dict,
             + focus_text
         )
 
+    # --- Commitments (explicit promises you made — must follow up on these) ---
+    commitments = memory_data.get("commitments", [])
+    commit_text = _format_commitments(commitments)
+    if commit_text:
+        sections.append(
+            "YOUR OPEN COMMITMENTS (promises you made explicitly — check each one today, "
+            "mark resolved with [RESOLVED: commitment text] or follow up if not yet done)\n"
+            + commit_text
+        )
+
     # --- Questions found in notes (surface early for Claude) ---
     questions = _extract_questions(program_data)
     if questions:
@@ -1157,8 +1251,6 @@ def build_proactive_prompt(memory_data: dict, program_data: dict = None) -> tupl
     Claude reads memory + today's program schedule and decides whether to reach out.
     Returns (system_prompt, user_message).
     """
-    from datetime import timedelta
-
     today = date.today()
     weekday_name = today.strftime("%A")  # Monday, Tuesday, etc.
     hour_utc = datetime.utcnow().hour
@@ -1267,6 +1359,15 @@ def build_proactive_prompt(memory_data: dict, program_data: dict = None) -> tupl
         if scheduled_lines:
             today_schedule = f"Week {week_num} schedule:\n" + "\n".join(scheduled_lines)
 
+    # --- Dynamic travel context ---
+    travel_ctx = _extract_travel_context(memory_data)
+    travel_section = f"\n## CURRENT TRAVEL / SCHEDULE CONTEXT\n{travel_ctx}" if travel_ctx else ""
+
+    # --- Open commitments ---
+    commitments = memory_data.get("commitments", [])
+    commit_text = _format_commitments(commitments)
+    commit_section = f"\n## YOUR OPEN COMMITMENTS (promises to follow up on)\n{commit_text}" if commit_text else ""
+
     user_message = f"""TODAY: {today.strftime('%A, %B %d, %Y')} ({time_of_day})
 
 ## YOUR COMPRESSED KNOWLEDGE (Coach State)
@@ -1285,7 +1386,7 @@ def build_proactive_prompt(memory_data: dict, program_data: dict = None) -> tupl
 {tg_text}
 
 ## ACTIVE COMMANDS (includes PENDING_CATCHUP, OPEN_QUESTION, PENDING_PROPOSAL)
-{cmd_text}
+{cmd_text}{travel_section}{commit_section}
 
 ---
 Today is {weekday_name}. Time of day: {time_of_day}. Should you reach out right now?

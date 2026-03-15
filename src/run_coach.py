@@ -20,7 +20,7 @@ sys.stdout.reconfigure(encoding="utf-8")
 
 import anthropic
 
-from config import ANTHROPIC_API_KEY, CLAUDE_MODEL, KEY_LIFTS, compute_current_week, resolve_program_start_date
+from config import ANTHROPIC_API_KEY, ATHLETE_NAME, CLAUDE_MODEL, KEY_LIFTS, compute_current_week, resolve_program_start_date
 
 
 # ---------------------------------------------------------------------------
@@ -47,6 +47,10 @@ def parse_args():
                         help="Evening nudge: if today's session is unlogged, send a Telegram reminder.")
     parser.add_argument("--export", action="store_true",
                         help="Export all Coach Memory tabs to JSON (stdout or file).")
+    parser.add_argument("--brief", action="store_true",
+                        help="Pre-session brief: send targeted session prep via Telegram.")
+    parser.add_argument("--post-session", action="store_true",
+                        help="Post-session check-in: acknowledge logged session or ask how it went.")
     return parser.parse_args()
 
 
@@ -241,6 +245,12 @@ def write_coach_focus_updates(updates: list[dict]) -> None:
                 found = update_coach_focus_status(item, "RESOLVED", last_mentioned=today)
                 if not found:
                     print(f"    [Focus] RESOLVED marker didn't match any open item: '{item[:60]}'")
+                # Also attempt to resolve any matching Commitment
+                try:
+                    from memory import resolve_commitment
+                    resolve_commitment(item[:80])
+                except Exception:
+                    pass
             else:
                 append_coach_focus(category, item, last_mentioned=today)
                 print(f"    [Focus] {category}: {item[:80]}")
@@ -345,7 +355,7 @@ def write_coach_state_summaries(
     """
     Write compressed domain summaries to the Coach State tab.
     Called at the end of each run so next run starts from a bounded context.
-    Pure Python — uses projection data + program data, no LLM call.
+    Mostly pure Python; NUTRITION domain uses a lightweight Haiku call.
     """
     try:
         from memory import upsert_coach_state
@@ -417,13 +427,29 @@ def write_coach_state_summaries(
                          "HIGH" if bw_proj else "MEDIUM", dry_run)
 
         # --- SCHEDULE domain ---
-        current_week = program_data.get("current_week", {})
-        sessions = current_week.get("sessions", [])
+        current_week_data = program_data.get("current_week", {})
+        sessions = current_week_data.get("sessions", [])
         if sessions:
             done = sum(1 for s in sessions if s.get("completed"))
             total = len(sessions)
             sched_summary = f"Week {week_num}: {done}/{total} days completed"
             _write_state(upsert_coach_state, "SCHEDULE", sched_summary, "HIGH", dry_run)
+
+        # --- NUTRITION domain (Haiku, weekly-ish — only on is_weekly_summary days) ---
+        # Skip on non-weekly runs to save budget (this is a derived insight, not critical daily)
+        try:
+            from health_agent import generate_nutrition_summary
+            health_log_for_nutrition = memory_data.get("health_log", [])
+            if health_log_for_nutrition:
+                fatigue = projections.get("fatigue") if projections else None
+                athlete_profile = memory_data.get("athlete_profile", "")
+                nutrition_summary = generate_nutrition_summary(
+                    health_log_for_nutrition, fatigue, athlete_profile
+                )
+                if nutrition_summary:
+                    _write_state(upsert_coach_state, "NUTRITION", nutrition_summary, "MEDIUM", dry_run)
+        except Exception as e:
+            print(f"  NUTRITION Coach State write failed (non-fatal): {e}")
 
     except Exception as e:
         print(f"  Coach State write failed (non-fatal): {e}")
@@ -455,6 +481,31 @@ def check_for_write_back_proposals(email_text: str) -> str:
             if "want me to update" in s.lower():
                 return s.strip()
     return ""
+
+
+def _extract_commit_markers(email_text: str) -> tuple[str, list[dict]]:
+    """
+    Extract [COMMIT: description | due: YYYY-MM-DD] markers from email text.
+    Returns (clean_text, list of {commitment, due_date} dicts).
+    Format: [COMMIT: I'll check your elbow recovery next week | due: 2026-03-22]
+    The due: part is optional.
+    """
+    import re
+    commits = []
+    pattern = r'\[COMMIT:\s*(.*?)\]'
+    for match in re.finditer(pattern, email_text, re.IGNORECASE | re.DOTALL):
+        raw = match.group(1).strip()
+        due_date = ""
+        if " | due: " in raw.lower():
+            parts = raw.rsplit(" | due: ", 1)
+            commitment = parts[0].strip()
+            due_date = parts[1].strip()
+        else:
+            commitment = raw
+        if commitment:
+            commits.append({"commitment": commitment, "due_date": due_date})
+    clean = re.sub(pattern, '', email_text, flags=re.IGNORECASE | re.DOTALL).strip()
+    return clean, commits
 
 
 def log_pending_proposal(proposal_text: str, existing_commands: list[dict]) -> None:
@@ -565,7 +616,7 @@ def run_think(week_num: int = None, dry_run: bool = False):
     """Run the strategic planning pass only. No email sent."""
     from sheets import read_program_data
     from memory import read_all
-    from planner import run_planning_pass
+    from planner import run_planning_pass, run_telegram_summarization
 
     if week_num is None:
         week_num = compute_current_week(resolve_program_start_date())
@@ -575,8 +626,248 @@ def run_think(week_num: int = None, dry_run: bool = False):
 
     program_data = read_program_data(week_num=week_num)
     memory_data = read_all()
+
+    # 1. Summarize old Telegram log entries → TELEGRAM_HISTORY Coach State
+    print("  Compressing Telegram log history...")
+    run_telegram_summarization(memory_data, dry_run=dry_run)
+
+    # 2. Update ATHLETE_MODEL Coach State — quarterly psychological model
+    _update_athlete_model(memory_data, dry_run=dry_run)
+
+    # 3. Strategic planning pass
     run_planning_pass(program_data, memory_data, week_num, dry_run=dry_run)
     print("Planning pass complete.")
+
+
+def _update_athlete_model(memory_data: dict, dry_run: bool = False) -> None:
+    """
+    Update the ATHLETE_MODEL Coach State domain — the coach's psychological model
+    of the athlete. Called quarterly (via run_think). Budget-conscious: Haiku, max 400 tokens.
+    Captures: response to feedback, psychological patterns, known weaknesses, what motivates.
+    """
+    from memory import read_coach_state, upsert_coach_state
+
+    coach_state = memory_data.get("coach_state") or read_coach_state()
+    existing_model = coach_state.get("ATHLETE_MODEL", {}).get("summary", "")
+    last_updated = coach_state.get("ATHLETE_MODEL", {}).get("last_updated", "")
+
+    # Only update quarterly (every ~90 days) to save budget
+    if last_updated:
+        try:
+            from datetime import datetime as _dt
+            days_since = (date.today() - _dt.strptime(last_updated[:10], "%Y-%m-%d").date()).days
+            if days_since < 85:
+                print(f"  ATHLETE_MODEL: last updated {days_since}d ago — skipping (quarterly update).")
+                return
+        except (ValueError, TypeError):
+            pass
+
+    # Build input context
+    profile = memory_data.get("athlete_profile", "")
+    coach_log = memory_data.get("coach_log", [])
+    focus = memory_data.get("coach_focus", [])
+    planning_notes = memory_data.get("planning_notes", [])
+
+    log_snippets = "\n".join(
+        f"  [{e.get('Date', '')}] {e.get('Key Observations', '')[:150]}"
+        for e in coach_log[-20:]
+    )
+    focus_snippets = "\n".join(
+        f"  [{f.get('Category', '')}] {f.get('Item', '')[:120]}"
+        for f in focus[-15:]
+        if f.get("Status", "") == "OPEN"
+    )
+    plan_snippet = planning_notes[-1].get("notes", "")[:400] if planning_notes else ""
+
+    prompt = (
+        f"Based on coaching history, build a psychological model of this athlete.\n\n"
+        f"ATHLETE PROFILE:\n{profile[:400]}\n\n"
+        f"RECENT COACH OBSERVATIONS:\n{log_snippets}\n\n"
+        f"CURRENT WATCH LIST:\n{focus_snippets}\n\n"
+        f"LAST PLANNING NOTES:\n{plan_snippet}\n\n"
+        f"EXISTING MODEL (update, don't discard):\n{existing_model or '(none yet)'}\n\n"
+        f"Output 4-6 sentences covering: how the athlete responds to direct feedback, "
+        f"known psychological patterns (excuses, motivation triggers, avoidance), "
+        f"what coaching approach works best, weaknesses to keep watching."
+    )
+
+    if dry_run:
+        print("  [DRY RUN] Would update ATHLETE_MODEL Coach State.")
+        return
+
+    try:
+        client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+        result = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=400,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        model_text = result.content[0].text.strip()
+        upsert_coach_state("ATHLETE_MODEL", model_text, "MEDIUM")
+        print(f"  ATHLETE_MODEL Coach State written ({len(model_text)} chars).")
+    except Exception as e:
+        print(f"  ATHLETE_MODEL update failed (non-fatal): {e}")
+
+
+def detect_rpe_patterns(lift_history: list[dict],
+                        existing_commands: list[dict] = None) -> list[dict]:
+    """
+    Scan Lift History notes for RPE data (written as "RPE N" or "@RPEN" by the processor).
+    If 3+ consecutive sessions of a lift show RPE consistently >= 2 above/below a neutral
+    baseline (RPE 7), generate auto-regulation proposals.
+
+    Returns list of {lift, signal, avg_rpe, count, proposal} dicts.
+    Budget: pure Python, zero LLM calls.
+    """
+    import re as _re
+
+    RPE_NEUTRAL = 7.0
+    OVERLOAD_THRESHOLD = 1.5   # consistently above neutral → too heavy
+    UNDERLOAD_THRESHOLD = 1.5  # consistently below neutral → too light
+    MIN_SESSIONS = 3
+
+    lift_rpe: dict[str, list[float]] = {}
+
+    for row in lift_history:
+        exercise = row.get("Exercise", "").strip()
+        if not exercise:
+            continue
+        notes = (row.get("Notes", "") or "").strip()
+        # Match "RPE 8", "RPE8", "@RPE8.5", "@RPE 8"
+        rpe_match = _re.search(r"@?RPE\s*(\d+(?:\.\d+)?)", notes, _re.IGNORECASE)
+        if rpe_match:
+            try:
+                rpe_val = float(rpe_match.group(1))
+                lift_rpe.setdefault(exercise, []).append(rpe_val)
+            except (ValueError, TypeError):
+                pass
+
+    proposals = []
+    existing_proposal_text = " ".join(
+        c.get("Value", "").lower() for c in (existing_commands or [])
+        if c.get("Command", "").upper() == "PENDING_PROPOSAL"
+        and c.get("Applied", "").upper() not in ("Y", "DECLINED")
+    )
+
+    for exercise, rpe_values in lift_rpe.items():
+        if len(rpe_values) < MIN_SESSIONS:
+            continue
+        recent = rpe_values[-MIN_SESSIONS:]
+        avg = sum(recent) / len(recent)
+        diff = avg - RPE_NEUTRAL
+
+        if exercise.lower() in existing_proposal_text:
+            continue  # proposal already pending
+
+        if diff >= OVERLOAD_THRESHOLD:
+            proposals.append({
+                "lift": exercise,
+                "signal": "overload",
+                "avg_rpe": round(avg, 1),
+                "count": len(recent),
+                "proposal": (
+                    f"RPE auto-regulation for {exercise}: avg RPE {avg:.1f} over last "
+                    f"{len(recent)} sessions (neutral=7, yours={avg:.1f} — too heavy). "
+                    f"Propose reducing working weight by 5% to bring RPE back to 7-8 range. "
+                    f"Want me to update the program sheet?"
+                ),
+            })
+        elif diff <= -UNDERLOAD_THRESHOLD:
+            proposals.append({
+                "lift": exercise,
+                "signal": "underload",
+                "avg_rpe": round(avg, 1),
+                "count": len(recent),
+                "proposal": (
+                    f"RPE auto-regulation for {exercise}: avg RPE {avg:.1f} over last "
+                    f"{len(recent)} sessions (neutral=7, yours={avg:.1f} — too light). "
+                    f"Propose increasing working weight by 2.5-5% to create adequate stimulus. "
+                    f"Want me to update the program sheet?"
+                ),
+            })
+
+    return proposals
+
+
+def compute_session_quality(program_data: dict, lift_history: list[dict]) -> dict:
+    """
+    Compute a session quality score for the most recent completed session.
+    Pure Python — no LLM calls.
+
+    Score = completion_pct * 0.4 + rpe_alignment * 0.4 + mood_modifier * 0.2
+    Where:
+      completion_pct: fraction of exercises done (0-1)
+      rpe_alignment: 1 - abs(avg_rpe - 7.5) / 7.5 (how close to ideal RPE zone 7-8)
+      mood_modifier: detected from session notes (positive = 1.0, neutral = 0.7, negative = 0.4)
+
+    Returns dict with keys: score (0-100), completion_pct, rpe_alignment, mood, session_label.
+    """
+    import re as _re
+
+    POSITIVE_WORDS = {"great", "good", "strong", "solid", "easy", "felt good", "best"}
+    NEGATIVE_WORDS = {"bad", "tired", "exhausted", "failed", "struggled", "sick", "hurt"}
+
+    current_week = program_data.get("current_week", {})
+    sessions = []
+    for day in current_week.get("days", []):
+        if any(ex.get("done") for ex in day.get("exercises", [])):
+            sessions.append(day)
+
+    if not sessions:
+        return {}
+
+    # Use the most recently completed session
+    last_session = sessions[-1]
+    exercises = last_session.get("exercises", [])
+    session_label = last_session.get("label", "session")
+
+    # Completion %
+    total = len(exercises)
+    done = sum(1 for ex in exercises if ex.get("done"))
+    completion_pct = done / total if total else 0
+
+    # RPE alignment: gather from lift_history for this session's exercises
+    rpe_values = []
+    session_day = last_session.get("label", "")
+    for row in reversed(lift_history[-30:]):
+        if session_day.lower() in row.get("Day", "").lower():
+            notes = (row.get("Notes", "") or "").strip()
+            m = _re.search(r"@?RPE\s*(\d+(?:\.\d+)?)", notes, _re.IGNORECASE)
+            if m:
+                try:
+                    rpe_values.append(float(m.group(1)))
+                except (ValueError, TypeError):
+                    pass
+
+    rpe_alignment = 0.7  # neutral default if no RPE data
+    if rpe_values:
+        avg_rpe = sum(rpe_values) / len(rpe_values)
+        rpe_alignment = max(0.0, 1.0 - abs(avg_rpe - 7.5) / 7.5)
+
+    # Mood modifier from session notes
+    session_note = " ".join(
+        (ex.get("session_note") or ex.get("notes") or "").lower()
+        for ex in exercises
+    )
+    mood = "neutral"
+    if any(w in session_note for w in POSITIVE_WORDS):
+        mood = "positive"
+        mood_mod = 1.0
+    elif any(w in session_note for w in NEGATIVE_WORDS):
+        mood = "negative"
+        mood_mod = 0.4
+    else:
+        mood_mod = 0.7
+
+    score = round((completion_pct * 0.4 + rpe_alignment * 0.4 + mood_mod * 0.2) * 100)
+
+    return {
+        "score": score,
+        "completion_pct": round(completion_pct * 100),
+        "rpe_alignment": round(rpe_alignment * 100),
+        "mood": mood,
+        "session_label": session_label,
+    }
 
 
 def run_proactive(dry_run: bool = False):
@@ -589,7 +880,8 @@ def run_proactive(dry_run: bool = False):
     """
     from memory import (read_coach_state, read_coach_focus, read_athlete_preferences,
                         read_telegram_log, read_commands, read_health_log,
-                        read_athlete_profile, log_coach_run)
+                        read_athlete_profile, read_life_context, read_commitments,
+                        log_coach_run)
     from prompt import build_proactive_prompt
 
     today = date.today()
@@ -604,6 +896,8 @@ def run_proactive(dry_run: bool = False):
         "telegram_log":        read_telegram_log(),
         "commands":            read_commands(),
         "health_log":          health_log,
+        "life_context":        read_life_context(limit=15),   # for travel context detection
+        "commitments":         read_commitments(),
     }
 
     # Load current week so proactive pass knows what's scheduled today
@@ -1016,6 +1310,46 @@ def run(week_num: int = None, dry_run: bool = False, no_sync: bool = False,
     except Exception as e:
         print(f"  Outcome learning loop failed (non-fatal): {e}")
 
+    # 9c. RPE auto-regulation: scan lift history for RPE patterns → auto-proposals
+    print("  Checking RPE patterns...")
+    try:
+        rpe_proposals = detect_rpe_patterns(
+            lift_history=lift_history,
+            existing_commands=memory_data.get("commands", []),
+        )
+        if rpe_proposals:
+            print(f"    → {len(rpe_proposals)} RPE auto-regulation proposal(s)")
+            if not dry_run and not no_sync:
+                existing_commands = memory_data.get("commands", [])
+                for p in rpe_proposals:
+                    log_pending_proposal(p["proposal"], existing_commands)
+                    print(f"    [RPE] {p['lift']}: {p['signal']} (avg RPE {p['avg_rpe']})")
+            elif dry_run:
+                for p in rpe_proposals:
+                    print(f"    [DRY RUN] RPE {p['signal']}: {p['proposal'][:80]}")
+        else:
+            print("    → No RPE auto-regulation needed")
+    except Exception as e:
+        print(f"  RPE pattern check failed (non-fatal): {e}")
+
+    # 9d. Session quality score: pure Python, stored in Coach State
+    print("  Computing session quality score...")
+    try:
+        sq = compute_session_quality(program_data, lift_history)
+        if sq:
+            sq_summary = (
+                f"Score {sq['score']}/100 | completion {sq['completion_pct']}% | "
+                f"RPE alignment {sq['rpe_alignment']}% | mood {sq['mood']} | {sq['session_label']}"
+            )
+            print(f"    → Session quality: {sq_summary}")
+            if not dry_run and not no_sync:
+                from memory import upsert_coach_state
+                upsert_coach_state("SESSION_QUALITY", sq_summary, "HIGH")
+        else:
+            print("    → No completed session found for quality scoring")
+    except Exception as e:
+        print(f"  Session quality scoring failed (non-fatal): {e}")
+
     # 10. Analysis pass (reasoning before writing)
     print("  Running analysis pass...")
     analysis, analysis_usage = generate_analysis(system_prompt, user_message)
@@ -1043,6 +1377,22 @@ def run(week_num: int = None, dry_run: bool = False, no_sync: bool = False,
         elif dry_run:
             for u in focus_updates:
                 print(f"    [DRY RUN] {u['category']}: {u['item'][:80]}")
+
+    # Extract [COMMIT: ...] markers — coach promises logged to Commitments tab
+    email_text, commit_items = _extract_commit_markers(email_text)
+    if commit_items:
+        print(f"  [Commitments]: {len(commit_items)} new commitment(s)")
+        if not no_sync and not dry_run:
+            try:
+                from memory import append_commitment
+                for ci in commit_items:
+                    append_commitment(ci["commitment"], due_date=ci.get("due_date", ""))
+                    print(f"    [Commit] {ci['commitment'][:80]}")
+            except Exception as e:
+                print(f"    Commitment logging failed (non-fatal): {e}")
+        elif dry_run:
+            for ci in commit_items:
+                print(f"    [DRY RUN] COMMIT: {ci['commitment'][:80]}")
 
     # Bridge FOLLOWUP questions to Telegram + log as OPEN_QUESTION for cross-channel tracking
     followup_questions = [
@@ -1175,6 +1525,197 @@ def run(week_num: int = None, dry_run: bool = False, no_sync: bool = False,
         print("  Run logged to Coach Memory.")
 
     return email_text
+
+
+# ---------------------------------------------------------------------------
+# Pre-session brief: sent ~1h before scheduled session
+# ---------------------------------------------------------------------------
+
+def run_brief(dry_run: bool = False):
+    """
+    Pre-session brief: sends a short, focused Telegram message before training.
+    Reads today's scheduled exercises + Coach State to give a targeted prep note.
+    Deduped via LAST_BRIEF Coach State — only fires once per day.
+    """
+    from sheets import read_program_data
+    from memory import read_coach_state, upsert_coach_state, read_commitments
+
+    today = date.today()
+    week_num = compute_current_week(resolve_program_start_date())
+    print(f"[{today}] Running pre-session brief (Week {week_num})...")
+
+    # Dedup: only send once per day
+    coach_state = read_coach_state()
+    last_brief = coach_state.get("LAST_BRIEF", {}).get("summary", "")
+    if last_brief == str(today):
+        print("  Brief: already sent today — skipping.")
+        return
+
+    try:
+        program_data = read_program_data(week_num=week_num, lookback=0)
+    except Exception as e:
+        print(f"  Brief: program load failed: {e}")
+        return
+
+    current_week = program_data.get("current_week", {})
+    today_str = today.strftime("%A")
+    today_sessions = [
+        day for day in current_week.get("days", [])
+        if today_str.lower() in day.get("label", "").lower()
+    ]
+
+    if not today_sessions:
+        print("  Brief: no session scheduled today — skipping.")
+        return
+
+    # Check if session already done
+    already_done = any(
+        any(ex.get("done") for ex in day.get("exercises", []))
+        for day in today_sessions
+    )
+    if already_done:
+        print("  Brief: today's session already logged — skipping.")
+        return
+
+    # Build a concise session overview
+    session_lines = []
+    for day in today_sessions:
+        exercises = day.get("exercises", [])
+        main_lifts = [ex for ex in exercises if ex.get("weight")]
+        for ex in main_lifts[:4]:  # top 4 lifts
+            session_lines.append(
+                f"  {ex.get('name', '?')}: {ex.get('weight', '?')} × {ex.get('sets_reps', '?')}"
+            )
+
+    # Pull relevant Coach State context (squat/bench/deload signal etc.)
+    state_notes = []
+    for domain in ("SQUAT", "BENCH", "DEADLIFT", "OHP", "HEALTH"):
+        s = coach_state.get(domain, {}).get("summary", "")
+        if s:
+            state_notes.append(f"  {domain}: {s[:100]}")
+
+    # Open commitments due today or this week
+    open_commitments = read_commitments("OPEN")
+    commitment_note = ""
+    if open_commitments:
+        commitment_note = " | ".join(c["Commitment"][:80] for c in open_commitments[:2])
+
+    # Build brief via Haiku (cheap, targeted)
+    session_text = "\n".join(session_lines) or "session details unavailable"
+    state_text = "\n".join(state_notes) or ""
+    prompt = (
+        f"You are {ATHLETE_NAME}'s coach. Write a brief (2-3 sentences max) pre-session "
+        f"Telegram message. Be direct and specific — what to focus on today, one cue or reminder.\n\n"
+        f"TODAY'S SESSION ({today_str}):\n{session_text}\n\n"
+        f"COACH STATE CONTEXT:\n{state_text}\n\n"
+        f"Write the message now. No greeting, no sign-off. Short and useful."
+    )
+
+    if dry_run:
+        print(f"  [DRY RUN] Brief would cover: {session_text[:80]}")
+        return
+
+    try:
+        client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+        result = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=150,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        brief_msg = result.content[0].text.strip()
+
+        # Prepend commitment note if present
+        if commitment_note:
+            brief_msg += f"\n\n(Also tracking: {commitment_note})"
+
+        from telegram_utils import send_telegram_message
+        sent = send_telegram_message(brief_msg)
+        if sent:
+            print(f"  Brief sent: {brief_msg[:80]}")
+            upsert_coach_state("LAST_BRIEF", str(today), "HIGH")
+        else:
+            print("  Brief: Telegram send failed.")
+    except Exception as e:
+        print(f"  Brief failed (non-fatal): {e}")
+
+
+# ---------------------------------------------------------------------------
+# Post-session check-in: sent ~90min after expected session end
+# ---------------------------------------------------------------------------
+
+def run_post_session(dry_run: bool = False):
+    """
+    Post-session check-in: sent ~90 minutes after the expected end of today's session.
+    If session was already logged → acknowledge performance briefly.
+    If not logged yet → ask how it went (different from nudge — warmer, not just a reminder).
+    Deduped via LAST_POST_SESSION Coach State.
+    """
+    from sheets import read_program_data
+    from memory import read_coach_state, upsert_coach_state
+
+    today = date.today()
+    week_num = compute_current_week(resolve_program_start_date())
+    print(f"[{today}] Running post-session check-in (Week {week_num})...")
+
+    coach_state = read_coach_state()
+    last_post = coach_state.get("LAST_POST_SESSION", {}).get("summary", "")
+    if last_post == str(today):
+        print("  Post-session: already ran today — skipping.")
+        return
+
+    try:
+        program_data = read_program_data(week_num=week_num, lookback=0)
+    except Exception as e:
+        print(f"  Post-session: program load failed: {e}")
+        return
+
+    current_week = program_data.get("current_week", {})
+    today_str = today.strftime("%A")
+    today_sessions = [
+        day for day in current_week.get("days", [])
+        if today_str.lower() in day.get("label", "").lower()
+    ]
+
+    if not today_sessions:
+        print("  Post-session: no session scheduled today — skipping.")
+        return
+
+    # Check completion state
+    any_complete = any(
+        any(ex.get("done") for ex in day.get("exercises", []))
+        for day in today_sessions
+    )
+
+    session_label = today_sessions[0].get("label", "today's session")
+
+    if any_complete:
+        # Session was logged — get some basic stats and send a quick acknowledgment
+        exercises = today_sessions[0].get("exercises", [])
+        done_count = sum(1 for ex in exercises if ex.get("done"))
+        total_count = len(exercises)
+        msg = (
+            f"Saw you logged {session_label} ({done_count}/{total_count} exercises). "
+            f"How did it feel? Any notes on how the weights moved?"
+        )
+    else:
+        # Session not logged — warm check-in (not a nudge)
+        msg = (
+            f"Hey — did you get {session_label} in today? "
+            f"Even a quick 'yes, done' or 'skipped because X' helps me track things."
+        )
+
+    if dry_run:
+        print(f"  [DRY RUN] Would send post-session: {msg}")
+        return
+
+    try:
+        from telegram_utils import send_telegram_message
+        sent = send_telegram_message(msg)
+        if sent:
+            print(f"  Post-session check-in sent: {msg[:80]}")
+            upsert_coach_state("LAST_POST_SESSION", str(today), "HIGH")
+    except Exception as e:
+        print(f"  Post-session check-in failed (non-fatal): {e}")
 
 
 # ---------------------------------------------------------------------------
@@ -1320,6 +1861,10 @@ if __name__ == "__main__":
             run_proactive(dry_run=args.dry_run)
         elif args.nudge:
             run_nudge(dry_run=args.dry_run)
+        elif args.brief:
+            run_brief(dry_run=args.dry_run)
+        elif getattr(args, "post_session", False):
+            run_post_session(dry_run=args.dry_run)
         elif args.export:
             from datetime import datetime as _dt
             fname = f"coach_export_{_dt.today().strftime('%Y%m%d')}.json"
