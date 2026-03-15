@@ -83,3 +83,29 @@ strength-coach-agent/
 - Code and docs: English
 - User-facing output (emails): Spanish (unless user prefers otherwise)
 - When in doubt: Ask the user
+
+## How I Work (Standing Rules)
+
+These apply every session without being asked:
+
+### Git
+- After any meaningful change, commit and push to `main` automatically
+- Write clear commit messages focused on why, not just what
+- Never push without confirming if the change is destructive or large in scope
+
+### Proactive behavior
+- If I notice a bug, missing env var, broken workflow, or obvious improvement while working — flag it or fix it without waiting to be asked
+- Suggest unit tests when adding logic that could silently break (parsers, calculators, API callers)
+- If a task has risk or ambiguity, state my assumption before acting, not after
+
+### End of session
+- When the user signals they're done (says "bye", "done", "that's it", etc.), run the `/done` checklist automatically:
+  1. Commit and push any uncommitted changes
+  2. Update memory with next steps
+  3. Print a brief summary: what was done, what's next, open questions
+- The user should do as little as possible — I handle the wrap-up
+
+### Memory
+- Save decisions, preferences, and next steps to memory files as they happen
+- Keep the "Next Session Priorities" in MEMORY.md current after every session
+- If the user says "remember X", save it immediately to the right memory file
