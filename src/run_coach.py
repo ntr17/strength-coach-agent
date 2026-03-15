@@ -634,7 +634,21 @@ def run_think(week_num: int = None, dry_run: bool = False):
     # 2. Update ATHLETE_MODEL Coach State — quarterly psychological model
     _update_athlete_model(memory_data, dry_run=dry_run)
 
-    # 3. Strategic planning pass
+    # 3. Archive old rows from Lift History and Health Log (rows > 1 year old)
+    from memory import archive_old_rows, TAB_LIFT_HISTORY, TAB_HEALTH_LOG
+    cutoff = today.replace(year=today.year - 1)
+    if not dry_run:
+        print(f"  Archiving rows older than {cutoff} from Lift History and Health Log...")
+        moved_lifts = archive_old_rows(TAB_LIFT_HISTORY, before_date=cutoff)
+        moved_health = archive_old_rows(TAB_HEALTH_LOG, before_date=cutoff)
+        if moved_lifts or moved_health:
+            print(f"  Archived: {moved_lifts} lift rows, {moved_health} health rows.")
+        else:
+            print("  Nothing to archive yet.")
+    else:
+        print(f"  [dry-run] Would archive rows older than {cutoff} from Lift History and Health Log.")
+
+    # 4. Strategic planning pass
     run_planning_pass(program_data, memory_data, week_num, dry_run=dry_run)
     print("Planning pass complete.")
 
