@@ -637,7 +637,7 @@ def run_think(week_num: int = None, dry_run: bool = False):
     """Run the strategic planning pass only. No email sent."""
     from sheets import read_program_data
     from memory import read_all
-    from planner import run_planning_pass, run_telegram_summarization
+    from planner import run_planning_pass, run_telegram_summarization, run_annual_arc
 
     if week_num is None:
         week_num = compute_current_week(resolve_program_start_date())
@@ -669,7 +669,12 @@ def run_think(week_num: int = None, dry_run: bool = False):
     else:
         print(f"  [dry-run] Would archive rows older than {cutoff} from Lift History and Health Log.")
 
-    # 4. Strategic planning pass
+    # 4. Annual arc — year-level retrospective + 12-month forward view (monthly gate)
+    print("  Updating annual arc...")
+    run_annual_arc(memory_data, dry_run=dry_run)
+
+    # 5. Strategic planning pass (informed by annual arc now in Coach State)
+    memory_data = read_all()  # re-read so planning prompt includes freshly written ANNUAL_ARC
     run_planning_pass(program_data, memory_data, week_num, dry_run=dry_run)
     print("Planning pass complete.")
 

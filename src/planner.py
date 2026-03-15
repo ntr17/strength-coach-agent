@@ -140,6 +140,12 @@ def _build_planning_prompt(program_data: dict, memory_data: dict, week_num: int)
         )
         sections.append(f"PROGRAM HISTORY\n{ph_lines}")
 
+    # Annual arc (cross-program, year-level view — refreshed monthly)
+    coach_state = memory_data.get("coach_state", {})
+    annual_arc = coach_state.get("ANNUAL_ARC", {}).get("summary", "")
+    if annual_arc:
+        sections.append(f"ANNUAL ARC (year-level perspective, updated monthly)\n{annual_arc}")
+
     # Current strategic plan (for continuity)
     strategic_plan = memory_data.get("strategic_plan", [])
     plan_rows = [p for p in strategic_plan if not p.get("Phase", "").startswith("#")]
@@ -352,6 +358,148 @@ def run_telegram_summarization(memory_data: dict, dry_run: bool = False) -> str:
         return summary
     except Exception as e:
         print(f"  Telegram summarization failed (non-fatal): {e}")
+        return ""
+
+
+# ---------------------------------------------------------------------------
+# Annual arc — year-level retrospective + 12-month forward view
+# ---------------------------------------------------------------------------
+
+def run_annual_arc(memory_data: dict, dry_run: bool = False) -> str:
+    """
+    Build (or refresh) the ANNUAL_ARC Coach State domain.
+
+    Covers:
+    - Year-in-review: 1RM gains, key milestones, program completion rates
+    - Cross-program patterns: what worked, what stalled, why
+    - Goal status: are multi-year targets on track?
+    - Next 12 months: recommended program sequence to hit long-term goals
+
+    Gated to once per month (30-day check). Uses Sonnet for quality reasoning.
+    Writes to ANNUAL_ARC Coach State domain, read by the weekly planning prompt.
+    """
+    from datetime import datetime as _dt, timedelta
+    from memory import read_coach_state, upsert_coach_state, read_lift_history
+
+    coach_state = memory_data.get("coach_state") or read_coach_state()
+    existing_arc = coach_state.get("ANNUAL_ARC", {}).get("summary", "")
+    last_updated = coach_state.get("ANNUAL_ARC", {}).get("last_updated", "")
+
+    # Monthly gate — year-level data doesn't change week to week
+    if last_updated and not dry_run:
+        try:
+            days_since = (date.today() - _dt.strptime(last_updated[:10], "%Y-%m-%d").date()).days
+            if days_since < 28:
+                print(f"  Annual arc: last updated {days_since}d ago — skipping (monthly update).")
+                return existing_arc
+        except (ValueError, TypeError):
+            pass
+
+    today = date.today()
+    one_year_ago = str(today.replace(year=today.year - 1))
+
+    # --- Lift history: last 12 months, summarised per lift ---
+    try:
+        lift_history = read_lift_history(after_date=one_year_ago, limit=1000)
+    except Exception:
+        lift_history = memory_data.get("lift_history", [])
+
+    from config import KEY_LIFTS
+    tracked_lifts = memory_data.get("tracked_lifts")
+    main_lifts = [(tl["domain"], tl["match_pattern"]) for tl in tracked_lifts
+                  if tl.get("lift_type", "MAIN") == "MAIN"] if tracked_lifts else KEY_LIFTS
+
+    lift_summary_lines = []
+    for _domain, lift in main_lifts:
+        readings = []
+        for row in lift_history:
+            if lift.lower() in row.get("Exercise", "").lower():
+                try:
+                    readings.append((row.get("Date", ""), float(row.get("Est 1RM", "") or 0)))
+                except (ValueError, TypeError):
+                    pass
+        if readings:
+            readings.sort(key=lambda x: x[0])
+            start_date, start_val = readings[0]
+            end_date, end_val = readings[-1]
+            gain = end_val - start_val
+            lift_summary_lines.append(
+                f"  {lift}: {start_val:.1f}kg [{start_date}] → {end_val:.1f}kg [{end_date}] "
+                f"({gain:+.1f}kg over {len(readings)} sessions)"
+            )
+
+    lift_section = "\n".join(lift_summary_lines) or "  (no lift history in past 12 months)"
+
+    # --- Program history ---
+    prog_history = memory_data.get("program_history", [])
+    prog_lines = []
+    for p in prog_history:
+        prog_lines.append(
+            f"  {p.get('Program', '?')} | {p.get('Start Date', '?')} → {p.get('End Date', '?')} "
+            f"| {p.get('Weeks Completed', '?')} weeks | {p.get('Notes', '')}"
+        )
+    prog_section = "\n".join(prog_lines) or "  (no past programs)"
+
+    # Current program info
+    current_program = ""
+    sheet_registry = memory_data.get("sheet_registry", [])
+    for entry in sheet_registry:
+        if entry.get("Status", "").upper() == "ACTIVE":
+            current_program = (
+                f"{entry.get('Name', '?')} | started {entry.get('Start Date', '?')} "
+                f"| {entry.get('Total Weeks', '?')} weeks"
+            )
+            break
+
+    # Long-term goals
+    lt_goals = memory_data.get("long_term_goals", "")
+    profile = memory_data.get("athlete_profile", "")
+
+    # Previous arc (for continuity)
+    prev_arc_section = (
+        f"PREVIOUS ANNUAL ARC (from {last_updated[:10] if last_updated else 'never'}):\n"
+        f"{existing_arc[:600]}\n" if existing_arc else ""
+    )
+
+    prompt = (
+        f"You are {ATHLETE_NAME}'s long-term strength coach building the annual coaching arc.\n\n"
+        f"TODAY: {today}\n\n"
+        f"ATHLETE PROFILE:\n{profile[:400]}\n\n"
+        f"LONG-TERM GOALS:\n{lt_goals[:400] if lt_goals else '(see athlete profile)'}\n\n"
+        f"CURRENT PROGRAM: {current_program or '(see program history)'}\n\n"
+        f"PROGRAM HISTORY:\n{prog_section}\n\n"
+        f"LIFT TRAJECTORY (last 12 months, est. 1RM):\n{lift_section}\n\n"
+        f"{prev_arc_section}"
+        f"Write a concise annual arc update (5-8 sentences). Cover:\n"
+        f"1. Year-in-review: what were the biggest strength gains and key milestones?\n"
+        f"2. Cross-program patterns: what training approaches worked best, what stalled?\n"
+        f"3. Goal status: for each long-term goal, is the athlete ahead/on-track/behind?\n"
+        f"4. Next 12 months: what program sequence and phase structure will get them to their goals?\n"
+        f"Be specific with numbers. No fluff. This is internal coach thinking."
+    )
+
+    print(f"  Running annual arc update (Sonnet)...")
+    if dry_run:
+        print(f"  [DRY RUN] Would generate annual arc from {len(lift_history)} lift sessions.")
+        return "[DRY RUN] Annual arc would be generated."
+
+    try:
+        client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+        response = client.messages.create(
+            model=CLAUDE_MODEL,
+            max_tokens=600,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        arc_text = response.content[0].text.strip()
+        cost = (
+            response.usage.input_tokens / 1_000_000 * 3.0
+            + response.usage.output_tokens / 1_000_000 * 15.0
+        )
+        upsert_coach_state("ANNUAL_ARC", arc_text, "HIGH")
+        print(f"  ANNUAL_ARC Coach State written ({len(arc_text)} chars, cost ${cost:.4f}).")
+        return arc_text
+    except Exception as e:
+        print(f"  Annual arc failed (non-fatal): {e}")
         return ""
 
 
