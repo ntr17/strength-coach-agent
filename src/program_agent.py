@@ -192,7 +192,8 @@ def _reason_and_decide(request: str, context: str) -> dict:
     )
 
     try:
-        response = client.messages.create(
+        # Extended thinking requires streaming for large max_tokens budgets
+        with client.messages.stream(
             model=REASONING_MODEL,
             max_tokens=MAX_TOKENS,
             thinking={
@@ -201,7 +202,8 @@ def _reason_and_decide(request: str, context: str) -> dict:
             },
             system=_DECISION_SYSTEM,
             messages=[{"role": "user", "content": user_content}]
-        )
+        ) as stream:
+            response = stream.get_final_message()
     except anthropic.BadRequestError:
         # Extended thinking not available for this model version — fallback without it
         print("  [ProgramAgent] Extended thinking not available, falling back to standard call")
