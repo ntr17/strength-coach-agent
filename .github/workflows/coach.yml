@@ -1,11 +1,13 @@
-name: Daily Coaching Email
+name: Coaching Pipeline
 
 on:
   schedule:
-    # 21:00 UTC = 22:00 Spain (CET, winter). Change to 20:00 UTC in summer (CEST).
-    - cron: '0 21 * * *'
-    # 19:00 UTC = 20:00 Spain — evening session completion nudge
+    # 19:00 UTC = 20:00 Spain (CET) / 21:00 Spain (CEST)
+    # Weekdays: evening protocol (plan check Telegram)
+    # Sundays: weekly email + think pass
     - cron: '0 19 * * *'
+    # 21:00 UTC — Sunday strategic pass + export (after weekly email is sent)
+    - cron: '0 21 * * 0'
   workflow_dispatch:
 
 jobs:
@@ -34,7 +36,7 @@ jobs:
           # Note: token.json must include gmail.readonly scope (re-auth locally if needed)
           echo "$GOOGLE_TOKEN_B64" | base64 -d > config/token.json
 
-      - name: Run coach (21:00 UTC) or nudge (19:00 UTC)
+      - name: Evening protocol (weekdays) or weekly email (Sunday 19:00)
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           PROGRAM_SHEET_ID: ${{ secrets.PROGRAM_SHEET_ID }}
@@ -47,15 +49,18 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
           HOUR=$(date -u +%H)
-          if [ "$HOUR" = "19" ]; then
-            echo "19:00 UTC — running session completion nudge..."
-            python src/run_coach.py --nudge
+          DAY=$(date +%u)  # 1=Mon ... 7=Sun
+          if [ "$DAY" = "7" ] && [ "$HOUR" = "19" ]; then
+            echo "Sunday 19:00 UTC — running weekly coaching email..."
+            python src/run_coach.py --weekly
+          elif [ "$HOUR" = "19" ]; then
+            echo "Weekday ${HOUR}:00 UTC — running evening protocol..."
+            python src/run_coach.py --evening-protocol
           else
-            echo "21:00 UTC — running full coaching email..."
-            python src/run_coach.py
+            echo "${HOUR}:00 UTC — Sunday strategic pass trigger (handled in next step)."
           fi
 
-      - name: Run strategic planning pass (Sundays only)
+      - name: Sunday strategic planning pass + export (21:00 UTC)
         if: github.event_name == 'schedule'
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
@@ -68,12 +73,14 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
-          # Only run on Sundays (day of week = 7, Mon=1 Sun=7)
-          if [ "$(date +%u)" = "7" ]; then
-            echo "Sunday — running strategic planning pass..."
+          # Only run on Sundays at 21:00 UTC (day of week = 7)
+          HOUR=$(date -u +%H)
+          DAY=$(date +%u)
+          if [ "$DAY" = "7" ] && [ "$HOUR" = "21" ]; then
+            echo "Sunday 21:00 UTC — running strategic planning pass..."
             python src/run_coach.py --think
             echo "Sunday — exporting Coach Memory backup..."
             python src/run_coach.py --export
           else
-            echo "Not Sunday — skipping planning pass."
+            echo "Not Sunday 21:00 — skipping planning pass."
           fi

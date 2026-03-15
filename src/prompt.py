@@ -194,10 +194,12 @@ def _extract_catchup_day_map(commands: list) -> dict:
     return result
 
 
-def _format_current_week(week_data: dict, catchup_map: dict = None) -> str:
+def _format_current_week(week_data: dict, catchup_map: dict = None,
+                         session_dates: dict = None) -> str:
     """
     Detailed view of the current week so far.
     catchup_map: {day_number: 'planned for ...'} from PENDING_CATCHUP commands.
+    session_dates: {day_label: date_str} from Lift History — actual dates sessions were logged.
     """
     if not week_data:
         return "No current week data."
@@ -207,7 +209,19 @@ def _format_current_week(week_data: dict, catchup_map: dict = None) -> str:
 
     for day in week_data.get("days", []):
         label = day.get("label", "")
-        date_str = f" [{_fmt_date(day['date'])}]" if day.get("date") else " [date unknown]"
+        # Prefer sheet date, then Lift History cross-reference, then unknown
+        actual_date = day.get("date")
+        if not actual_date and session_dates:
+            # Try matching by day label (e.g. "DAY 1" or "Day 1")
+            import re as _re2
+            m = _re2.search(r"day\s*(\d+)", label, _re2.I)
+            if m:
+                day_key = f"Day {m.group(1)}"
+                actual_date = session_dates.get(day_key) or session_dates.get(f"DAY {m.group(1)}")
+        if actual_date:
+            date_str = f" [done {_fmt_date(actual_date)}]"
+        else:
+            date_str = " [date unknown — check Lift History]"
         exercises = day.get("exercises", [])
 
         # Extract day number from label ("DAY 1: ..." → 1)
@@ -741,8 +755,9 @@ def _format_coach_state(coach_state: dict) -> str:
     """
     if not coach_state:
         return ""
-    domain_order = ["PROGRAM", "SQUAT", "BENCH", "DEADLIFT", "OHP", "HEALTH", "SCHEDULE",
-                    "NUTRITION", "SESSION_QUALITY", "LIFESTYLE", "GOALS", "ATHLETE_MODEL"]
+    domain_order = ["PROGRAM", "TOMORROW_PLAN", "SQUAT", "BENCH", "DEADLIFT", "OHP", "HEALTH",
+                    "SCHEDULE", "WEEKLY_SCHEDULE", "NUTRITION", "SESSION_QUALITY", "LIFESTYLE",
+                    "GOALS", "ATHLETE_MODEL"]
     lines = []
     seen = set()
     for domain in domain_order:
@@ -1186,8 +1201,25 @@ def build_prompt(program_data: dict, memory_data: dict,
 
     # --- Current week (full detail) ---
     catchup_map = _extract_catchup_day_map(memory_data.get("commands", []))
-    current_week_text = _format_current_week(current_week, catchup_map=catchup_map) if current_week else "No current week data."
+    # Cross-reference Done=Yes with actual dates from Lift History so coach knows WHEN sessions happened
+    session_dates = {}
+    try:
+        from memory import get_session_dates_from_lift_history
+        session_dates = get_session_dates_from_lift_history(week_num)
+    except Exception:
+        pass
+    current_week_text = _format_current_week(current_week, catchup_map=catchup_map,
+                                              session_dates=session_dates) if current_week else "No current week data."
     sections.append(f"THIS WEEK\n{current_week_text}")
+
+    # --- When sessions actually happened (temporal grounding — cross-ref with Done=Yes above) ---
+    if session_dates:
+        dated_lines = [f"  {day}: {d}" for day, d in sorted(session_dates.items())]
+        sections.append(
+            "WHEN SESSIONS WERE LOGGED IN LIFT HISTORY (cross-reference with Done=Yes above — "
+            "if a Done=Yes session has no entry here, it may not have been logged, or was logged in a different week)\n"
+            + "\n".join(dated_lines)
+        )
 
     # --- Previous week carryover (if any recent sessions from last week) ---
     if prev_carryover:

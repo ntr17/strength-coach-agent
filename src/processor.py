@@ -177,6 +177,12 @@ def _dispatch_events(events: list[dict], dry_run: bool = False) -> int:
             if cat == "SCHEDULE_CHANGE":
                 # Log as FOLLOWUP so coach checks on next run
                 append_coach_focus("FOLLOWUP", fact, last_mentioned=today)
+                # Also update WEEKLY_SCHEDULE pattern so Sunday discovery can reference it
+                try:
+                    from memory import upsert_coach_state
+                    upsert_coach_state("WEEKLY_SCHEDULE", f"{fact} — updated {today}", "MEDIUM")
+                except Exception:
+                    pass
                 dispatched += 1
 
             elif cat == "PENDING_CATCHUP":
@@ -204,6 +210,16 @@ def _dispatch_events(events: list[dict], dry_run: bool = False) -> int:
                 # Heuristic: first word(s) before ":" or whole thing
                 pref_category = _infer_preference_category(fact)
                 append_athlete_preference(pref_category, fact, source=f"Telegram {today}")
+                # If preference describes a recurring weekly schedule, also update WEEKLY_SCHEDULE
+                schedule_keywords = ("always", "every week", "typical", "usually", "normally",
+                                     "siempre", "semana", "my weeks")
+                if any(k in fact.lower() for k in schedule_keywords):
+                    try:
+                        from memory import upsert_coach_state
+                        upsert_coach_state("WEEKLY_SCHEDULE",
+                                           f"[Stable pattern] {fact} — confirmed {today}", "HIGH")
+                    except Exception:
+                        pass
                 dispatched += 1
 
             elif cat == "WORKOUT_UNPLANNED":

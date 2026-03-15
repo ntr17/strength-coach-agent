@@ -990,6 +990,24 @@ def read_lift_history_for_exercise(exercise_name: str) -> list[dict]:
     return entries
 
 
+def get_session_dates_from_lift_history(week_num: int) -> dict:
+    """
+    Return {day_label: date_str} for sessions logged in Lift History for the given week.
+    Used by prompt.py to cross-reference Done=Yes entries with actual workout dates,
+    so the coach knows WHEN sessions happened (not just that they happened).
+    """
+    rows = read_lift_history(limit=200)
+    dates = {}
+    for row in rows:
+        if str(row.get("Week", "")).strip() != str(week_num):
+            continue
+        day = row.get("Day", "").strip()
+        date_str = row.get("Date", "").strip()
+        if day and date_str and day not in dates:
+            dates[day] = date_str
+    return dates
+
+
 def get_active_program_sheet_id() -> Optional[str]:
     """
     Return the Sheet ID for the currently active Program sheet from the registry.

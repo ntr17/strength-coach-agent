@@ -545,6 +545,219 @@ def run_lift_deep_dive(lift_name: str, full_history: list[dict],
 
 
 # ---------------------------------------------------------------------------
+# Bi-monthly Steer Co
+# ---------------------------------------------------------------------------
+
+STEER_CO_GATE_DAYS = 60  # trigger every ~2 months
+
+
+def _initiate_steer_co(memory_data: dict, dry_run: bool = False) -> None:
+    """
+    Initiate a bi-monthly steering co (steer co) when it's been ~60 days since the last one.
+
+    Step 1: Coach reviews last 60 days and writes STEER_CO_DRAFT to Coach State.
+    Step 2: Sends a Telegram message to open the conversation.
+    The Railway bot handles follow-up questions over the next 1-2 days.
+    Call run_steer_co_finalize() (via --steer-co-finalize) to synthesize and send the email.
+    """
+    from datetime import datetime as _dt, timedelta
+    from memory import read_coach_state, upsert_coach_state, read_lift_history, read_coach_log
+
+    today = date.today()
+    coach_state = read_coach_state()
+
+    # Gate: check when last steer co was
+    last_steer_co_str = coach_state.get("LAST_STEER_CO", {}).get("summary", "")
+    if last_steer_co_str:
+        try:
+            last_steer_co = _dt.strptime(last_steer_co_str[:10], "%Y-%m-%d").date()
+            if (today - last_steer_co).days < STEER_CO_GATE_DAYS:
+                print(f"  Steer co: last was {last_steer_co_str[:10]}, "
+                      f"{(today - last_steer_co).days} days ago — not yet due.")
+                return
+        except (ValueError, TypeError):
+            pass
+
+    print(f"  Steer co: due (last: {last_steer_co_str or 'never'}). Initiating...")
+
+    # Gather 60-day retrospective data
+    cutoff = today - timedelta(days=60)
+    try:
+        lift_rows = read_lift_history(limit=200, after_date=cutoff)
+        lift_summary = f"{len(lift_rows)} lift sessions in last 60 days"
+    except Exception:
+        lift_rows = []
+        lift_summary = "lift history unavailable"
+
+    try:
+        coach_logs = read_coach_log(limit=10)
+        log_summary = "\n".join(
+            f"  [{e.get('Date', '')}] {e.get('Key Observations', '')[:120]}"
+            for e in coach_logs
+        )
+    except Exception:
+        log_summary = "coach log unavailable"
+
+    goals = memory_data.get("long_term_goals", "")
+    life_ctx = memory_data.get("life_context", [])
+    life_summary = "\n".join(f"  [{c['date']}] {c['context']}" for c in life_ctx[-5:])
+    coach_focus = memory_data.get("coach_focus", [])
+    open_items = [f"  {f['Item']}" for f in coach_focus if f.get("Status") == "OPEN"][:8]
+
+    draft_prompt = (
+        f"You are {ATHLETE_NAME}'s long-term strength coach. It's time for a bi-monthly steer co — "
+        f"a private internal review of the last 60 days and what needs to change or stay the same.\n\n"
+        f"This is your PRIVATE DRAFT — it will not be sent to the athlete. "
+        f"Write a structured coaching analysis:\n"
+        f"1. WHAT WORKED: key wins, positive trends, effective strategies (last 60 days)\n"
+        f"2. WHAT STALLED: plateaus, missed sessions, recurring issues\n"
+        f"3. GOAL TRAJECTORY: are we on track for stated goals? Any goal adjustments needed?\n"
+        f"4. OPEN QUESTIONS for the athlete (things you need to understand better)\n"
+        f"5. PROPOSED CHANGES: adjustments to coaching approach or program for next 60 days\n\n"
+        f"DATA:\n"
+        f"  Lift activity: {lift_summary}\n"
+        f"  Long-term goals: {goals}\n"
+        f"  Recent life context:\n{life_summary}\n"
+        f"  Recent coach observations:\n{log_summary}\n"
+        f"  Open watch items:\n" + "\n".join(open_items or ["  none"]) + "\n\n"
+        f"Keep this under 500 words. Be honest and analytical."
+    )
+
+    if dry_run:
+        print(f"  [DRY RUN] Would generate steer co draft and send opening Telegram.")
+        return
+
+    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+
+    # Step 1: Generate internal draft
+    try:
+        draft_result = client.messages.create(
+            model=CLAUDE_MODEL,
+            max_tokens=600,
+            messages=[{"role": "user", "content": draft_prompt}],
+        )
+        draft = draft_result.content[0].text.strip()
+        upsert_coach_state("STEER_CO_DRAFT", draft[:800], "HIGH")
+        print("  Steer co draft written to Coach State.")
+    except Exception as e:
+        print(f"  Steer co draft failed: {e}")
+        return
+
+    # Step 2: Send opening Telegram message
+    opening_prompt = (
+        f"You are {ATHLETE_NAME}'s strength coach. It's been about 2 months — time for a steer co. "
+        f"Write a short Telegram message (3-4 sentences) to open the conversation. "
+        f"Explain what a steer co is (quick check-in to align on what's working and goals). "
+        f"Ask one opener question: how he's feeling about the program overall. "
+        f"Mention you'll have a few follow-up questions over the next day or two. "
+        f"Direct tone. No fluff.\n"
+        f"Write it now:"
+    )
+    try:
+        opening_result = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=150,
+            messages=[{"role": "user", "content": opening_prompt}],
+        )
+        opening_msg = opening_result.content[0].text.strip()
+        from telegram_utils import send_telegram_message
+        if send_telegram_message(opening_msg):
+            print(f"  Steer co opening sent: {opening_msg[:80]}")
+        else:
+            print("  Steer co opening: Telegram send failed.")
+    except Exception as e:
+        print(f"  Steer co opening failed: {e}")
+
+
+def run_steer_co_finalize(dry_run: bool = False) -> None:
+    """
+    Synthesize the steer co conversation + send a comprehensive email.
+    Call this ~48h after _initiate_steer_co(), or manually via --steer-co-finalize.
+
+    Reads STEER_CO_DRAFT from Coach State + recent Telegram log (last 48h),
+    synthesizes everything into a comprehensive coaching document,
+    and sends it as an email.
+    """
+    from datetime import datetime as _dt, timedelta
+    from memory import (read_coach_state, upsert_coach_state, read_telegram_log_since,
+                        read_athlete_profile, read_long_term_goals)
+    from gmail import send_email
+
+    today = date.today()
+    print(f"[{today}] Finalizing steer co...")
+
+    coach_state = read_coach_state()
+    draft = coach_state.get("STEER_CO_DRAFT", {}).get("summary", "")
+    if not draft:
+        print("  Steer co finalize: no draft found in Coach State — run --think first.")
+        return
+
+    # Read recent Telegram conversation (last 3 days)
+    cutoff = today - timedelta(days=3)
+    try:
+        tg_logs = read_telegram_log_since(cutoff, limit=80)
+        tg_text = "\n".join(
+            f"  [{e.get('Timestamp', '')[:10]}] {e.get('Direction', '')}: {e.get('Message', '')[:200]}"
+            for e in tg_logs
+        )
+    except Exception:
+        tg_text = "Telegram log unavailable."
+
+    profile = read_athlete_profile() or ""
+    goals = read_long_term_goals() or ""
+
+    synth_prompt = (
+        f"You are {ATHLETE_NAME}'s long-term strength coach. You just completed a steer co — "
+        f"a bi-monthly alignment conversation with your athlete. "
+        f"Now write the full steer co document to send him as a comprehensive email.\n\n"
+        f"STRUCTURE (use these headers exactly):\n"
+        f"1. The Last Two Months — what happened, honestly\n"
+        f"2. What's Working — keep doing these things\n"
+        f"3. What Needs to Change — honest assessment\n"
+        f"4. Goals Update — are we still aiming at the right targets? any revisions?\n"
+        f"5. The Next Two Months — what we're focusing on, why\n"
+        f"6. My Commitments to You — what you (the coach) will specifically do\n"
+        f"7. What I Need From You — what requires athlete action\n\n"
+        f"Use the internal draft and the conversation for grounding. "
+        f"Write in the coach's voice — honest, direct, specific. Not generic motivational fluff.\n\n"
+        f"INTERNAL COACHING DRAFT:\n{draft}\n\n"
+        f"CONVERSATION (recent Telegram):\n{tg_text}\n\n"
+        f"ATHLETE PROFILE:\n{profile}\n\n"
+        f"LONG-TERM GOALS:\n{goals}\n\n"
+        f"Target length: 600-900 words. This goes in an email — prose, not bullet points. "
+        f"Make it feel like a real coaching conversation document, not a corporate report."
+    )
+
+    if dry_run:
+        print(f"  [DRY RUN] Would synthesize steer co and send email.")
+        return
+
+    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+    try:
+        result = client.messages.create(
+            model=CLAUDE_MODEL,
+            max_tokens=1200,
+            messages=[{"role": "user", "content": synth_prompt}],
+        )
+        steer_co_doc = result.content[0].text.strip()
+    except Exception as e:
+        print(f"  Steer co synthesis failed: {e}")
+        return
+
+    # Send as email
+    try:
+        subject = f"Steer Co — {today.strftime('%B %Y')}"
+        send_email(subject=subject, body=steer_co_doc)
+        print(f"  Steer co email sent: {subject}")
+        # Mark steer co done
+        upsert_coach_state("LAST_STEER_CO", str(today), "HIGH")
+        # Clear the draft
+        upsert_coach_state("STEER_CO_DRAFT", "", "LOW")
+    except Exception as e:
+        print(f"  Steer co email send failed: {e}")
+
+
+# ---------------------------------------------------------------------------
 # Dev entry point
 # ---------------------------------------------------------------------------
 

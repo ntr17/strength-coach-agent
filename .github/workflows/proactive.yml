@@ -2,7 +2,7 @@ name: Proactive Check-in
 
 on:
   schedule:
-    - cron: '0 7 * * *'   # 08:00 CET (09:00 CEST) — pre-session brief
+    - cron: '0 7 * * *'   # 08:00 CET (09:00 CEST) — schedule discovery (Sun) or brief (weekday)
     - cron: '0 8 * * *'   # 09:00 CET (10:00 CEST) — morning proactive check
     - cron: '0 13 * * *'  # 14:00 CET (15:00 CEST) — post-session check-in
     - cron: '0 14 * * *'  # 15:00 CET (16:00 CEST) — afternoon proactive check
@@ -33,7 +33,7 @@ jobs:
           echo "$GOOGLE_CREDENTIALS_B64" | base64 -d > config/credentials.json
           echo "$GOOGLE_TOKEN_B64" | base64 -d > config/token.json
 
-      - name: Run session brief or proactive check-in or post-session check
+      - name: Run brief / schedule discovery / proactive / post-session
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           PROGRAM_SHEET_ID: ${{ secrets.PROGRAM_SHEET_ID }}
@@ -44,7 +44,11 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
           HOUR=$(date -u +%H)
-          if [ "$HOUR" = "07" ]; then
+          DAY=$(date +%u)  # 1=Mon ... 7=Sun
+          if [ "$HOUR" = "07" ] && [ "$DAY" = "7" ]; then
+            echo "Sunday 07:00 UTC — running weekly schedule discovery..."
+            python src/run_coach.py --weekly-schedule
+          elif [ "$HOUR" = "07" ]; then
             echo "07:00 UTC — running pre-session brief..."
             python src/run_coach.py --brief
           elif [ "$HOUR" = "13" ]; then

@@ -14,7 +14,7 @@ Usage:
 
 import argparse
 import sys
-from datetime import date
+from datetime import date, timedelta
 
 sys.stdout.reconfigure(encoding="utf-8")
 
@@ -51,6 +51,12 @@ def parse_args():
                         help="Pre-session brief: send targeted session prep via Telegram.")
     parser.add_argument("--post-session", action="store_true",
                         help="Post-session check-in: acknowledge logged session or ask how it went.")
+    parser.add_argument("--evening-protocol", action="store_true",
+                        help="Evening protocol: ask if tomorrow's plan is still on via Telegram.")
+    parser.add_argument("--weekly-schedule", action="store_true",
+                        help="Sunday schedule discovery: ask about this week's training plan via Telegram.")
+    parser.add_argument("--steer-co-finalize", action="store_true",
+                        help="Synthesize steer co conversation + send comprehensive email.")
     return parser.parse_args()
 
 
@@ -677,6 +683,11 @@ def run_think(week_num: int = None, dry_run: bool = False):
     memory_data = read_all()  # re-read so planning prompt includes freshly written ANNUAL_ARC
     run_planning_pass(program_data, memory_data, week_num, dry_run=dry_run)
     print("Planning pass complete.")
+
+    # 6. Bi-monthly steer co — initiate if ~60 days since last one
+    from planner import _initiate_steer_co
+    memory_data = read_all()  # re-read for fresh Coach State
+    _initiate_steer_co(memory_data, dry_run=dry_run)
 
 
 def _update_athlete_model(memory_data: dict, dry_run: bool = False) -> None:
@@ -1855,6 +1866,239 @@ def run_nudge(dry_run: bool = False):
 
 
 # ---------------------------------------------------------------------------
+# Sunday schedule discovery
+# ---------------------------------------------------------------------------
+
+def run_weekly_schedule_discovery(dry_run: bool = False):
+    """
+    Sunday morning: send a Telegram message asking about this week's training schedule.
+    References the known WEEKLY_SCHEDULE pattern from Coach State.
+    The reply comes through the live Railway bot, which updates WEEKLY_SCHEDULE via the processor.
+    Deduped via LAST_SCHEDULE_DISCOVERY Coach State domain (one per Sunday).
+    """
+    from sheets import read_program_data
+    from memory import read_coach_state, upsert_coach_state
+
+    today = date.today()
+    if today.weekday() != 6:  # 6 = Sunday
+        print("  Schedule discovery: not Sunday — skipping.")
+        return
+
+    week_num = compute_current_week(resolve_program_start_date())
+    print(f"[{today}] Running Sunday schedule discovery (Week {week_num})...")
+
+    # Dedup
+    coach_state = read_coach_state()
+    last_disc = coach_state.get("LAST_SCHEDULE_DISCOVERY", {}).get("summary", "")
+    if last_disc == str(today):
+        print("  Schedule discovery: already ran this Sunday — skipping.")
+        return
+
+    # Load next week's session labels
+    try:
+        next_week_data = read_program_data(week_num=week_num + 1, lookback=0)
+        next_days = next_week_data.get("current_week", {}).get("days", [])
+        session_labels = [d.get("label", f"Day {i+1}") for i, d in enumerate(next_days)]
+    except Exception:
+        session_labels = []
+
+    known_schedule = coach_state.get("WEEKLY_SCHEDULE", {}).get("summary", "")
+    sessions_text = ", ".join(session_labels[:4]) if session_labels else "see program"
+
+    # Build message via Haiku
+    if known_schedule:
+        prompt = (
+            f"You are {ATHLETE_NAME}'s coach. It's Sunday — start of a new training week. "
+            f"Write a short Telegram message (2-3 sentences) asking him to confirm or update his "
+            f"schedule for the week. Reference the known pattern but keep it open — things change.\n\n"
+            f"Known schedule pattern: {known_schedule}\n"
+            f"Next week sessions: {sessions_text}\n\n"
+            f"Style: direct, specific. Mention what you know. Ask if it still works, or if anything "
+            f"changes (travel, work, energy). No greeting, no sign-off.\n"
+            f"Write it now:"
+        )
+    else:
+        prompt = (
+            f"You are {ATHLETE_NAME}'s coach. It's Sunday — start of a new training week. "
+            f"Write a short Telegram message (2-3 sentences) asking when he plans to train this week. "
+            f"You don't have a stored schedule yet, so ask openly.\n\n"
+            f"Sessions this week: {sessions_text}\n\n"
+            f"Style: direct. Explain you want to plan around his actual availability. "
+            f"Ask which days work and roughly what time. No greeting, no sign-off.\n"
+            f"Write it now:"
+        )
+
+    if dry_run:
+        print(f"  [DRY RUN] Schedule discovery (known_schedule={bool(known_schedule)})")
+        print(f"  [DRY RUN] Prompt: {prompt[:200]}")
+        return
+
+    try:
+        client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+        result = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=120,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        msg = result.content[0].text.strip()
+
+        from telegram_utils import send_telegram_message
+        sent = send_telegram_message(msg)
+        if sent:
+            print(f"  Schedule discovery sent: {msg[:80]}")
+            upsert_coach_state("LAST_SCHEDULE_DISCOVERY", str(today), "HIGH")
+        else:
+            print("  Schedule discovery: Telegram send failed.")
+    except Exception as e:
+        print(f"  Schedule discovery failed (non-fatal): {e}")
+
+
+# ---------------------------------------------------------------------------
+# Evening protocol: plan check + TOMORROW_PLAN for bot to use
+# ---------------------------------------------------------------------------
+
+def _is_on_vacation(life_context: list[dict]) -> bool:
+    """Return True if recent Life Context mentions an active vacation/holiday."""
+    keywords = ("vacation", "holiday", "vacaciones", "holidays", "away")
+    for entry in reversed(life_context[-10:]):
+        text = entry.get("context", "").lower()
+        if any(k in text for k in keywords):
+            # Crude check: if there's a "until" or "back" date and it's in the past, skip
+            # Otherwise treat as potentially active
+            return True
+    return False
+
+
+def run_evening_protocol(dry_run: bool = False):
+    """
+    Evening protocol (19:00 UTC = 20:00 Spain).
+
+    Sends ONE Telegram message asking if tomorrow's plan is still on — naming the session explicitly.
+    The full protocol (Message 2) is generated by the live Railway bot in response to the user's reply.
+
+    Also writes TOMORROW_PLAN to Coach State so the bot and morning brief have context.
+    Deduped via LAST_EVENING_PROTOCOL Coach State domain.
+    """
+    from sheets import read_program_data
+    from memory import read_coach_state, upsert_coach_state, read_life_context
+
+    today = date.today()
+    tomorrow = today + timedelta(days=1)
+    week_num = compute_current_week(resolve_program_start_date())
+    print(f"[{today}] Running evening protocol (Week {week_num})...")
+
+    # Dedup: only send once per day
+    coach_state = read_coach_state()
+    last_evening = coach_state.get("LAST_EVENING_PROTOCOL", {}).get("summary", "")
+    if last_evening == str(today):
+        print("  Evening protocol: already sent today — skipping.")
+        return
+
+    # Vacation check
+    try:
+        life_context = read_life_context(limit=10)
+        if _is_on_vacation(life_context):
+            vacation_msg = (
+                "You're on vacation — enjoy it. Try to walk 30-45 min if you feel like it. "
+                "Eat well tonight (protein + vegetables). Check in when you're back and we'll get going again."
+            )
+            if dry_run:
+                print(f"  [DRY RUN] Vacation mode: {vacation_msg}")
+                return
+            from telegram_utils import send_telegram_message
+            if send_telegram_message(vacation_msg):
+                print("  Vacation message sent.")
+                upsert_coach_state("LAST_EVENING_PROTOCOL", str(today), "HIGH")
+            return
+    except Exception as e:
+        print(f"  Vacation check failed (non-fatal): {e}")
+
+    # Load program data
+    try:
+        program_data = read_program_data(week_num=week_num, lookback=0)
+    except Exception as e:
+        print(f"  Evening protocol: program load failed: {e}")
+        return
+
+    current_week = program_data.get("current_week", {})
+    days = current_week.get("days", [])
+
+    # Find next incomplete session (first day where no exercises are marked done=True)
+    next_session = None
+    for day in days:
+        exercises = day.get("exercises", [])
+        done_count = sum(1 for ex in exercises if ex.get("done") is True)
+        if done_count == 0 and exercises:
+            next_session = day
+            break
+
+    # If no incomplete session in current week, try next week
+    if not next_session and tomorrow.weekday() == 0:  # Sunday → check next week
+        try:
+            next_week_data = read_program_data(week_num=week_num + 1, lookback=0)
+            next_week_days = next_week_data.get("current_week", {}).get("days", [])
+            if next_week_days:
+                next_session = next_week_days[0]
+        except Exception:
+            pass
+
+    if not next_session:
+        print("  Evening protocol: all sessions complete or no upcoming session — skipping.")
+        return  # Don't write dedup — will try again next day
+
+    # Build session summary for the message
+    label = next_session.get("label", "next session")
+    exercises = next_session.get("exercises", [])
+    main_lifts = [ex for ex in exercises if ex.get("weight")][:3]
+    lift_summary = ", ".join(
+        f"{ex.get('name', '?')} {ex.get('weight', '')} {ex.get('sets_reps', '')}".strip()
+        for ex in main_lifts
+    )
+
+    # Pull weekly schedule context
+    schedule_ctx = coach_state.get("WEEKLY_SCHEDULE", {}).get("summary", "")
+
+    prompt = (
+        f"You are {ATHLETE_NAME}'s strength coach. Write ONE short Telegram message (1-2 sentences) "
+        f"asking if tomorrow's training session is still on. Name the session and its key lifts specifically. "
+        f"Be direct — no greeting, no sign-off.\n\n"
+        f"Tomorrow's session: {label}\n"
+        f"Key lifts: {lift_summary or 'see program'}\n"
+        f"Known schedule pattern: {schedule_ctx or 'not yet established'}\n\n"
+        f"Example style: \"Tomorrow is Day 3 — squat 102.5kg 5×5, bench 80kg 4×6. Still on?\"\n"
+        f"Write it now:"
+    )
+
+    # Store tomorrow's plan for the bot and brief to reference
+    tomorrow_plan_summary = f"{label} | {lift_summary}" if lift_summary else label
+
+    if dry_run:
+        print(f"  [DRY RUN] Evening protocol for: {tomorrow_plan_summary}")
+        print(f"  [DRY RUN] Prompt: {prompt[:200]}")
+        return
+
+    try:
+        client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+        result = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=80,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        msg = result.content[0].text.strip()
+
+        from telegram_utils import send_telegram_message
+        sent = send_telegram_message(msg)
+        if sent:
+            print(f"  Evening protocol sent: {msg[:80]}")
+            upsert_coach_state("LAST_EVENING_PROTOCOL", str(today), "HIGH")
+            upsert_coach_state("TOMORROW_PLAN", tomorrow_plan_summary, "HIGH")
+        else:
+            print("  Evening protocol: Telegram send failed.")
+    except Exception as e:
+        print(f"  Evening protocol failed (non-fatal): {e}")
+
+
+# ---------------------------------------------------------------------------
 # Data export
 # ---------------------------------------------------------------------------
 
@@ -1923,6 +2167,13 @@ if __name__ == "__main__":
             run_brief(dry_run=args.dry_run)
         elif getattr(args, "post_session", False):
             run_post_session(dry_run=args.dry_run)
+        elif getattr(args, "evening_protocol", False):
+            run_evening_protocol(dry_run=args.dry_run)
+        elif getattr(args, "weekly_schedule", False):
+            run_weekly_schedule_discovery(dry_run=args.dry_run)
+        elif getattr(args, "steer_co_finalize", False):
+            from planner import run_steer_co_finalize
+            run_steer_co_finalize(dry_run=args.dry_run)
         elif args.export:
             from datetime import datetime as _dt
             fname = f"coach_export_{_dt.today().strftime('%Y%m%d')}.json"
