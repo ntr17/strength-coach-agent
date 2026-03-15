@@ -1044,6 +1044,13 @@ def run_proactive(dry_run: bool = False):
     except Exception as e:
         print(f"  HealthAgent proactive failed (non-fatal): {e}")
 
+    # --- Schedule discovery fallback: if it hasn't happened in 6+ days, ask now ---
+    # This catches missed Sunday discoveries (e.g. it's already midday Sunday, or a weekday catch-up)
+    try:
+        run_weekly_schedule_discovery(dry_run=dry_run)
+    except Exception as e:
+        print(f"  Schedule discovery fallback failed (non-fatal): {e}")
+
 
 def _send_weekly_digest(memory_data: dict, program_data: dict,
                         projections: dict, week_num: int) -> None:
@@ -1880,49 +1887,56 @@ def run_weekly_schedule_discovery(dry_run: bool = False):
     from memory import read_coach_state, upsert_coach_state
 
     today = date.today()
-    if today.weekday() != 6:  # 6 = Sunday
-        print("  Schedule discovery: not Sunday — skipping.")
-        return
-
     week_num = compute_current_week(resolve_program_start_date())
-    print(f"[{today}] Running Sunday schedule discovery (Week {week_num})...")
+    print(f"[{today}] Checking weekly schedule discovery (Week {week_num})...")
 
-    # Dedup
+    # Dedup: only send once per rolling 6-day window
+    # (Normally runs Sunday morning; falls back to next proactive pass if missed)
     coach_state = read_coach_state()
-    last_disc = coach_state.get("LAST_SCHEDULE_DISCOVERY", {}).get("summary", "")
-    if last_disc == str(today):
-        print("  Schedule discovery: already ran this Sunday — skipping.")
-        return
+    last_disc_str = coach_state.get("LAST_SCHEDULE_DISCOVERY", {}).get("summary", "")
+    if last_disc_str:
+        try:
+            last_disc = date.fromisoformat(last_disc_str[:10])
+            if (today - last_disc).days < 6:
+                print(f"  Schedule discovery: done {last_disc_str[:10]} ({(today - last_disc).days}d ago) — skipping.")
+                return
+        except (ValueError, TypeError):
+            pass
 
-    # Load next week's session labels
+    # Load this week's remaining sessions (not next week — we're mid-week if not Sunday)
+    is_sunday = today.weekday() == 6
     try:
-        next_week_data = read_program_data(week_num=week_num + 1, lookback=0)
-        next_days = next_week_data.get("current_week", {}).get("days", [])
-        session_labels = [d.get("label", f"Day {i+1}") for i, d in enumerate(next_days)]
+        week_data = read_program_data(week_num=week_num, lookback=0)
+        days = week_data.get("current_week", {}).get("days", [])
+        # Show only sessions not yet done
+        remaining_days = [d for d in days if not any(ex.get("done") is True for ex in d.get("exercises", []))]
+        session_labels = [d.get("label", f"Day {i+1}") for i, d in enumerate(remaining_days)]
     except Exception:
         session_labels = []
 
     known_schedule = coach_state.get("WEEKLY_SCHEDULE", {}).get("summary", "")
     sessions_text = ", ".join(session_labels[:4]) if session_labels else "see program"
+    days_left = 7 - today.weekday() if not is_sunday else 7
+    week_context = "new week" if is_sunday else f"week already started ({days_left} days left incl. today)"
 
     # Build message via Haiku
     if known_schedule:
         prompt = (
-            f"You are {ATHLETE_NAME}'s coach. It's Sunday — start of a new training week. "
+            f"You are {ATHLETE_NAME}'s coach. It's {today.strftime('%A')} — {week_context}. "
             f"Write a short Telegram message (2-3 sentences) asking him to confirm or update his "
-            f"schedule for the week. Reference the known pattern but keep it open — things change.\n\n"
+            f"training plan for the remaining days. Reference the known pattern but stay open — things change.\n\n"
             f"Known schedule pattern: {known_schedule}\n"
-            f"Next week sessions: {sessions_text}\n\n"
+            f"Remaining sessions this week: {sessions_text}\n\n"
             f"Style: direct, specific. Mention what you know. Ask if it still works, or if anything "
             f"changes (travel, work, energy). No greeting, no sign-off.\n"
             f"Write it now:"
         )
     else:
         prompt = (
-            f"You are {ATHLETE_NAME}'s coach. It's Sunday — start of a new training week. "
-            f"Write a short Telegram message (2-3 sentences) asking when he plans to train this week. "
+            f"You are {ATHLETE_NAME}'s coach. It's {today.strftime('%A')} — {week_context}. "
+            f"Write a short Telegram message (2-3 sentences) asking when he plans to train the rest of this week. "
             f"You don't have a stored schedule yet, so ask openly.\n\n"
-            f"Sessions this week: {sessions_text}\n\n"
+            f"Remaining sessions this week: {sessions_text}\n\n"
             f"Style: direct. Explain you want to plan around his actual availability. "
             f"Ask which days work and roughly what time. No greeting, no sign-off.\n"
             f"Write it now:"
