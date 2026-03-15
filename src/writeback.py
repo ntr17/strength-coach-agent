@@ -116,31 +116,53 @@ def _get_week_tab(sheet, week_num: int):
     return None
 
 
+_NOTE_KEYWORDS = (
+    "note", "comment", "obs", "remark", "feedback", "session", "athlete",
+    "anotaci", "comentar", "notas", "remarks", "annotation",
+)
+_DATA_KEYWORDS = ("weight", "load", "set", "rep", "done", "complet", "actual", "status", "exercise")
+
+
 def _build_col_map_from_header(header_row: list) -> dict:
     """
     Build a field → 1-indexed column number map from a header row.
-    Returns dict with keys: exercise, weight, sets_reps, done, actual, notes, session_note
+    Flexible matching — works regardless of exact column names or language.
+    Falls back to the last non-data column as the notes column if nothing explicit found.
     """
     col_map = {}
+    last_text_col = None  # rightmost column that looks like free-text
+
     for i, cell in enumerate(header_row):
         label = str(cell).strip().lower()
         if not label:
             continue
-        col = i + 1  # gspread is 1-indexed
-        if label == "exercise":
-            col_map["exercise"] = col
-        elif label in ("weight", "load"):
-            col_map["weight"] = col
-        elif "set" in label or "rep" in label or "x rep" in label:
-            col_map["sets_reps"] = col
-        elif label in ("done", "completed", "status"):
-            col_map["done"] = col
-        elif "actual" in label:
-            col_map["actual"] = col
-        elif any(kw in label for kw in ("session note", "athlete note", "my note")):
-            col_map["session_note"] = col
-        elif label in ("notes", "note") and "notes" not in col_map:
-            col_map["notes"] = col
+        col = i + 1
+        if any(kw in label for kw in ("exercise", "exercis", "ejercicio", "movimiento")):
+            col_map.setdefault("exercise", col)
+        elif any(kw in label for kw in ("weight", "load", "peso", "carga", "kg")):
+            col_map.setdefault("weight", col)
+        elif any(kw in label for kw in ("set", "rep", "x rep", "series", "repeticion")):
+            col_map.setdefault("sets_reps", col)
+        elif any(kw in label for kw in ("done", "complet", "status", "hecho", "realiz")):
+            col_map.setdefault("done", col)
+        elif "actual" in label or "performed" in label or "realizado" in label:
+            col_map.setdefault("actual", col)
+        elif any(kw in label for kw in _NOTE_KEYWORDS):
+            # Prefer "session note" / "athlete note" variants as session_note
+            if any(kw in label for kw in ("session", "athlete", "my note", "anotaci")):
+                col_map.setdefault("session_note", col)
+            else:
+                col_map.setdefault("notes", col)
+            last_text_col = col  # any note column qualifies
+
+        # Track rightmost column that doesn't look like structured data
+        if not any(kw in label for kw in _DATA_KEYWORDS):
+            last_text_col = col
+
+    # Fallback: if no notes column found at all, use the last non-data column
+    if "notes" not in col_map and "session_note" not in col_map and last_text_col:
+        col_map["notes"] = last_text_col
+
     return col_map
 
 
@@ -160,15 +182,19 @@ def _find_exercise_row(all_values: list, exercise_name: str, day_num: int = None
         col0 = str(row[0]).strip() if row[0] else ""
         col0_lower = col0.lower()
 
-        # Detect day section headers (e.g. "DAY 1:", "Day 2 — Bench + Squat")
-        day_match = re.match(r"day\s*(\d+)", col0_lower)
+        # Detect day/session section headers (flexible: "DAY 1", "Session 2", "Día 3", "Block A")
+        day_match = re.match(r"(?:day|session|dia|d[íi]a|block|session)\s*(\d+)", col0_lower)
         if day_match:
             current_day = int(day_match.group(1))
             col_map = None  # reset col_map for new day
             continue
 
-        # Detect the Exercise column header row for this day
-        if col0_lower == "exercise" or (len(row) > 1 and str(row[0]).strip().lower() == "exercise"):
+        # Detect the Exercise column header row (flexible: "exercise", "exercises", "lift", etc.)
+        is_header = (
+            any(kw in col0_lower for kw in ("exercise", "lift", "movimiento", "ejercicio"))
+            and len([c for c in row if str(c).strip()]) >= 2
+        )
+        if is_header:
             col_map = _build_col_map_from_header(row)
             continue
 
@@ -263,6 +289,21 @@ def _apply_exercise_swap(sheet, op: dict) -> tuple:
     return True, f"Swapped '{old_exercise}' → '{new_exercise}' in Week {week}"
 
 
+def _find_notes_row_in_tab(all_values: list) -> tuple:
+    """
+    Find a general notes/session row in a week tab (e.g. 'Weekly Notes', 'Session Notes').
+    Returns (row_1based, col_1based) or (None, None).
+    """
+    _weekly_kw = ("weekly note", "session note", "week note", "notas semana",
+                  "general note", "coach note", "overall note")
+    for i, row in enumerate(all_values):
+        label = str(row[0]).strip().lower() if row else ""
+        if any(kw in label for kw in _weekly_kw):
+            # Use column 2 (the value column next to the label) if it exists
+            return i + 1, 2
+    return None, None
+
+
 def _apply_note_add(sheet, op: dict) -> tuple:
     week = op.get("week")
     exercise = op.get("exercise")
@@ -277,15 +318,38 @@ def _apply_note_add(sheet, op: dict) -> tuple:
 
     all_values = ws.get_all_values()
 
+    # --- Strategy 1: specific exercise row ---
     if exercise:
         row_idx, col_map = _find_exercise_row(all_values, exercise, op.get("day"))
         if row_idx:
             notes_col = col_map.get("session_note") or col_map.get("notes")
             if notes_col:
                 ws.update_cell(row_idx, notes_col, note)
-                return True, f"Added note to {exercise} in Week {week}"
+                return True, f"Added note to '{exercise}' in Week {week}"
+            # Exercise found but no notes column detected — use the next empty column after the last filled cell
+            row_data = all_values[row_idx - 1]
+            last_filled = max((j + 1 for j, c in enumerate(row_data) if str(c).strip()), default=1)
+            ws.update_cell(row_idx, last_filled + 1, note)
+            return True, f"Added note to '{exercise}' (col {last_filled + 1}) in Week {week}"
 
-    return False, "Could not locate a notes cell for the note"
+    # --- Strategy 2: look for a weekly notes row in the tab ---
+    notes_row, notes_col = _find_notes_row_in_tab(all_values)
+    if notes_row:
+        # Append to existing value if any
+        existing = ""
+        try:
+            existing = str(all_values[notes_row - 1][notes_col - 1]).strip()
+        except (IndexError, TypeError):
+            pass
+        combined = f"{existing} | {note}".lstrip(" |") if existing else note
+        ws.update_cell(notes_row, notes_col, combined)
+        return True, f"Added note to weekly notes section in Week {week}"
+
+    # --- Strategy 3: append a new row at the bottom of the tab ---
+    next_row = len(all_values) + 1
+    ws.update_cell(next_row, 1, "Coach note")
+    ws.update_cell(next_row, 2, note)
+    return True, f"Added coach note to Week {week} (row {next_row})"
 
 
 def _apply_weight_scale(sheet, op: dict) -> tuple:
@@ -320,17 +384,17 @@ def _apply_weight_scale(sheet, op: dict) -> tuple:
                 continue
             col0 = str(row[0]).strip().lower() if row[0] else ""
 
-            # Detect exercise header row
-            if col0 == "exercise":
+            # Detect exercise header row (flexible)
+            if any(kw in col0 for kw in ("exercise", "lift", "movimiento", "ejercicio")) and len([c for c in row if str(c).strip()]) >= 2:
                 col_map = _build_col_map_from_header(row)
                 continue
 
             # Skip non-exercise rows
-            if col_map is None or not col0 or col0 in ("exercise",):
+            if col_map is None or not col0:
                 continue
 
             # Skip section headers (day labels, notes section)
-            if re.match(r"day\s*\d", col0) or "weekly notes" in col0 or "bodyweight" in col0:
+            if re.match(r"(?:day|session|dia|block)\s*\d", col0) or "weekly notes" in col0 or "bodyweight" in col0 or "bodyweight" in col0:
                 continue
 
             weight_col = col_map.get("weight")
