@@ -398,6 +398,49 @@ _TOOL_DEFINITIONS = [
         ),
         "input_schema": {"type": "object", "properties": {}, "required": []},
     },
+    {
+        "name": "update_program",
+        "description": (
+            "Write a change to the active program sheet. Use for any request to modify, "
+            "annotate, or update something in the program — notes, weights, reps, exercise swaps. "
+            "Examples: 'leave a note on squat week 8', 'add a comment to bench press', "
+            "'change OHP weight to 60kg', 'add a hi to the notes'.\n\n"
+            "Operations:\n"
+            "  note_add — add/append a note to an exercise row (low-stakes, applied immediately)\n"
+            "  weight_change — change the prescribed weight for an exercise (creates confirmation proposal)\n"
+            "  sets_reps_change — change sets/reps prescription (creates confirmation proposal)\n"
+            "  exercise_swap — replace one exercise with another (creates confirmation proposal)\n\n"
+            "For note_add: applied immediately, no confirmation needed.\n"
+            "For all other ops: a proposal is created and shown to the athlete for confirmation."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "operation": {
+                    "type": "string",
+                    "enum": ["note_add", "weight_change", "sets_reps_change", "exercise_swap"],
+                    "description": "The type of change to make.",
+                },
+                "exercise": {
+                    "type": "string",
+                    "description": "Exercise name to target (e.g. 'Squat', 'Bench Press'). Required for most ops.",
+                },
+                "week": {
+                    "type": "integer",
+                    "description": "Week number to apply the change to. Omit to use current week.",
+                },
+                "value": {
+                    "type": "string",
+                    "description": (
+                        "The new value: for note_add = note text, for weight_change = new weight (e.g. '82.5'), "
+                        "for sets_reps_change = new prescription (e.g. '4x5'), "
+                        "for exercise_swap = new exercise name."
+                    ),
+                },
+            },
+            "required": ["operation", "value"],
+        },
+    },
 ]
 
 
@@ -631,6 +674,49 @@ def _tool_log_bodyweight(weight_kg: float, date_str: str = None, notes: str = ""
         return f"Could not log bodyweight: {e}"
 
 
+def _tool_update_program(operation: str, value: str, exercise: str = None, week: int = None) -> str:
+    """
+    Write a change to the active program sheet.
+    note_add: applied immediately via writeback.
+    All other ops: logged as PENDING_PROPOSAL for athlete confirmation.
+    """
+    from config import compute_current_week, resolve_program_start_date, PROGRAM_SHEET_ID
+    try:
+        current_week = week or compute_current_week(resolve_program_start_date())
+
+        if operation == "note_add":
+            # Low-stakes — apply immediately
+            from writeback import apply_writeback
+            proposal = (
+                f"NOTE_ADD | week={current_week} | exercise={exercise or 'general'} | note={value}"
+            )
+            success, msg = apply_writeback(proposal, current_week=current_week, program_sheet_id=PROGRAM_SHEET_ID)
+            if success:
+                return f"Note added to {exercise or 'program'} (Week {current_week}): \"{value}\""
+            return f"Could not add note: {msg}"
+
+        # High-stakes ops → PENDING_PROPOSAL (requires athlete confirmation)
+        op_map = {
+            "weight_change": "WEIGHT_CHANGE",
+            "sets_reps_change": "SETS_REPS_CHANGE",
+            "exercise_swap": "EXERCISE_SWAP",
+        }
+        op_tag = op_map.get(operation, "UNKNOWN")
+        proposal_text = (
+            f"{op_tag} | week={current_week} | exercise={exercise or '?'} | new_value={value}"
+        )
+        from memory import append_command, read_commands
+        from run_coach import log_pending_proposal
+        existing = read_commands()
+        log_pending_proposal(proposal_text, existing)
+        return (
+            f"Proposal created: {op_tag} on {exercise or '?'} → {value} (Week {current_week}). "
+            f"Reply 'yes' to confirm or 'no' to cancel."
+        )
+    except Exception as e:
+        return f"update_program failed: {e}"
+
+
 def _tool_get_program_comparison() -> str:
     """Return cross-program 1RM comparison via the projections engine."""
     try:
@@ -691,6 +777,11 @@ def _execute_data_tool(name: str, inp: dict) -> str:
             result = _tool_get_health_log(inp.get("days", 14))
         elif name == "log_bodyweight":
             result = _tool_log_bodyweight(inp.get("weight_kg", 0), inp.get("date"), inp.get("notes", ""))
+        elif name == "update_program":
+            result = _tool_update_program(
+                inp.get("operation", "note_add"), inp.get("value", ""),
+                inp.get("exercise"), inp.get("week")
+            )
         else:
             return f"Unknown tool: {name}"
     except Exception as e:
@@ -1222,9 +1313,11 @@ def _classify_intent(message: str) -> str:
                 "WORKOUT — questions about today's session, exercise substitutions, sets/reps/weights, "
                 "fatigue during training, skipping/modifying a session\n"
                 "HEALTH — nutrition, recovery, sleep, blood tests, HRV, injury/pain management, supplements\n"
-                "PROGRAM — requests to restructure the training program, create a new block, "
-                "add a deload week, change the overall plan\n"
-                "GENERAL — progress updates, checking in, motivation, life context, anything else\n\n"
+                "PROGRAM — requests to restructure the ENTIRE training program: create a new block, "
+                "add a deload week, redesign the overall periodization plan, switch programs entirely\n"
+                "GENERAL — everything else: progress updates, checking in, motivation, life context, "
+                "adding notes or comments to the sheet, simple weight/reps tweaks, anything that is NOT "
+                "a full program redesign\n\n"
                 "Reply with exactly one word: WORKOUT, HEALTH, PROGRAM, or GENERAL."
             ),
             messages=[{"role": "user", "content": message}],
