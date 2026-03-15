@@ -590,8 +590,8 @@ class TestDetectDifficultyPatterns:
         from run_coach import detect_difficulty_patterns
         return detect_difficulty_patterns(program_data, telegram_log)
 
-    def _week(self, exercises):
-        return {"days": [{"label": "DAY 1", "exercises": exercises}]}
+    def _week(self, exercises, week_num=1):
+        return {"week_num": week_num, "days": [{"label": "DAY 1", "exercises": exercises}]}
 
     def _ex(self, name, done=True, note=""):
         return {"name": name, "done": done, "session_note": note, "notes": ""}
@@ -600,26 +600,32 @@ class TestDetectDifficultyPatterns:
         assert self._call({}) == []
 
     def test_three_easy_sessions_flagged(self):
-        week = self._week([self._ex("Squat", note="felt easy")] * 3)
-        program_data = {"current_week": {}, "recent_weeks": [week, week, week]}
+        # Use 3 different week numbers to satisfy the ≥2 week span requirement
+        w1 = self._week([self._ex("Squat", note="felt easy")] * 3, week_num=5)
+        w2 = self._week([self._ex("Squat", note="felt easy")] * 3, week_num=6)
+        w3 = self._week([self._ex("Squat", note="felt easy")] * 3, week_num=7)
+        program_data = {"current_week": {}, "recent_weeks": [w1, w2, w3]}
         result = self._call(program_data)
         easy_flags = [f for f in result if f["signal"] == "easy"]
         assert len(easy_flags) >= 1
         assert easy_flags[0]["lift"] == "Squat"
 
     def test_three_failed_sessions_flagged(self):
-        week = self._week([self._ex("Bench", done=False)])
-        program_data = {"current_week": {}, "recent_weeks": [week, week, week]}
+        w1 = self._week([self._ex("Bench", done=False)], week_num=5)
+        w2 = self._week([self._ex("Bench", done=False)], week_num=6)
+        w3 = self._week([self._ex("Bench", done=False)], week_num=7)
+        program_data = {"current_week": {}, "recent_weeks": [w1, w2, w3]}
         result = self._call(program_data)
         hard_flags = [f for f in result if f["signal"] == "hard"]
         assert any(f["lift"] == "Bench" for f in hard_flags)
 
     def test_mixed_signals_not_flagged(self):
-        easy_week = self._week([self._ex("Squat", note="easy")])
-        hard_week = self._week([self._ex("Squat", done=False)])
+        easy_w1 = self._week([self._ex("Squat", note="easy")], week_num=5)
+        hard_w2 = self._week([self._ex("Squat", done=False)], week_num=6)
+        easy_w3 = self._week([self._ex("Squat", note="easy")], week_num=7)
         program_data = {
             "current_week": {},
-            "recent_weeks": [easy_week, hard_week, easy_week],
+            "recent_weeks": [easy_w1, hard_w2, easy_w3],
         }
         # 2 easy, 1 hard — < 3 of same signal → not flagged
         result = self._call(program_data)
@@ -627,21 +633,33 @@ class TestDetectDifficultyPatterns:
         assert squat_flags == []
 
     def test_less_than_3_signals_not_flagged(self):
-        week = self._week([self._ex("OHP", note="felt easy")] * 2)
+        week = self._week([self._ex("OHP", note="felt easy")] * 2, week_num=5)
+        program_data = {"current_week": {}, "recent_weeks": [week]}
+        result = self._call(program_data)
+        assert result == []
+
+    def test_single_week_not_flagged_even_with_many_signals(self):
+        # All signals in same week — should not flag (< 2 week span)
+        week = self._week([self._ex("Squat", note="felt easy")] * 5, week_num=7)
         program_data = {"current_week": {}, "recent_weeks": [week]}
         result = self._call(program_data)
         assert result == []
 
     def test_note_keyword_variants(self):
-        # "light" is an easy keyword
-        week = self._week([self._ex("Squat", note="felt light today")])
-        program_data = {"current_week": {}, "recent_weeks": [week, week, week]}
+        # "light" is an easy keyword, across 2 different weeks
+        w1 = self._week([self._ex("Squat", note="felt light today")], week_num=6)
+        w2 = self._week([self._ex("Squat", note="felt light today"),
+                         self._ex("Squat", note="felt light today")], week_num=7)
+        program_data = {"current_week": {}, "recent_weeks": [w1, w2]}
         result = self._call(program_data)
         assert any(f["lift"] == "Squat" and f["signal"] == "easy" for f in result)
 
     def test_count_in_flag(self):
-        week = self._week([self._ex("Squat", note="too easy")])
-        program_data = {"current_week": {}, "recent_weeks": [week, week, week]}
+        w1 = self._week([self._ex("Squat", note="too easy"),
+                         self._ex("Squat", note="too easy")], week_num=6)
+        w2 = self._week([self._ex("Squat", note="too easy"),
+                         self._ex("Squat", note="too easy")], week_num=7)
+        program_data = {"current_week": {}, "recent_weeks": [w1, w2]}
         result = self._call(program_data)
         squat = [f for f in result if f["lift"] == "Squat"][0]
         assert squat["count"] >= 3

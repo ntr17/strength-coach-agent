@@ -447,11 +447,19 @@ def write_coach_state_summaries(
                 if health_log_for_nutrition:
                     fatigue = projections.get("fatigue") if projections else None
                     athlete_profile = memory_data.get("athlete_profile", "")
-                    nutrition_summary = generate_nutrition_summary(
+                    nutrition_summary, nutrition_cost = generate_nutrition_summary(
                         health_log_for_nutrition, fatigue, athlete_profile
                     )
                     if nutrition_summary:
                         _write_state(upsert_coach_state, "NUTRITION", nutrition_summary, "MEDIUM", dry_run)
+                    if nutrition_cost and not dry_run:
+                        from memory import log_coach_run
+                        log_coach_run(
+                            observations=f"NUTRITION Haiku pass (weekly)",
+                            email_summary=f"[NUTRITION] {(nutrition_summary or '')[:200]}",
+                            cost_usd=nutrition_cost,
+                        )
+                        print(f"    [NUTRITION] Haiku cost: ${nutrition_cost:.4f}")
             except Exception as e:
                 print(f"  NUTRITION Coach State write failed (non-fatal): {e}")
 
@@ -558,12 +566,14 @@ def detect_difficulty_patterns(program_data: dict,
     HARD_KEYWORDS = {"failed", "fail", "missed", "couldn't", "too heavy", "struggled", "couldn't finish"}
 
     lift_signals: dict[str, list[str]] = {}  # lift_name → ["easy"|"hard", ...]
+    lift_weeks: dict[str, set] = {}           # lift_name → set of week nums with signals
 
     current_week = program_data.get("current_week", {})
     recent_weeks = program_data.get("recent_weeks", [])
     all_weeks = recent_weeks + ([current_week] if current_week else [])
 
     for week in all_weeks:
+        week_num = week.get("week_num", 0)
         for day in week.get("days", []):
             for ex in day.get("exercises", []):
                 name = (ex.get("name") or "").strip()
@@ -583,6 +593,7 @@ def detect_difficulty_patterns(program_data: dict,
 
                 if signal:
                     lift_signals.setdefault(name, []).append(signal)
+                    lift_weeks.setdefault(name, set()).add(week_num)
 
     # Supplement with Telegram MOOD_PERFORMANCE notes
     if telegram_log:
@@ -598,6 +609,9 @@ def detect_difficulty_patterns(program_data: dict,
     flags = []
     for lift_name, signals in lift_signals.items():
         if len(signals) < 3:
+            continue
+        # Require signals from at least 2 different weeks to avoid one-week flukes
+        if len(lift_weeks.get(lift_name, set())) < 2:
             continue
         recent = signals[-6:]
         easy_count = recent.count("easy")
@@ -1001,7 +1015,7 @@ def run_proactive(dry_run: bool = False):
         if health_tg:
             if dry_run:
                 print(f"  [DRY RUN] HealthAgent would send: {health_tg}")
-            elif not tg_alert:  # only send if main proactive pass didn't already send
+            else:
                 from telegram_utils import send_telegram_message
                 sent = send_telegram_message(health_tg)
                 if sent:
@@ -1010,8 +1024,6 @@ def run_proactive(dry_run: bool = False):
                         observations="Health proactive check-in",
                         email_summary=f"[HEALTH_PROACTIVE] {health_tg}",
                     )
-            else:
-                print(f"  HealthAgent wanted to send but main pass already sent — skipping.")
         else:
             print("  HealthAgent proactive: no health outreach needed.")
     except Exception as e:
@@ -1372,6 +1384,16 @@ def run(week_num: int = None, dry_run: bool = False, no_sync: bool = False,
                 f"Score {sq['score']}/100 | completion {sq['completion_pct']}% | "
                 f"RPE alignment {sq['rpe_alignment']}% | mood {sq['mood']} | {sq['session_label']}"
             )
+            # Append rolling history: read previous value, keep last 5 scores
+            import re as _re_sq
+            prev_state = memory_data.get("coach_state", {})
+            prev_sq = prev_state.get("SESSION_QUALITY", {}).get("summary", "")
+            history_match = _re_sq.search(r'History:\s*\[([^\]]*)\]', prev_sq)
+            prev_scores = [s.strip() for s in history_match.group(1).split(",") if s.strip()] if history_match else []
+            prev_scores.append(str(sq['score']))
+            prev_scores = prev_scores[-5:]  # keep last 5
+            avg_score = round(sum(float(s) for s in prev_scores) / len(prev_scores), 1)
+            sq_summary += f" | History: [{', '.join(prev_scores)}] avg={avg_score}"
             print(f"    → Session quality: {sq_summary}")
             if not dry_run and not no_sync:
                 from memory import upsert_coach_state

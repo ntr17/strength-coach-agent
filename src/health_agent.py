@@ -281,7 +281,12 @@ def generate_nutrition_summary(health_log: list, training_load: dict = None,
             max_tokens=300,
             messages=[{"role": "user", "content": prompt}]
         )
-        return response.content[0].text.strip()
+        # Haiku pricing: $0.80/M input, $4/M output
+        cost = (
+            response.usage.input_tokens / 1_000_000 * 0.80
+            + response.usage.output_tokens / 1_000_000 * 4.0
+        )
+        return response.content[0].text.strip(), cost
     except Exception as e:
         print(f"  Nutrition summary generation failed (non-fatal): {e}")
-        return ""
+        return "", 0.0

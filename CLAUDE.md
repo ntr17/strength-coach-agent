@@ -109,3 +109,8 @@ These apply every session without being asked:
 - Save decisions, preferences, and next steps to memory files as they happen
 - Keep the "Next Session Priorities" in MEMORY.md current after every session
 - If the user says "remember X", save it immediately to the right memory file
+
+### Always finish the job
+- Never leave tasks half-done and tell the user "there are still things remaining"
+- If a session has multiple tasks, complete them all in one run before responding
+- If something is blocked or uncertain, state the blocker and complete everything else — don't stop

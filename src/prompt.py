@@ -1297,15 +1297,22 @@ def build_proactive_prompt(memory_data: dict, program_data: dict = None) -> tupl
     # Coach Focus — OPEN items only
     focus_text = _format_coach_focus(memory_data.get("coach_focus", [])) or "  (none)"
 
-    # Recent Telegram — last 14 days
-    cutoff = str(today - timedelta(days=14))
-    tg_rows = [r for r in memory_data.get("telegram_log", [])
-               if r.get("Date", "") >= cutoff]
-    tg_rows = sorted(tg_rows, key=lambda r: (r.get("Date", ""), r.get("Time", "")))
-    tg_text = "\n".join(
+    # Telegram — two-tier:
+    #   Tier 0 (old, >7 days): use TELEGRAM_HISTORY compressed summary from Coach State
+    #   Tier 1 (recent, last 7 days): raw log entries for full fidelity
+    tg_history_summary = coach_state.get("TELEGRAM_HISTORY", {}).get("summary", "")
+    cutoff_7d = str(today - timedelta(days=7))
+    tg_recent_rows = [r for r in memory_data.get("telegram_log", [])
+                      if r.get("Date", "") >= cutoff_7d]
+    tg_recent_rows = sorted(tg_recent_rows, key=lambda r: (r.get("Date", ""), r.get("Time", "")))
+    tg_recent_text = "\n".join(
         f"  [{r.get('Date','')} {r.get('Direction','')}] {r.get('Message','')[:120]}"
-        for r in tg_rows[-20:]
-    ) or "  (no recent messages)"
+        for r in tg_recent_rows[-15:]
+    ) or "  (no messages in last 7 days)"
+    tg_text = ""
+    if tg_history_summary:
+        tg_text += f"OLDER HISTORY (compressed):\n  {tg_history_summary}\n\n"
+    tg_text += f"LAST 7 DAYS (raw):\n{tg_recent_text}"
 
     # Active Commands
     active_cmds = [
@@ -1382,7 +1389,7 @@ def build_proactive_prompt(memory_data: dict, program_data: dict = None) -> tupl
 ## RECENT HEALTH LOG (last 7 days)
 {health_text}
 
-## RECENT TELEGRAM CONVERSATION (last 14 days)
+## TELEGRAM CONVERSATION HISTORY
 {tg_text}
 
 ## ACTIVE COMMANDS (includes PENDING_CATCHUP, OPEN_QUESTION, PENDING_PROPOSAL)
