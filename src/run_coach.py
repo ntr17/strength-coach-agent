@@ -968,30 +968,22 @@ def run_proactive(dry_run: bool = False):
     _, tg_alert = extract_telegram_alert(output)
     _, focus_updates = parse_coach_focus_markers(output)
 
+    today_str = str(today)
     if tg_alert:
         if dry_run:
             print(f"  [DRY RUN] Would send Telegram: {tg_alert}")
         else:
-            # Dedup gate: don't send if we already sent a proactive message in the last 4 hours
-            from datetime import datetime as _dt
-            now_str = _dt.utcnow().strftime("%Y-%m-%dT%H:%M")
+            # Dedup: one proactive message per day
             last_sent = coach_state.get("LAST_PROACTIVE", {}).get("summary", "")
-            hours_since = 999
-            if last_sent:
-                try:
-                    last_dt = _dt.strptime(last_sent[:16], "%Y-%m-%dT%H:%M")
-                    hours_since = (_dt.utcnow() - last_dt).total_seconds() / 3600
-                except Exception:
-                    pass
-            if hours_since < 4:
-                print(f"  Proactive dedup: last sent {hours_since:.1f}h ago — skipping.")
+            if last_sent == today_str:
+                print(f"  Proactive dedup: already sent today — skipping.")
             else:
                 from telegram_utils import send_telegram_message
                 sent = send_telegram_message(tg_alert)
                 if sent:
                     print(f"  Proactive Telegram sent: {tg_alert[:80]}")
                     from memory import upsert_coach_state
-                    upsert_coach_state("LAST_PROACTIVE", now_str, "HIGH")
+                    upsert_coach_state("LAST_PROACTIVE", today_str, "HIGH")
                     log_coach_run(
                         observations="Proactive check-in pass",
                         email_summary=f"[PROACTIVE] {tg_alert}",
@@ -1002,30 +994,37 @@ def run_proactive(dry_run: bool = False):
     if focus_updates and not dry_run:
         write_coach_focus_updates(focus_updates)
 
-    # --- HealthAgent proactive check (Haiku, runs after main proactive pass) ---
+    # --- HealthAgent proactive check (Haiku, once per day) ---
     try:
         from health_agent import run_health_proactive
-        athlete_profile = ""
-        try:
-            from memory import read_athlete_profile
-            athlete_profile = read_athlete_profile()
-        except Exception:
-            pass
-        health_tg = run_health_proactive(health_log, coach_state, athlete_profile)
-        if health_tg:
-            if dry_run:
-                print(f"  [DRY RUN] HealthAgent would send: {health_tg}")
-            else:
-                from telegram_utils import send_telegram_message
-                sent = send_telegram_message(health_tg)
-                if sent:
-                    print(f"  HealthAgent proactive sent: {health_tg[:80]}")
-                    log_coach_run(
-                        observations="Health proactive check-in",
-                        email_summary=f"[HEALTH_PROACTIVE] {health_tg}",
-                    )
+        # Dedup: only once per day — HealthAgent can run on both 08:00 and 14:00 passes
+        last_health = coach_state.get("LAST_HEALTH_PROACTIVE", {}).get("summary", "")
+        if last_health == today_str and not dry_run:
+            print("  HealthAgent proactive: already sent today — skipping.")
         else:
-            print("  HealthAgent proactive: no health outreach needed.")
+            athlete_profile = ""
+            try:
+                from memory import read_athlete_profile
+                athlete_profile = read_athlete_profile()
+            except Exception:
+                pass
+            health_tg = run_health_proactive(health_log, coach_state, athlete_profile)
+            if health_tg:
+                if dry_run:
+                    print(f"  [DRY RUN] HealthAgent would send: {health_tg}")
+                else:
+                    from telegram_utils import send_telegram_message
+                    sent = send_telegram_message(health_tg)
+                    if sent:
+                        print(f"  HealthAgent proactive sent: {health_tg[:80]}")
+                        from memory import upsert_coach_state
+                        upsert_coach_state("LAST_HEALTH_PROACTIVE", today_str, "HIGH")
+                        log_coach_run(
+                            observations="Health proactive check-in",
+                            email_summary=f"[HEALTH_PROACTIVE] {health_tg}",
+                        )
+            else:
+                print("  HealthAgent proactive: no health outreach needed.")
     except Exception as e:
         print(f"  HealthAgent proactive failed (non-fatal): {e}")
 
