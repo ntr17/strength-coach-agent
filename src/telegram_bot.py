@@ -1293,13 +1293,14 @@ async def handle_chart(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 def _classify_intent(message: str) -> str:
     """
-    Use Haiku to classify the athlete's message into one of four routing categories:
+    Use Haiku to classify the athlete's message into one of five routing categories:
       WORKOUT  — today's session, substitutions, adaptation, specific exercises/sets/reps
       HEALTH   — nutrition, recovery, sleep, blood tests, HRV, injury, supplement questions
       PROGRAM  — structural program change requests (new block, periodization, deload week)
+      META     — asking the coach to self-critique, suggest improvements, or explain its reasoning
       GENERAL  — everything else (progress check, motivation, life context, chat)
 
-    Returns one of: "WORKOUT" | "HEALTH" | "PROGRAM" | "GENERAL"
+    Returns one of: "WORKOUT" | "HEALTH" | "PROGRAM" | "META" | "GENERAL"
     Defaults to "GENERAL" on any error.
     """
     client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
@@ -1315,15 +1316,19 @@ def _classify_intent(message: str) -> str:
                 "HEALTH — nutrition, recovery, sleep, blood tests, HRV, injury/pain management, supplements\n"
                 "PROGRAM — requests to restructure the ENTIRE training program: create a new block, "
                 "add a deload week, redesign the overall periodization plan, switch programs entirely\n"
+                "META — athlete asks the coach to self-critique, suggest improvements to itself, explain "
+                "its reasoning, review its own coaching quality, or do a meta-analysis. Examples: "
+                "'how could you improve?', 'what are you missing?', 'critique your coaching', "
+                "'suggest updates to how you coach me', 'meta coach', 'improve yourself'\n"
                 "GENERAL — everything else: progress updates, checking in, motivation, life context, "
                 "adding notes or comments to the sheet, simple weight/reps tweaks, anything that is NOT "
                 "a full program redesign\n\n"
-                "Reply with exactly one word: WORKOUT, HEALTH, PROGRAM, or GENERAL."
+                "Reply with exactly one word: WORKOUT, HEALTH, PROGRAM, META, or GENERAL."
             ),
             messages=[{"role": "user", "content": message}],
         )
         intent = result.content[0].text.strip().upper()
-        if intent in ("WORKOUT", "HEALTH", "PROGRAM", "GENERAL"):
+        if intent in ("WORKOUT", "HEALTH", "PROGRAM", "META", "GENERAL"):
             return intent
         return "GENERAL"
     except Exception as e:
@@ -1412,7 +1417,26 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         except Exception as e:
             print(f"[WorkoutToolUse] Failed (falling back): {e}")
 
-    # GENERAL intent (or fallback from failed specialized agent/workout) — tool use
+    elif intent == "META":
+        try:
+            await update.message.reply_text(
+                "Running a self-critique now — give me 20 seconds..."
+            )
+            await context.bot.send_chat_action(
+                chat_id=update.effective_chat.id, action="typing"
+            )
+            import asyncio as _asyncio
+            loop = _asyncio.get_event_loop()
+            from run_coach import run_meta_improvement
+            analysis = await loop.run_in_executor(None, lambda: run_meta_improvement(dry_run=False))
+            # run_meta_improvement already sends the Telegram message; just log it
+            _log_message("OUT", f"[meta-improvement] {analysis[:200]}")
+            return
+        except Exception as e:
+            print(f"[Meta] Failed (falling back): {e}")
+            # Fall through to GENERAL handler
+
+    # GENERAL intent (or fallback from failed specialized agent/workout/meta) — tool use
     try:
         response = await _generate_response_with_tools(
             user_text, update.effective_chat.id, context.bot, intent="GENERAL"

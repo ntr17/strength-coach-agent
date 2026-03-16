@@ -57,6 +57,8 @@ def parse_args():
                         help="Sunday schedule discovery: ask about this week's training plan via Telegram.")
     parser.add_argument("--steer-co-finalize", action="store_true",
                         help="Synthesize steer co conversation + send comprehensive email.")
+    parser.add_argument("--meta", action="store_true",
+                        help="Coach self-critique: analyse coaching quality + surface improvements via Telegram.")
     return parser.parse_args()
 
 
@@ -262,6 +264,15 @@ def write_coach_focus_updates(updates: list[dict]) -> None:
             else:
                 append_coach_focus(category, item, last_mentioned=today)
                 print(f"    [Focus] {category}: {item[:80]}")
+                # FOLLOWUP items also create a dated OPEN_QUESTION command.
+                # This anchors when the question was asked and what context prompted it —
+                # so the coach can say "I asked you about this on Tuesday after Day 2" not just "I asked".
+                if category == "FOLLOWUP":
+                    try:
+                        from memory import append_command
+                        append_command("OPEN_QUESTION", f"[asked {today}] {item}")
+                    except Exception:
+                        pass
     except Exception as e:
         print(f"  Coach focus update failed (non-fatal): {e}")
 
@@ -553,6 +564,80 @@ def _extract_commit_markers(email_text: str) -> tuple[str, list[dict]]:
             commits.append({"commitment": commitment, "due_date": due_date})
     clean = re.sub(pattern, '', email_text, flags=re.IGNORECASE | re.DOTALL).strip()
     return clean, commits
+
+
+def extract_schedule_markers(text: str) -> tuple[str, list[dict]]:
+    """
+    Extract [SCHEDULE: YYYY-MM-DD | message text] markers from coach output.
+    Returns (clean_text, list of {target_date, message} dicts).
+
+    These allow the coach to schedule a specific Telegram message for a future date.
+    Example: [SCHEDULE: 2026-03-20 | How's the elbow feeling after this week's pull volume?]
+    """
+    import re
+    schedules = []
+    pattern = r'\[SCHEDULE:\s*(.*?)\]'
+    for match in re.finditer(pattern, text, re.IGNORECASE | re.DOTALL):
+        raw = match.group(1).strip()
+        if " | " in raw:
+            parts = raw.split(" | ", 1)
+            target_date = parts[0].strip()
+            message = parts[1].strip()
+            if message:
+                schedules.append({"target_date": target_date, "message": message})
+    clean = re.sub(pattern, '', text, flags=re.IGNORECASE | re.DOTALL).strip()
+    return clean, schedules
+
+
+def run_scheduled_messages(dry_run: bool = False) -> int:
+    """
+    Check the Commands tab for SCHEDULED_MESSAGE entries due today or overdue.
+    For each one, send the Telegram message and mark it applied.
+    Returns number of messages sent.
+
+    Messages are stored as:  SCHEDULED_MESSAGE | YYYY-MM-DD | message text
+    Written by extract_schedule_markers() when coach emits [SCHEDULE: date | msg].
+    """
+    from memory import read_commands
+    today_str = str(date.today())
+    commands = read_commands() if not dry_run else []
+    sent_count = 0
+
+    for cmd in commands:
+        if cmd.get("Command", "").upper() != "SCHEDULED_MESSAGE":
+            continue
+        if cmd.get("Applied", "").upper() in ("Y", "DECLINED"):
+            continue
+        # Value format: "YYYY-MM-DD | message text"
+        value = cmd.get("Value", "")
+        if " | " not in value:
+            continue
+        parts = value.split(" | ", 1)
+        target_date = parts[0].strip()[:10]
+        message = parts[1].strip()
+        if not message or target_date > today_str:
+            continue  # not due yet
+
+        if dry_run:
+            print(f"  [DRY RUN] Would fire scheduled message for {target_date}: {message[:80]}")
+            continue
+
+        try:
+            from telegram_utils import send_telegram_message
+            sent = send_telegram_message(message)
+            if sent:
+                print(f"  [SCHEDULED_MESSAGE] Sent (due {target_date}): {message[:80]}")
+                # Mark applied
+                try:
+                    from memory import update_command_applied
+                    update_command_applied(cmd.get("_row_index"), "Y")
+                except Exception:
+                    pass
+                sent_count += 1
+        except Exception as e:
+            print(f"  [SCHEDULED_MESSAGE] Send failed (non-fatal): {e}")
+
+    return sent_count
 
 
 def log_pending_proposal(proposal_text: str, existing_commands: list[dict]) -> None:
@@ -1798,6 +1883,14 @@ def run_proactive(dry_run: bool = False):
     except Exception as e:
         print(f"  HealthAgent proactive failed (non-fatal): {e}")
 
+    # --- Fire any scheduled messages due today ---
+    try:
+        n_sched = run_scheduled_messages(dry_run=dry_run)
+        if n_sched:
+            print(f"  {n_sched} scheduled message(s) fired.")
+    except Exception as e:
+        print(f"  Scheduled messages failed (non-fatal): {e}")
+
     # --- Schedule discovery fallback: if it hasn't happened in 6+ days, ask now ---
     # This catches missed Sunday discoveries (e.g. it's already midday Sunday, or a weekday catch-up)
     try:
@@ -2062,6 +2155,7 @@ def run(week_num: int = None, dry_run: bool = False, no_sync: bool = False,
         tonnage_by_lift=projections.get("tonnage_by_lift"),
         cross_program=projections.get("cross_program", ""),
         goal_proximity=goal_proximity,
+        long_term_projections=projections.get("long_term", {}),
     )
     system_prompt, user_message = build_prompt(program_data, memory_data, **_prompt_kwargs)
 
@@ -2206,6 +2300,22 @@ def run(week_num: int = None, dry_run: bool = False, no_sync: bool = False,
         elif dry_run:
             for u in focus_updates:
                 print(f"    [DRY RUN] {u['category']}: {u['item'][:80]}")
+
+    # Extract [SCHEDULE: YYYY-MM-DD | message] markers — stored as SCHEDULED_MESSAGE commands
+    email_text, schedule_items = extract_schedule_markers(email_text)
+    if schedule_items:
+        print(f"  [Scheduled messages]: {len(schedule_items)} future message(s) queued")
+        if not dry_run and not no_sync:
+            try:
+                from memory import append_command
+                for si in schedule_items:
+                    append_command("SCHEDULED_MESSAGE", f"{si['target_date']} | {si['message']}")
+                    print(f"    [Schedule] {si['target_date']}: {si['message'][:60]}")
+            except Exception as e:
+                print(f"    Schedule logging failed (non-fatal): {e}")
+        elif dry_run:
+            for si in schedule_items:
+                print(f"    [DRY RUN] SCHEDULE {si['target_date']}: {si['message'][:60]}")
 
     # Extract [COMMIT: ...] markers — coach promises logged to Commitments tab
     email_text, commit_items = _extract_commit_markers(email_text)
@@ -2389,13 +2499,33 @@ def run_brief(dry_run: bool = False):
 
     current_week = program_data.get("current_week", {})
     today_str = today.strftime("%A")
+
+    # Day-name matching: labels can be "DAY 1: Squat + Bench" (won't match "Monday")
+    # or "MONDAY - Squat" (will match). Try day-name first; fall back to next undone session.
     today_sessions = [
         day for day in current_week.get("days", [])
         if today_str.lower() in day.get("label", "").lower()
     ]
+    if not today_sessions:
+        # Fallback: check WEEKLY_SCHEDULE to confirm today is a training day,
+        # then use the next undone session of the week.
+        weekly_schedule = coach_state.get("WEEKLY_SCHEDULE", {}).get("summary", "")
+        today_abbrev = today.strftime("%a").lower()  # "mon", "tue", etc.
+        is_training_today = (
+            any(kw in weekly_schedule.lower() for kw in (today_abbrev, today_str.lower()))
+            or not weekly_schedule  # no schedule known → try anyway
+        )
+        if is_training_today:
+            all_undone = [
+                day for day in current_week.get("days", [])
+                if not any(ex.get("done") is True for ex in day.get("exercises", []))
+            ]
+            if all_undone:
+                today_sessions = [all_undone[0]]
+                print(f"  Brief: day-name fallback — using next undone session: {all_undone[0].get('label', '?')}")
 
     if not today_sessions:
-        print("  Brief: no session scheduled today — skipping.")
+        print("  Brief: no session found for today — skipping.")
         return
 
     # Check if session already done
@@ -2419,20 +2549,13 @@ def run_brief(dry_run: bool = False):
 
     # Pull relevant Coach State context
     state_notes = []
-    for domain in ("SQUAT", "BENCH", "DEADLIFT", "OHP", "HEALTH"):
+    for domain in ("SQUAT", "BENCH", "DEADLIFT", "OHP", "HEALTH", "SESSION_QUALITY"):
         s = coach_state.get(domain, {}).get("summary", "")
         if s:
-            state_notes.append(f"  {domain}: {s[:100]}")
+            state_notes.append(f"  {domain}: {s[:120]}")
 
     # Weekly intent — the reason this session matters
     weekly_intent = coach_state.get("WEEKLY_INTENT", {}).get("summary", "")
-
-    # RPE history for today's key lifts — from Coach State
-    rpe_notes = []
-    for domain in ("SQUAT", "BENCH", "DEADLIFT", "OHP"):
-        s = coach_state.get(domain, {}).get("summary", "")
-        if s and "rpe" in s.lower():
-            rpe_notes.append(f"  {domain}: {s[:80]}")
 
     # Open commitments
     open_commitments = read_commitments("OPEN")
@@ -2440,7 +2563,8 @@ def run_brief(dry_run: bool = False):
     if open_commitments:
         commitment_note = " | ".join(c["Commitment"][:80] for c in open_commitments[:2])
 
-    # Select contextually relevant cues for today's primary lift
+    # Select contextually relevant cues for today's primary lift.
+    # Also pull recent Telegram technique mentions to make cues more targeted.
     primary_lift = ""
     primary_lift_notes = ""
     for day in today_sessions:
@@ -2451,43 +2575,61 @@ def run_brief(dry_run: bool = False):
                 break
         if primary_lift:
             break
-    cues = _select_lift_cue(primary_lift, coach_state, primary_lift_notes) if primary_lift else []
-    cue_text = "\n".join(f"  - {c}" for c in cues) if cues else "(no specific cues — use general principles)"
 
-    # Build brief via Haiku
+    # Recent Telegram technique/form mentions — informs cue selection
+    recent_tech_notes = ""
+    try:
+        from memory import read_telegram_log
+        all_tg = read_telegram_log(limit=15)
+        tech_keywords = ["form", "technique", "bar path", "depth", "shoulder", "elbow",
+                         "knee", "back", "wrist", "grip", "arch", "setup", "felt", "moved"]
+        tech_msgs = [
+            m.get("Message", "")[:100]
+            for m in all_tg[-10:]
+            if m.get("Direction", "").upper() in ("IN", "ATHLETE")
+            and any(kw in m.get("Message", "").lower() for kw in tech_keywords)
+        ]
+        if tech_msgs:
+            recent_tech_notes = " / ".join(tech_msgs[-3:])
+            # Pass to cue selector for context-aware selection
+            primary_lift_notes = (primary_lift_notes + " " + recent_tech_notes).strip()
+    except Exception:
+        pass
+
+    cues = _select_lift_cue(primary_lift, coach_state, primary_lift_notes) if primary_lift else []
+    cue_text = "\n".join(f"  - {c}" for c in cues) if cues else "(use general principles)"
+
+    # Build brief via Haiku — free-form, not templated
     session_text = "\n".join(session_lines) or "session details unavailable"
     state_text = "\n".join(state_notes) or "(no state data)"
-    rpe_text = "\n".join(rpe_notes) or "(no RPE history)"
 
-    prompt = f"""You are {ATHLETE_NAME}'s strength coach. Write a pre-session Telegram message (3-4 sentences).
+    prompt = f"""You are {ATHLETE_NAME}'s strength coach. Write a pre-session Telegram message.
 
-The message must:
-1. CONTEXT: Reference why this session matters — what the week is working toward, or where we are in the training block. One sentence.
-2. KEY FOCUS: Name the primary lift and exact target. Give ONE execution cue that is actually relevant
-   today — decide based on RPE history, recent notes, and what the athlete likely needs.
-   Choose from the CUE OPTIONS below (or combine/rephrase them), but always pick what is most
-   relevant to this specific session. Don't include all of them — choose ONE best cue.
-3. ONE READINESS NOTE: Based on coach state / RPE history, set expectations. "Last time this felt RPE 8 — target the same today."
-4. OPTIONAL: If there's an open commitment or concern, one line.
+STRICT RULES:
+- 2-4 sentences MAX. No greeting, no sign-off.
+- Do NOT follow a template. Every brief must feel different from the last.
+- Lead with the single most important thing from the context below — it might be a form cue,
+  a readiness note, a motivating connection to the weekly goal, or a specific concern.
+- Reference actual numbers, actual lift names, actual context. Never be generic.
+- If recent Telegram mentioned a technique issue, address it. If RPE was high last session, say so.
+- One specific cue for the primary lift — choose from the options below, but only use it if it fits.
 
 TODAY'S SESSION ({today_str}):
 {session_text}
 
 WEEKLY INTENT:
-{weekly_intent or '(not set — reference the program phase)'}
+{weekly_intent or '(not set)'}
 
-COACH STATE:
+COACH STATE (RPE history, trends, concerns):
 {state_text}
 
-RPE HISTORY:
-{rpe_text}
-
-CUE OPTIONS FOR {primary_lift.upper() or "TODAY'S PRIMARY LIFT"}:
+TECHNIQUE CUE OPTIONS FOR {primary_lift.upper() or "TODAY'S MAIN LIFT"}:
 {cue_text}
 
+{f"RECENT ATHLETE TECHNIQUE MENTIONS: {recent_tech_notes}" if recent_tech_notes else ""}
 {f"OPEN COMMITMENT: {commitment_note}" if commitment_note else ""}
 
-Rules: No greeting, no sign-off. Max 4 sentences. Direct coaching language only."""
+Write the message now. Make it land. Every brief should feel different."""
 
     # Enforce athlete output preferences as hard constraints
     try:
@@ -3495,6 +3637,137 @@ def run_export(output_file: str = None, dry_run: bool = False):
 
 
 # ---------------------------------------------------------------------------
+# Meta-improvement: coach critiques itself and surfaces concrete suggestions
+# ---------------------------------------------------------------------------
+
+def run_meta_improvement(dry_run: bool = False) -> str:
+    """
+    The coach reads its own memory — Coach State, Coach Log, recent Telegram,
+    athlete profile, open questions — and critiques its own coaching quality.
+
+    Produces 3-5 concrete improvement suggestions surfaced to the athlete via
+    Telegram. Each suggestion can be a behaviour change, a missing data request,
+    a code feature idea, or a coaching adjustment.
+
+    Called from: Telegram "meta" / "suggest improvements" keyword routing,
+    or manually with --meta flag.
+    """
+    from memory import read_all, read_telegram_log, read_coach_log
+    from telegram_utils import send_message as send_telegram_message
+
+    today = date.today()
+    print(f"[{today}] Running meta-improvement pass...")
+
+    memory_data = read_all()
+    coach_state = memory_data.get("coach_state", {})
+    athlete_profile = memory_data.get("athlete_profile", "")
+    long_term_goals = memory_data.get("long_term_goals", "")
+    open_questions = [
+        c for c in memory_data.get("commands", [])
+        if c.get("Command", "").upper() == "OPEN_QUESTION"
+        and c.get("Applied", "").upper() not in ("Y", "DECLINED")
+    ]
+    telegram_log = read_telegram_log(limit=30)
+    coach_log = read_coach_log(limit=5)
+
+    # Format recent Telegram exchange
+    recent_tg = "\n".join(
+        f"  [{r.get('Direction','?')}] {str(r.get('Message',''))[:200]}"
+        for r in telegram_log[-20:]
+    ) or "(none)"
+
+    # Format open questions awaiting answers
+    open_q_text = "\n".join(
+        f"  - {c.get('Value','')}"
+        for c in open_questions[:10]
+    ) or "(none)"
+
+    # Key Coach State domains most relevant to coaching quality
+    key_domains = ["ATHLETE_MODEL", "ATHLETE_DREAMS", "BEHAVIOR_PATTERNS",
+                   "SESSION_QUALITY", "HEALTH", "SCHEDULE", "WEEKLY_SCHEDULE"]
+    state_snapshot = "\n".join(
+        f"  {domain}: {coach_state.get(domain, {}).get('summary', '(empty)')[:300]}"
+        for domain in key_domains
+    )
+
+    # Last few coach log entries
+    recent_log = "\n".join(
+        f"  [{e.get('Date','')}] {str(e.get('Entry',''))[:200]}"
+        for e in (coach_log or [])[-5:]
+    ) or "(none)"
+
+    system_msg = (
+        "You are an elite strength & conditioning coach doing a rigorous self-critique. "
+        "You have full access to your memory and recent interactions with your athlete. "
+        "Your job is to identify gaps, blind spots, and improvements in your own coaching — "
+        "not platitudes, but real specific problems and concrete fixes. "
+        "Think like a sports scientist reviewing their own practice."
+    )
+
+    user_msg = f"""SELF-CRITIQUE: Analyse the quality of my coaching over the past weeks.
+
+ATHLETE PROFILE:
+{athlete_profile[:500] if athlete_profile else "(not set)"}
+
+LONG-TERM GOALS:
+{long_term_goals[:300] if long_term_goals else "(not set)"}
+
+KEY COACH STATE DOMAINS:
+{state_snapshot}
+
+OPEN QUESTIONS (unanswered follow-ups I asked the athlete):
+{open_q_text}
+
+RECENT TELEGRAM (last 20 messages):
+{recent_tg}
+
+RECENT COACH LOG (last 5 entries):
+{recent_log}
+
+---
+
+Identify the 4-5 most impactful improvements I could make to my coaching of this athlete RIGHT NOW.
+
+For each improvement:
+- What is the concrete gap or missed opportunity?
+- What specific change would fix it (behaviour, question, data, code feature)?
+- Why does it matter for THIS athlete's trajectory?
+
+Be brutally honest. Skip generic advice. Reference actual data from above.
+End with one thing the athlete should do TODAY that I haven't asked them yet.
+
+Format: numbered list, concise. Max 400 words total."""
+
+    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+    try:
+        resp = client.messages.create(
+            model=CLAUDE_MODEL,
+            max_tokens=600,
+            system=system_msg,
+            messages=[{"role": "user", "content": user_msg}],
+        )
+        analysis = resp.content[0].text.strip()
+    except Exception as e:
+        print(f"  [meta] Claude call failed: {e}")
+        return ""
+
+    message = f"🔍 *Coach self-critique* (meta-improvement pass):\n\n{analysis}"
+
+    if dry_run:
+        print(f"[DRY RUN] Meta-improvement message:\n{message}")
+        return analysis
+
+    try:
+        send_telegram_message(message)
+        print(f"  [meta] Sent meta-improvement analysis to Telegram.")
+    except Exception as e:
+        print(f"  [meta] Telegram send failed: {e}")
+        print(f"  [meta] Analysis:\n{analysis}")
+
+    return analysis
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
@@ -3527,6 +3800,8 @@ if __name__ == "__main__":
         elif getattr(args, "steer_co_finalize", False):
             from planner import run_steer_co_finalize
             run_steer_co_finalize(dry_run=args.dry_run)
+        elif getattr(args, "meta", False):
+            run_meta_improvement(dry_run=args.dry_run)
         elif args.export:
             from datetime import datetime as _dt
             fname = f"coach_export_{_dt.today().strftime('%Y%m%d')}.json"
