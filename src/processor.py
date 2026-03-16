@@ -72,6 +72,14 @@ CATEGORIES:
 - QUESTION         — athlete has a coaching question or wants advice. NOT structural program changes.
                      Examples: "why is my bench stalling?", "should I eat more on training days?",
                      "how is my squat progressing?", "what's my estimated 1RM?"
+- LIFE_GOAL        — athlete expresses a long-term dream, aspiration, or big-picture life goal related to
+                     sport, health, or personal achievement. NOT a near-term training goal (that's QUESTION).
+                     Signals: "I want to compete", "my dream is", "eventually I want to do Olympic lifting",
+                     "I'd love to run a marathon", "I want to look like", "I want to be able to", "a dream of mine",
+                     "someday", "long term I want", "mi sueño", "quiero competir", "goal of my life", "bucket list".
+                     FACT: state the dream clearly and verbatim if possible.
+                     Examples: "Athlete wants to eventually compete in Olympic weightlifting",
+                     "Long-term dream: run a marathon under 3 hours", "Wants to reach 100kg squat as a life goal"
 - NOISE            — chitchat, acknowledgment, emoji-only, irrelevant
 
 OUTPUT FORMAT (one line per extracted fact):
@@ -109,6 +117,8 @@ PROGRAM_REQUEST | 2026-03-12 | Athlete wants comeback sessions after 2-week vaca
 PROGRAM_REQUEST | 2026-03-14 | Athlete asking for deload week after next heavy week
 QUESTION | 2026-03-07 | Athlete asks whether to add calories on training days
 QUESTION | 2026-03-10 | Athlete asks why bench press has been stalling for 3 weeks
+LIFE_GOAL | 2026-03-10 | Athlete wants to eventually compete in Olympic weightlifting
+LIFE_GOAL | 2026-03-11 | Long-term dream: squat 200kg one day
 """
 
 
@@ -136,7 +146,7 @@ def _parse_processor_output(output: str) -> list[dict]:
         valid_categories = {
             "SCHEDULE_CHANGE", "PENDING_CATCHUP", "LIFE_EVENT", "PREFERENCE",
             "WORKOUT_UNPLANNED", "LIFT_UPDATE", "MOOD_PERFORMANCE", "TRACK_LIFT",
-            "HEALTH_DATA", "PROGRAM_REQUEST", "QUESTION", "NOISE",
+            "HEALTH_DATA", "PROGRAM_REQUEST", "QUESTION", "LIFE_GOAL", "NOISE",
         }
         if category not in valid_categories:
             continue
@@ -331,6 +341,28 @@ def _dispatch_events(events: list[dict], dry_run: bool = False) -> int:
             elif cat == "QUESTION":
                 # Open question — track as FOLLOWUP so coach addresses it
                 append_coach_focus("FOLLOWUP", f"[Athlete question] {fact}", last_mentioned=today)
+                dispatched += 1
+
+            elif cat == "LIFE_GOAL":
+                # Long-term dream / life aspiration — stored in ATHLETE_DREAMS Coach State domain.
+                # This is permanent and high-value: it shapes multi-year coaching strategy.
+                # Also logged to Life Context as a durable record.
+                append_life_context(f"[LIFE_GOAL] {fact}", event_date if event_date != "unknown" else today)
+                try:
+                    from memory import read_coach_state, upsert_coach_state
+                    cs = read_coach_state()
+                    existing = cs.get("ATHLETE_DREAMS", {}).get("summary", "")
+                    # Append to existing dreams (don't overwrite)
+                    updated = f"{existing} | {fact}" if existing and fact not in existing else (existing or fact)
+                    upsert_coach_state("ATHLETE_DREAMS", updated[:500], "HIGH")
+                except Exception:
+                    pass
+                append_coach_focus(
+                    "LANDMARK",
+                    f"[Life goal expressed] {fact}",
+                    last_mentioned=event_date if event_date != "unknown" else today,
+                    priority="HIGH",
+                )
                 dispatched += 1
 
             elif cat == "NOISE":

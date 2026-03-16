@@ -799,6 +799,13 @@ def run_all_projections(
 
     formatted = format_projections_for_prompt(lift_projections, bw_proj, program_proj, fatigue)
 
+    # Long-term projections (1yr, 2yr) — only computed if lift data exists
+    long_term = {}
+    try:
+        long_term = project_long_term(lift_projections, weeks_remaining or 0)
+    except Exception:
+        pass
+
     return {
         "lift_projections": lift_projections,
         "bw_projection": bw_proj,
@@ -809,7 +816,100 @@ def run_all_projections(
         "cross_program": cross_program,
         "goal_proximity": goal_proximity,
         "formatted": formatted,
+        "long_term": long_term,
     }
+
+
+def project_long_term(lift_projections: list[dict], weeks_remaining: int = 0) -> dict:
+    """
+    Project 1RM to 6 months, 1 year, and 2 years beyond current program end.
+
+    Uses the current trend rate but applies a diminishing-returns decay:
+    - Years 1-2: adaptation is still strong, ~15% decay per year on weekly rate
+    - Beyond 2 years: rate slows significantly (~30% per year)
+
+    Also projects what the athlete needs to sustain to hit long-term goals like
+    Olympic lifting (snatch ~80% of BW, clean & jerk ~100% of BW for intermediate).
+
+    Returns: {lift_name: {end_of_program, 6mo, 1yr, 2yr, olympic_readiness?}}
+    """
+    if not lift_projections:
+        return {}
+
+    results: dict[str, dict] = {}
+
+    for proj in lift_projections:
+        if not proj or proj.get("rate_per_week") is None or not proj.get("current_1rm"):
+            continue
+
+        curr_1rm = proj["current_1rm"]
+        rate = proj["rate_per_week"]  # kg/week — can be 0 or negative
+        exercise = proj.get("exercise", "?")
+        target = proj.get("target_1rm")
+
+        # Project end of current program
+        end_of_prog = round(curr_1rm + rate * weeks_remaining, 1) if weeks_remaining > 0 else curr_1rm
+
+        # Beyond program: diminishing returns decay on weekly rate
+        # 6 months post-program = ~26 weeks; 1yr = ~52wk; 2yr = ~104wk
+        def _project(weeks_after_program: int, annual_decay: float = 0.15) -> float:
+            """Project 1RM N weeks after end of program with given annual decay."""
+            years = weeks_after_program / 52.0
+            decay_factor = (1 - annual_decay) ** years
+            gain = rate * decay_factor * weeks_after_program
+            return round(end_of_prog + gain, 1)
+
+        six_mo = _project(26)
+        one_yr = _project(52)
+        two_yr = _project(104)
+
+        entry: dict = {
+            "end_of_program": end_of_prog,
+            "6mo": six_mo,
+            "1yr": one_yr,
+            "2yr": two_yr,
+            "current_rate": rate,
+            "target": target,
+        }
+
+        # Olympic lifting readiness estimate (for squat/deadlift)
+        # Intermediate Olympic lifter benchmarks: Snatch ~80% BW, C&J ~100% BW
+        # These are rough correlates: competitive snatch ≈ 50-60% of back squat 1RM
+        if "squat" in exercise.lower() and one_yr > 0:
+            est_snatch_1yr = round(one_yr * 0.55, 1)
+            est_cj_1yr = round(one_yr * 0.70, 1)
+            entry["olympic_note"] = (
+                f"At 1yr squat of {one_yr}kg: est. snatch ~{est_snatch_1yr}kg, "
+                f"clean & jerk ~{est_cj_1yr}kg (rough transfer heuristic)"
+            )
+
+        results[exercise] = entry
+
+    return results
+
+
+def format_long_term_projections(long_term: dict) -> str:
+    """
+    Format long-term projections for prompt injection.
+    Returns empty string if no data.
+    """
+    if not long_term:
+        return ""
+    lines = []
+    for exercise, proj in long_term.items():
+        parts = [
+            f"end of program: {proj.get('end_of_program', '?')}kg",
+            f"6mo: {proj.get('6mo', '?')}kg",
+            f"1yr: {proj.get('1yr', '?')}kg",
+            f"2yr: {proj.get('2yr', '?')}kg",
+        ]
+        if proj.get("target"):
+            parts.append(f"program target: {proj['target']}kg")
+        line = f"  {exercise}: {' | '.join(parts)}"
+        if proj.get("olympic_note"):
+            line += f"\n    → {proj['olympic_note']}"
+        lines.append(line)
+    return "\n".join(lines)
 
 
 def detect_goal_proximity(lift_projections: list, threshold_kg: float = 5.0) -> list:

@@ -42,6 +42,7 @@ The athlete can shift channels at any time: "reach me on Telegram", "send progra
 - [RESOLVED: text matching what you were tracking] — close an open item
 - [TELEGRAM: brief message] — send a proactive Telegram message right now (alerts, reactions, quick check-ins)
 - [COMMIT: what you promised to follow up on | due: YYYY-MM-DD] — log an explicit promise. Use when you say "I'll check X next week", "I'll revisit Y if Z happens", "I'll follow up on your elbow". Due date is optional.
+- [SCHEDULE: YYYY-MM-DD | message text] — schedule a Telegram message for a specific future date. Use when you want to check in at a precise time: "I'll ask about your elbow on Friday", "I'll follow up on the deload next Monday". The message fires automatically on that date.
 
 **Email format:**
 - Natural prose. No section headers. No bullet lists unless they genuinely help.
@@ -1075,7 +1076,8 @@ def build_prompt(program_data: dict, memory_data: dict,
                  program_complete: bool = False,
                  tonnage_by_lift: dict = None,
                  cross_program: str = "",
-                 goal_proximity: list = None) -> tuple[str, str]:
+                 goal_proximity: list = None,
+                 long_term_projections: dict = None) -> tuple[str, str]:
     """
     Build the system prompt and user message for Claude.
 
@@ -1227,6 +1229,30 @@ def build_prompt(program_data: dict, memory_data: dict,
             "  → Weave this reasoning into the email naturally — one sentence is enough. "
             "The athlete should understand the principle, not just the prescription."
         )
+
+    # --- Athlete Dreams (life-level goals — surface in weekly email to anchor the long view) ---
+    athlete_dreams = coach_state.get("ATHLETE_DREAMS", {}).get("summary", "") if coach_state else ""
+    if athlete_dreams and is_weekly_summary:
+        sections.append(
+            "ATHLETE'S LONG-TERM DREAMS (expressed goals beyond this program — "
+            "surface the connection to today's work when relevant)\n"
+            f"  {athlete_dreams}\n"
+            "  → Don't force it every week. But when the week's work connects to the big goal "
+            "(e.g. squat strength for Olympic lifting), make that link explicit in one sentence."
+        )
+
+    # --- Long-term projections (1yr/2yr — weekly only, for trajectory awareness) ---
+    if is_weekly_summary and long_term_projections:
+        from projections import format_long_term_projections
+        lt_text = format_long_term_projections(long_term_projections)
+        if lt_text:
+            sections.append(
+                "LONG-TERM PROJECTIONS (1yr / 2yr — computed from your current trend, "
+                "with diminishing-returns adjustment. Use to answer 'where is this athlete going?')\n"
+                + lt_text + "\n"
+                "  → Reference the 1yr number in the weekly email if it's relevant to a goal "
+                "or dream the athlete has expressed. Don't list all lifts — pick the one that matters most."
+            )
 
     # --- Athlete Preferences (respect these before making any output decisions) ---
     athlete_prefs = memory_data.get("athlete_preferences", [])
@@ -1510,7 +1536,10 @@ def build_proactive_prompt(memory_data: dict, program_data: dict = None,
         "→ message the athlete directly: 'Fatigue is building. I want us to dial this week back.' "
         "Reference the actual TSB number from the projections if available.\n"
         "7. GOAL PROXIMITY: If Coach State shows a lift within 5kg of its target "
-        "→ mention it with energy. 'You're Xkg away from your squat goal — this week matters.'\n\n"
+        "→ mention it with energy. 'You're Xkg away from your squat goal — this week matters.'\n"
+        "8. MISSING DATA: If the health log shows no bodyweight or sleep logged in 3+ days "
+        "→ ask specifically: 'Haven't seen any bodyweight data in a few days — still tracking, or did something change?' "
+        "Don't be annoying — ask once, then drop it if they don't respond.\n\n"
         "Output rules:\n"
         "- [TELEGRAM: your message] — 1-3 sentences, direct, natural coach voice, not pushy\n"
         "- [PASS: reason] — if no outreach needed right now\n"
@@ -1640,6 +1669,32 @@ def build_proactive_prompt(memory_data: dict, program_data: dict = None,
             "reference what you actually see."
         )
 
+    # --- Missing data check (trigger 8) ---
+    missing_data_section = ""
+    try:
+        health_log_all = memory_data.get("health_log", [])
+        health_dates = sorted(
+            [e.get("Date", "") for e in health_log_all if e.get("Date")],
+            reverse=True,
+        )
+        if health_dates:
+            last_health_iso = health_dates[0][:10]
+            days_gap = (today - date.fromisoformat(last_health_iso)).days
+            if days_gap >= 3:
+                missing_data_section = (
+                    f"\n## MISSING DATA (trigger 8)\n"
+                    f"  No health/bodyweight log in {days_gap} days (last entry: {last_health_iso}).\n"
+                    "  → Ask about it specifically. Not accusatorially — just noticing."
+                )
+        elif not health_dates:
+            missing_data_section = (
+                "\n## MISSING DATA (trigger 8)\n"
+                "  No health log entries at all.\n"
+                "  → Consider asking the athlete to start logging bodyweight and sleep."
+            )
+    except Exception:
+        pass
+
     # --- Topics already covered today (smart dedup) ---
     covered_section = ""
     if topic_coverage:
@@ -1670,7 +1725,7 @@ def build_proactive_prompt(memory_data: dict, program_data: dict = None,
 {tg_text}
 
 ## ACTIVE COMMANDS (includes PENDING_CATCHUP, OPEN_QUESTION, PENDING_PROPOSAL)
-{cmd_text}{travel_section}{commit_section}{intent_section}{delta_section}{covered_section}
+{cmd_text}{travel_section}{commit_section}{intent_section}{delta_section}{missing_data_section}{covered_section}
 
 ---
 Today is {weekday_name}. Time of day: {time_of_day}. Should you reach out right now?
