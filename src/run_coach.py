@@ -931,6 +931,94 @@ def compute_session_quality(program_data: dict, lift_history: list[dict]) -> dic
     }
 
 
+def _detect_session_delta(program_data: dict, coach_state: dict) -> dict:
+    """
+    Compare current program sheet state against LAST_PROGRAM_SNAPSHOT stored in Coach State.
+    Returns a delta dict describing what changed since the last check.
+
+    Delta keys:
+      new_sessions_done: list of {label, exercises_done, exercises_total}
+      newly_skipped:     list of exercise names that appear skipped in a logged session
+      no_rpe_sessions:   list of session labels completed without any RPE data
+      snapshot_updated:  bool (caller should write new snapshot to Coach State)
+    """
+    import json as _json
+
+    current_week = program_data.get("current_week", {})
+    days = current_week.get("days", [])
+
+    # Build current snapshot: {day_label: {exercise_name: done_bool}}
+    current_snapshot = {}
+    for day in days:
+        label = day.get("label", "")
+        current_snapshot[label] = {
+            ex.get("name", f"ex{i}"): ex.get("done", False)
+            for i, ex in enumerate(day.get("exercises", []))
+        }
+
+    # Load previous snapshot from Coach State
+    prev_raw = coach_state.get("LAST_PROGRAM_SNAPSHOT", {}).get("summary", "")
+    prev_snapshot: dict = {}
+    if prev_raw:
+        try:
+            prev_snapshot = _json.loads(prev_raw)
+        except (ValueError, TypeError):
+            pass
+
+    new_sessions_done: list[dict] = []
+    newly_skipped: list[str] = []
+    no_rpe_sessions: list[str] = []
+
+    for day in days:
+        label = day.get("label", "")
+        exercises = day.get("exercises", [])
+        prev_day = prev_snapshot.get(label, {})
+
+        done_exs = [ex for ex in exercises if ex.get("done") is True]
+        skip_exs = [ex for ex in exercises if ex.get("done") is False and ex.get("name")]
+        total_exs = len([ex for ex in exercises if ex.get("name")])
+
+        # Session newly completed (now has done exercises, previously had none)
+        prev_done_count = sum(1 for v in prev_day.values() if v is True)
+        if done_exs and prev_done_count == 0:
+            # Check for RPE in session notes
+            has_rpe = any(
+                _re_rpe.search((ex.get("session_note") or ex.get("notes") or ""))
+                for ex in exercises
+            )
+            new_sessions_done.append({
+                "label": label,
+                "exercises_done": len(done_exs),
+                "exercises_total": total_exs,
+                "skipped_names": [ex.get("name", "") for ex in skip_exs if ex.get("name")],
+                "has_rpe": has_rpe,
+            })
+            if not has_rpe:
+                no_rpe_sessions.append(label)
+
+        # Exercises that were newly skipped in an existing partial session
+        for ex in exercises:
+            name = ex.get("name", "")
+            if not name:
+                continue
+            was_done_before = prev_day.get(name, None)
+            is_done_now = ex.get("done")
+            if was_done_before is True and is_done_now is False:
+                newly_skipped.append(name)
+
+    return {
+        "new_sessions_done": new_sessions_done,
+        "newly_skipped": newly_skipped,
+        "no_rpe_sessions": no_rpe_sessions,
+        "current_snapshot_json": _json.dumps(current_snapshot),
+        "snapshot_updated": bool(new_sessions_done or newly_skipped),
+    }
+
+
+import re as _re_module
+_re_rpe = _re_module.compile(r"@?RPE\s*\d", _re_module.IGNORECASE)
+
+
 def run_proactive(dry_run: bool = False):
     """
     Lightweight proactive check-in. No email, no program sheet, no Tier 0 archives.
@@ -961,20 +1049,29 @@ def run_proactive(dry_run: bool = False):
         "commitments":         read_commitments(),
     }
 
-    # Load current week so proactive pass knows what's scheduled today
+    # Load current week so proactive pass knows what's scheduled today + delta detection
     program_data_p = None
+    session_delta: dict = {}
     try:
         from sheets import read_program_data
         program_data_p = read_program_data(week_num=compute_current_week(resolve_program_start_date()), lookback=0)
+        session_delta = _detect_session_delta(program_data_p, coach_state)
+        if session_delta.get("snapshot_updated") and not dry_run:
+            from memory import upsert_coach_state
+            upsert_coach_state("LAST_PROGRAM_SNAPSHOT",
+                               session_delta["current_snapshot_json"], "HIGH")
+            print(f"  Program snapshot updated ({len(session_delta['new_sessions_done'])} new session(s) detected)")
     except Exception as e:
         print(f"  Proactive: program load failed (non-fatal): {e}")
 
-    system_prompt, user_message = build_proactive_prompt(memory_data, program_data=program_data_p)
+    system_prompt, user_message = build_proactive_prompt(
+        memory_data, program_data=program_data_p, session_delta=session_delta
+    )
 
     client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
     response = client.messages.create(
         model="claude-haiku-4-5-20251001",
-        max_tokens=400,
+        max_tokens=500,
         messages=[{"role": "user", "content": user_message}],
         system=system_prompt,
     )
@@ -1653,39 +1750,68 @@ def run_brief(dry_run: bool = False):
         print("  Brief: today's session already logged — skipping.")
         return
 
-    # Build a concise session overview
+    # Build a concise session overview (all lifts with weights)
     session_lines = []
     for day in today_sessions:
         exercises = day.get("exercises", [])
         main_lifts = [ex for ex in exercises if ex.get("weight")]
-        for ex in main_lifts[:4]:  # top 4 lifts
+        for ex in main_lifts[:5]:
             session_lines.append(
                 f"  {ex.get('name', '?')}: {ex.get('weight', '?')} × {ex.get('sets_reps', '?')}"
             )
 
-    # Pull relevant Coach State context (squat/bench/deload signal etc.)
+    # Pull relevant Coach State context
     state_notes = []
     for domain in ("SQUAT", "BENCH", "DEADLIFT", "OHP", "HEALTH"):
         s = coach_state.get(domain, {}).get("summary", "")
         if s:
             state_notes.append(f"  {domain}: {s[:100]}")
 
-    # Open commitments due today or this week
+    # Weekly intent — the reason this session matters
+    weekly_intent = coach_state.get("WEEKLY_INTENT", {}).get("summary", "")
+
+    # RPE history for today's key lifts — from Coach State
+    rpe_notes = []
+    for domain in ("SQUAT", "BENCH", "DEADLIFT", "OHP"):
+        s = coach_state.get(domain, {}).get("summary", "")
+        if s and "rpe" in s.lower():
+            rpe_notes.append(f"  {domain}: {s[:80]}")
+
+    # Open commitments
     open_commitments = read_commitments("OPEN")
     commitment_note = ""
     if open_commitments:
         commitment_note = " | ".join(c["Commitment"][:80] for c in open_commitments[:2])
 
-    # Build brief via Haiku (cheap, targeted)
+    # Build brief via Haiku
     session_text = "\n".join(session_lines) or "session details unavailable"
-    state_text = "\n".join(state_notes) or ""
-    prompt = (
-        f"You are {ATHLETE_NAME}'s coach. Write a brief (2-3 sentences max) pre-session "
-        f"Telegram message. Be direct and specific — what to focus on today, one cue or reminder.\n\n"
-        f"TODAY'S SESSION ({today_str}):\n{session_text}\n\n"
-        f"COACH STATE CONTEXT:\n{state_text}\n\n"
-        f"Write the message now. No greeting, no sign-off. Short and useful."
-    )
+    state_text = "\n".join(state_notes) or "(no state data)"
+    rpe_text = "\n".join(rpe_notes) or "(no RPE history)"
+
+    prompt = f"""You are {ATHLETE_NAME}'s strength coach. Write a pre-session Telegram message (3-4 sentences).
+
+The message must:
+1. CONTEXT: Reference why this session matters — what the week is working toward, or where we are in the training block. One sentence.
+2. KEY FOCUS: Name the primary lift and exact target. Give ONE specific execution cue.
+   ALWAYS include: "Attack the concentric explosively — treat the bar like a sprint. The faster you push, the more motor units fire."
+3. ONE READINESS NOTE: Based on coach state / RPE history, set expectations. "Last time this felt RPE 8 — target the same today."
+4. OPTIONAL: If there's an open commitment or concern, one line.
+
+TODAY'S SESSION ({today_str}):
+{session_text}
+
+WEEKLY INTENT:
+{weekly_intent or '(not set — reference the program phase)'}
+
+COACH STATE:
+{state_text}
+
+RPE HISTORY:
+{rpe_text}
+
+{f"OPEN COMMITMENT: {commitment_note}" if commitment_note else ""}
+
+Rules: No greeting, no sign-off. Max 4 sentences. Direct coaching language only."""
 
     if dry_run:
         print(f"  [DRY RUN] Brief would cover: {session_text[:80]}")
@@ -1695,14 +1821,10 @@ def run_brief(dry_run: bool = False):
         client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
         result = client.messages.create(
             model="claude-haiku-4-5-20251001",
-            max_tokens=150,
+            max_tokens=220,
             messages=[{"role": "user", "content": prompt}],
         )
         brief_msg = result.content[0].text.strip()
-
-        # Prepend commitment note if present
-        if commitment_note:
-            brief_msg += f"\n\n(Also tracking: {commitment_note})"
 
         from telegram_utils import send_telegram_message
         sent = send_telegram_message(brief_msg)
@@ -1733,6 +1855,8 @@ def run_post_session(dry_run: bool = False):
     week_num = compute_current_week(resolve_program_start_date())
     print(f"[{today}] Running post-session check-in (Week {week_num})...")
 
+    from memory import read_telegram_log
+
     coach_state = read_coach_state()
     last_post = coach_state.get("LAST_POST_SESSION", {}).get("summary", "")
     if last_post == str(today):
@@ -1756,35 +1880,94 @@ def run_post_session(dry_run: bool = False):
         print("  Post-session: no session scheduled today — skipping.")
         return
 
-    # Check completion state
-    any_complete = any(
-        any(ex.get("done") for ex in day.get("exercises", []))
-        for day in today_sessions
+    session_label = today_sessions[0].get("label", "today's session")
+    exercises = today_sessions[0].get("exercises", [])
+    done_exs = [ex for ex in exercises if ex.get("done") is True]
+    skip_exs = [ex for ex in exercises if ex.get("done") is False and ex.get("name")]
+    total_count = len([ex for ex in exercises if ex.get("name")])
+    done_count = len(done_exs)
+
+    # Check if session has RPE logged already (so we don't ask redundantly)
+    has_rpe = any(
+        _re_rpe.search((ex.get("session_note") or ex.get("notes") or ""))
+        for ex in done_exs
     )
 
-    session_label = today_sessions[0].get("label", "today's session")
+    # Today's Telegram — avoid repeating what was already discussed
+    try:
+        today_tg = [
+            m for m in read_telegram_log(limit=10)
+            if m.get("Date", "") == str(today)
+        ]
+        today_tg_text = "\n".join(
+            f"  [{m.get('Direction','')}] {m.get('Message','')[:100]}"
+            for m in today_tg[-6:]
+        ) or "(none)"
+    except Exception:
+        today_tg_text = "(unavailable)"
+
+    weekly_intent = coach_state.get("WEEKLY_INTENT", {}).get("summary", "")
+
+    # Build context for Haiku
+    skipped_names = [ex.get("name", "") for ex in skip_exs if ex.get("name")][:4]
+    main_done = [
+        f"{ex.get('name', '?')} {ex.get('weight', '')}".strip()
+        for ex in done_exs if ex.get("weight")
+    ][:3]
+
+    any_complete = done_count > 0
 
     if any_complete:
-        # Session was logged — get some basic stats and send a quick acknowledgment
-        exercises = today_sessions[0].get("exercises", [])
-        done_count = sum(1 for ex in exercises if ex.get("done"))
-        total_count = len(exercises)
-        msg = (
-            f"Saw you logged {session_label} ({done_count}/{total_count} exercises). "
-            f"How did it feel? Any notes on how the weights moved?"
-        )
+        prompt = f"""You are {ATHLETE_NAME}'s strength coach. Write a post-session Telegram message (3-5 sentences).
+
+The athlete completed {session_label}: {done_count}/{total_count} exercises done.
+Exercises completed: {', '.join(main_done) or 'see program'}
+Exercises skipped: {', '.join(skipped_names) if skipped_names else 'none'}
+RPE data logged: {'yes' if has_rpe else 'no'}
+
+WHAT THE MESSAGE MUST DO:
+1. Acknowledge the session briefly and specifically (name the key lift done, not just "good session").
+2. If exercises were skipped, ask specifically WHY — not accusatorially, with curiosity.
+   "You skipped the rows — was it time, the elbow, or just done?"
+3. If no RPE logged, ask for it: "RPE on the main sets? Helps me calibrate next week."
+4. One forward-looking note: how today connects to the weekly goal or next session.
+
+CONTEXT:
+Weekly intent: {weekly_intent or '(not set)'}
+Today's Telegram conversation: {today_tg_text}
+
+Rules: No greeting, no sign-off. Reference actual data (weights, exercises). Don't repeat today's conversation."""
     else:
-        # Session not logged — warm check-in (not a nudge)
-        msg = (
-            f"Hey — did you get {session_label} in today? "
-            f"Even a quick 'yes, done' or 'skipped because X' helps me track things."
-        )
+        prompt = f"""You are {ATHLETE_NAME}'s strength coach. Write a warm post-session check-in (2-3 sentences).
+
+The athlete had {session_label} scheduled today but nothing is logged yet.
+This is NOT a nudge or guilt trip — it's genuine curiosity.
+
+WHAT THE MESSAGE MUST DO:
+1. Ask specifically about today's session — "Did {session_label} happen today?"
+2. Mention one specific thing from today's program (a key lift) to show you're paying attention.
+3. Make it easy to respond: "Even a quick yes/no helps — I track everything."
+
+CONTEXT:
+Today's Telegram conversation (do not repeat): {today_tg_text}
+Weekly intent: {weekly_intent or '(not set)'}
+
+Rules: No greeting, no sign-off. Human and specific."""
 
     if dry_run:
-        print(f"  [DRY RUN] Would send post-session: {msg}")
+        print(f"  [DRY RUN] Post-session: {done_count}/{total_count} done, "
+              f"skipped: {skipped_names}, rpe: {has_rpe}")
         return
 
     try:
+        client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+        result = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=200,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        msg = result.content[0].text.strip()
+
         from telegram_utils import send_telegram_message
         sent = send_telegram_message(msg)
         if sent:
@@ -1966,29 +2149,90 @@ def run_weekly_schedule_discovery(dry_run: bool = False):
     except Exception as e:
         print(f"  Schedule discovery failed (non-fatal): {e}")
 
+    # --- Generate WEEKLY_INTENT for the week ---
+    # A short coaching summary of what this week is trying to achieve.
+    # Written to Coach State so every daily message can reference it.
+    try:
+        coach_state = read_coach_state()
+        program_summary = coach_state.get("PROGRAM", {}).get("summary", "")
+        lift_states_text = "\n".join(
+            f"  {dom}: {coach_state.get(dom, {}).get('summary', '')[:100]}"
+            for dom in ("SQUAT", "BENCH", "DEADLIFT", "OHP")
+            if coach_state.get(dom, {}).get("summary", "")
+        )
+        annual_arc = coach_state.get("ANNUAL_ARC", {}).get("summary", "")[:200]
+
+        intent_prompt = (
+            f"You are a strength coach writing a WEEKLY INTENT summary for Week {week_num}.\n\n"
+            f"This is 2-3 sentences that will be referenced in every daily Telegram message this week. "
+            f"It should explain: what the week is trying to achieve, where we are in the training block, "
+            f"and one specific thing to watch or prioritize (an injury, a key lift, a recovery focus).\n\n"
+            f"PROGRAM: {program_summary}\n"
+            f"LIFT STATE:\n{lift_states_text}\n"
+            f"ANNUAL ARC: {annual_arc or '(not set)'}\n"
+            f"SESSIONS THIS WEEK: {sessions_text}\n\n"
+            f"Output just the 2-3 sentence intent. Direct, specific, coaching language. "
+            f"Example: 'Week 10 is a volume accumulation week — the goal is to hit 97.5kg squat "
+            f"and push bench above 87.5kg across all working sets. These next 4 weeks build the "
+            f"base for the Week 14 intensity peak. Keep rows at 3x8 maximum — elbow is a concern.'\n\n"
+            f"Write it now:"
+        )
+        intent_result = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=150,
+            messages=[{"role": "user", "content": intent_prompt}],
+        )
+        intent_text = intent_result.content[0].text.strip()
+        upsert_coach_state("WEEKLY_INTENT", intent_text, "HIGH")
+        print(f"  WEEKLY_INTENT written: {intent_text[:80]}")
+    except Exception as e:
+        print(f"  WEEKLY_INTENT generation failed (non-fatal): {e}")
+
 
 # ---------------------------------------------------------------------------
 # Evening protocol: plan check + TOMORROW_PLAN for bot to use
 # ---------------------------------------------------------------------------
 
-def _is_on_vacation(life_context: list[dict]) -> bool:
+def _is_on_vacation(life_context: list[dict],
+                    recent_telegram: list[dict] = None) -> bool:
     """
     Return True if the most recent vacation-related Life Context entry indicates
     an ACTIVE vacation (not a return announcement or a stale mention).
 
     Logic (newest-first):
-    1. If the entry has a return signal ("back from", "returned", etc.) → False
-    2. If the entry is > 14 days old → treat as stale/expired → False
-    3. Otherwise → True (active vacation)
-
-    This prevents both "back from vacation" and old entries from triggering vacation mode.
+    1. If recent Telegram messages (last 2 days) contain training signals → False
+       (athlete described a workout → clearly not on vacation, regardless of Life Context)
+    2. If the entry has a return signal ("back from", "returned", etc.) → False
+    3. If the entry is > 14 days old → treat as stale/expired → False
+    4. Otherwise → True (active vacation)
     """
     vacation_keywords = ("vacation", "holiday", "vacaciones", "holidays", "de vacaciones")
-    return_keywords = ("back from", "returned from", "back home", "de vuelta",
-                       "regresé", "already back", "got back", "came back", "just back",
-                       "back to training", "resuming", "volviendo")
+    return_keywords = (
+        "back from", "returned from", "back home", "de vuelta",
+        "regresé", "already back", "got back", "came back", "just back",
+        "back to training", "resuming", "volviendo", "retomando", "vuelta al gym",
+        "vuelta al entreno", "I'm back", "estoy de vuelta",
+    )
+    # Signals that clearly indicate the athlete is actively training
+    training_signals = (
+        "squat", "bench", "deadlift", "press", "workout", "session", "trained",
+        "gym", "lift", "set", "rep", " kg", " lbs", "entrenamiento", "entrené",
+        "sesión", "pesas", "cardio", "corr", "ran ", "rows", "pull",
+    )
 
     today = date.today()
+
+    # 1. Override: if athlete mentioned training in last 2 days via Telegram → not on vacation
+    if recent_telegram:
+        two_days_ago = str(today - timedelta(days=2))
+        for msg in recent_telegram:
+            if msg.get("Direction", "").upper() != "IN":
+                continue  # only check inbound (athlete) messages
+            if msg.get("Date", "") < two_days_ago:
+                continue
+            text = msg.get("Message", "").lower()
+            if any(k in text for k in training_signals):
+                return False  # athlete described training → definitely not on vacation
 
     for entry in reversed(life_context[-10:]):
         text = entry.get("context", "").lower()
@@ -2011,18 +2255,102 @@ def _is_on_vacation(life_context: list[dict]) -> bool:
     return False
 
 
+def _should_suggest_challenge(coach_state: dict, projections: dict,
+                               program_data: dict) -> dict | None:
+    """
+    Evaluate whether the coach should suggest a fun variation or challenge.
+    Returns a dict {type, description, reason} if a challenge is appropriate, else None.
+
+    ONLY suggests when:
+    - TSB is positive (athlete is NOT fatigued)
+    - Not in peak/deload week
+    - Last challenge was 14+ days ago (stored in LAST_CHALLENGE Coach State)
+    - A specific motivational trigger is present (see below)
+
+    This is NOT a scheduled feature. It fires rarely, only when it makes sense.
+    """
+    import json as _json
+
+    # 1. Check fatigue — never suggest if TSB is negative
+    fatigue = projections.get("fatigue", {}) if projections else {}
+    tsb = fatigue.get("TSB", 0)
+    if tsb < 0:
+        return None
+
+    # 2. Check phase — no challenges during peak or deload weeks
+    current_week_data = program_data.get("current_week", {})
+    week_label = current_week_data.get("label", "").lower()
+    if any(k in week_label for k in ("peak", "deload", "taper", "test")):
+        return None
+
+    # 3. Check cooldown — at least 14 days since last challenge
+    last_challenge_str = coach_state.get("LAST_CHALLENGE", {}).get("summary", "")
+    if last_challenge_str:
+        try:
+            last_ch = date.fromisoformat(last_challenge_str[:10])
+            if (date.today() - last_ch).days < 14:
+                return None
+        except (ValueError, TypeError):
+            pass
+
+    # 4. Look for motivational triggers
+    session_quality = coach_state.get("SESSION_QUALITY", {}).get("summary", "").lower()
+
+    # Trigger A: Multiple consecutive good sessions → athlete is hot, suggest a test
+    if "100%" in session_quality or ("strong" in session_quality and "consecutive" in session_quality):
+        # 1RM test — only for a main lift that hasn't been tested in a while
+        for domain in ("SQUAT", "BENCH", "DEADLIFT", "OHP"):
+            state = coach_state.get(domain, {}).get("summary", "")
+            if state and "on track" in state.lower():
+                lift_name = domain.replace("OHP", "Overhead Press")
+                return {
+                    "type": "1rm_test",
+                    "lift": lift_name,
+                    "description": (
+                        f"After your work sets on {lift_name.lower()}, try one all-out single "
+                        f"attempt. Warm up properly, then go for a heavy single — see where you actually are."
+                    ),
+                    "reason": "Consecutive solid sessions + positive TSB. Good time to test actual strength.",
+                    "cost": "~5 min. No recovery cost if you leave 1 RIR on the single.",
+                }
+
+    # Trigger B: Energy seems high but week has been light (many sessions done early)
+    done_count = sum(
+        1 for day in current_week_data.get("days", [])
+        if any(ex.get("done") for ex in day.get("exercises", []))
+    )
+    total_count = len(current_week_data.get("days", []))
+    if total_count > 0 and done_count >= total_count and tsb > 5:
+        return {
+            "type": "movement_variety",
+            "description": (
+                "You've hit all your sessions this week and TSB is positive. "
+                "Consider adding 2-3 sets of a movement you haven't done in a while — "
+                "good mornings, pause squats, tempo bench. Expose a weakness, stay fresh."
+            ),
+            "reason": "Week fully complete, body fresh. Good time to explore variation.",
+            "cost": "Optional add-on. 10-15 min. No impact on next week.",
+        }
+
+    return None
+
+
 def run_evening_protocol(dry_run: bool = False):
     """
     Evening protocol (19:00 UTC = 20:00 Spain).
 
-    Sends ONE Telegram message asking if tomorrow's plan is still on — naming the session explicitly.
-    The full protocol (Message 2) is generated by the live Railway bot in response to the user's reply.
+    Sends a Telegram message that:
+    1. References the weekly intent and why tomorrow's session matters
+    2. Names tomorrow's session and key lifts with targets
+    3. Includes a proactive health/recovery insight (sleep, nutrition, injury management)
+    4. Asks one specific question about readiness or today's session
+    5. Optionally surfaces a challenge suggestion if conditions are right
 
-    Also writes TOMORROW_PLAN to Coach State so the bot and morning brief have context.
+    The full training protocol (Message 2) is generated by the Railway bot when athlete replies.
     Deduped via LAST_EVENING_PROTOCOL Coach State domain.
     """
     from sheets import read_program_data
-    from memory import read_coach_state, upsert_coach_state, read_life_context
+    from memory import read_coach_state, upsert_coach_state, read_life_context, read_telegram_log, read_health_log
 
     today = date.today()
     tomorrow = today + timedelta(days=1)
@@ -2036,13 +2364,15 @@ def run_evening_protocol(dry_run: bool = False):
         print("  Evening protocol: already sent today — skipping.")
         return
 
-    # Vacation check
+    # Vacation check — pass recent Telegram log so training signals override stale Life Context
     try:
         life_context = read_life_context(limit=10)
-        if _is_on_vacation(life_context):
+        recent_tg = read_telegram_log(limit=20)
+        if _is_on_vacation(life_context, recent_telegram=recent_tg):
             vacation_msg = (
                 "You're on vacation — enjoy it. Try to walk 30-45 min if you feel like it. "
-                "Eat well tonight (protein + vegetables). Check in when you're back and we'll get going again."
+                "Eat well tonight: protein + vegetables, easy on the carbs late. "
+                "Check in when you're back and we'll plan the first session."
             )
             if dry_run:
                 print(f"  [DRY RUN] Vacation mode: {vacation_msg}")
@@ -2065,7 +2395,7 @@ def run_evening_protocol(dry_run: bool = False):
     current_week = program_data.get("current_week", {})
     days = current_week.get("days", [])
 
-    # Find next incomplete session (first day where no exercises are marked done=True)
+    # Find next incomplete session
     next_session = None
     for day in days:
         exercises = day.get("exercises", [])
@@ -2075,7 +2405,7 @@ def run_evening_protocol(dry_run: bool = False):
             break
 
     # If no incomplete session in current week, try next week
-    if not next_session and tomorrow.weekday() == 0:  # Sunday → check next week
+    if not next_session and tomorrow.weekday() == 0:
         try:
             next_week_data = read_program_data(week_num=week_num + 1, lookback=0)
             next_week_days = next_week_data.get("current_week", {}).get("days", [])
@@ -2086,44 +2416,170 @@ def run_evening_protocol(dry_run: bool = False):
 
     if not next_session:
         print("  Evening protocol: all sessions complete or no upcoming session — skipping.")
-        return  # Don't write dedup — will try again next day
+        return
 
-    # Build session summary for the message
+    # Build session summary
     label = next_session.get("label", "next session")
     exercises = next_session.get("exercises", [])
-    main_lifts = [ex for ex in exercises if ex.get("weight")][:3]
+    main_lifts = [ex for ex in exercises if ex.get("weight")][:4]
     lift_summary = ", ".join(
         f"{ex.get('name', '?')} {ex.get('weight', '')} {ex.get('sets_reps', '')}".strip()
         for ex in main_lifts
     )
+    # Count of exercises in session for context
+    total_ex_count = len([ex for ex in exercises if ex.get("name")])
 
-    # Pull weekly schedule context
+    # Read rich context for the prompt
+    weekly_intent = coach_state.get("WEEKLY_INTENT", {}).get("summary", "")
     schedule_ctx = coach_state.get("WEEKLY_SCHEDULE", {}).get("summary", "")
 
-    prompt = (
-        f"You are {ATHLETE_NAME}'s strength coach. Write ONE short Telegram message (1-2 sentences) "
-        f"asking if tomorrow's training session is still on. Name the session and its key lifts specifically. "
-        f"Be direct — no greeting, no sign-off.\n\n"
-        f"Tomorrow's session: {label}\n"
-        f"Key lifts: {lift_summary or 'see program'}\n"
-        f"Known schedule pattern: {schedule_ctx or 'not yet established'}\n\n"
-        f"Example style: \"Tomorrow is Day 3 — squat 102.5kg 5×5, bench 80kg 4×6. Still on?\"\n"
-        f"Write it now:"
+    # Lift domain states for transparency
+    lift_states: dict[str, str] = {}
+    for domain in ("SQUAT", "BENCH", "DEADLIFT", "OHP"):
+        s = coach_state.get(domain, {}).get("summary", "")
+        if s:
+            lift_states[domain] = s[:120]
+
+    # Recent health summary (last 3 days)
+    try:
+        health_log = read_health_log(limit=3)
+        health_lines = []
+        for e in health_log:
+            d = e.get("Date", "?")
+            sleep = e.get("Sleep (hrs)", "")
+            bw = e.get("Bodyweight (kg)", "")
+            food = e.get("Food Quality (1-10)", "")
+            notes = e.get("Notes", "")
+            parts = [f"[{d}]"]
+            if sleep: parts.append(f"sleep:{sleep}h")
+            if bw: parts.append(f"BW:{bw}kg")
+            if food: parts.append(f"food:{food}/10")
+            if notes: parts.append(f"note:{notes[:50]}")
+            health_lines.append(" ".join(parts))
+        health_summary = "\n".join(health_lines) or "(no recent health data)"
+    except Exception:
+        health_summary = "(health data unavailable)"
+
+    # Today's Telegram summary (last 5 inbound messages) — to avoid contradicting what was discussed
+    try:
+        today_str_iso = str(today)
+        today_tg = [
+            m for m in (read_telegram_log(limit=10) if "recent_tg" not in dir() else recent_tg)
+            if m.get("Date", "") == today_str_iso
+        ]
+        today_tg_text = "\n".join(
+            f"  [{m.get('Direction','')}] {m.get('Message','')[:100]}"
+            for m in today_tg[-5:]
+        ) or "(no messages today)"
+    except Exception:
+        today_tg_text = "(unavailable)"
+
+    # Open concerns from Coach Focus
+    try:
+        from memory import read_coach_focus
+        focus_items = read_coach_focus()
+        concerns = [
+            f.get("Item", "")[:100] for f in focus_items
+            if f.get("Status", "") == "OPEN"
+            and f.get("Category", "") in ("CONCERN", "FOLLOWUP")
+            and "elbow" in f.get("Item", "").lower() or
+            f.get("Category", "") == "CONCERN"
+        ][:3]
+        concerns_text = "; ".join(concerns) if concerns else "(none)"
+    except Exception:
+        concerns_text = "(unavailable)"
+
+    # Week progress summary
+    done_days = sum(1 for d in days if any(ex.get("done") for ex in d.get("exercises", [])))
+    total_days = len(days)
+
+    # Projections for goal proximity
+    projections: dict = {}
+    try:
+        from projections import run_all_projections
+        projections = run_all_projections({"coach_state": coach_state, "health_log": [],
+                                           "lift_history": [], "tracked_lifts": []}, program_data=program_data)
+    except Exception:
+        pass
+
+    # Challenge suggestion — only when conditions are right
+    challenge_suggestion = ""
+    try:
+        challenge = _should_suggest_challenge(coach_state, projections, program_data)
+        if challenge:
+            challenge_suggestion = (
+                f"\nOPTIONAL CHALLENGE TO MENTION: {challenge['description']} "
+                f"Coach reasoning: {challenge['reason']} Cost: {challenge['cost']}"
+            )
+    except Exception:
+        pass
+
+    # Build Lift domain context lines for transparency
+    lift_state_lines = "\n".join(
+        f"  {domain}: {summary}" for domain, summary in lift_states.items()
     )
 
-    # Store tomorrow's plan for the bot and brief to reference
     tomorrow_plan_summary = f"{label} | {lift_summary}" if lift_summary else label
+
+    prompt = f"""You are {ATHLETE_NAME}'s strength coach — not just a programming tool, but a real coach who cares.
+You are his mentor and father figure in training. You hold him accountable through goals, not guilt.
+
+Write a Telegram message for tonight's check-in (3-6 sentences). It must do ALL of the following:
+1. REASONING: Explain WHY tomorrow's session matters — reference the weekly intent, the training block phase,
+   or goal proximity. Be transparent: "Here's what I'm thinking..." / "We're doing this because..."
+2. SESSION SPECIFICS: Name tomorrow's session and its key lifts with exact weights/sets.
+   Mention execution quality: lifts should be done EXPLOSIVELY on the concentric (push/pull),
+   controlled on the eccentric (lower). "Attack the bar like a sprint — speed is strength."
+3. RECOVERY TIP: One specific, actionable recovery or health recommendation for tonight.
+   Based on the health data below (sleep, nutrition, injury), give a concrete suggestion.
+   Examples: "7.5h sleep tonight — non-negotiable", "protein before bed",
+   "use binaural beats to wind down", "ice the elbow for 10 min", "visualize the squat before sleep"
+4. ONE QUESTION: Ask one specific, targeted question. Not generic. Reference actual data.
+   Examples: "How did today feel? I saw you did X — any notes on the elbow?",
+   "RPE on those squats?", "Did you eat enough today? Your last food quality score was 6."
+5. OPTIONAL CHALLENGE (only if challenge section below is filled): Mention it naturally, briefly.
+   Always frame it as transparent reasoning + athlete's choice.
+
+CONTEXT:
+Tomorrow's session: {label} ({total_ex_count} exercises total)
+Key lifts: {lift_summary or 'see program'}
+Week {week_num}: {done_days}/{total_days} sessions done this week
+Weekly intent: {weekly_intent or 'not yet set — reference the current program phase'}
+Known schedule: {schedule_ctx or 'not established'}
+
+LIFT STATE (for reasoning transparency):
+{lift_state_lines or '  (no state data)'}
+
+RECENT HEALTH (last 3 days):
+{health_summary}
+
+ACTIVE CONCERNS (elbow, injury, follow-ups):
+{concerns_text}
+
+TODAY'S TELEGRAM CONVERSATION (do not repeat what was already discussed):
+{today_tg_text}
+{challenge_suggestion}
+
+PERSONA RULES:
+- Be a human coach. Warm but direct. No hollow phrases like "let's crush it" or "you got this" without substance.
+- Motivate through goals and reasoning, not empty energy.
+- Reference personal details when relevant (golfer's elbow, insulin resistance, travel schedule).
+- If sleep has been poor, mention it and explain the impact on the session.
+- End with the specific question — it shows you're paying attention.
+- Max 250 words. No greeting, no sign-off.
+
+Write the message now:"""
 
     if dry_run:
         print(f"  [DRY RUN] Evening protocol for: {tomorrow_plan_summary}")
-        print(f"  [DRY RUN] Prompt: {prompt[:200]}")
+        print(f"  [DRY RUN] Weekly intent: {weekly_intent[:80] if weekly_intent else 'none'}")
         return
 
     try:
         client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
         result = client.messages.create(
             model="claude-haiku-4-5-20251001",
-            max_tokens=80,
+            max_tokens=300,
             messages=[{"role": "user", "content": prompt}],
         )
         msg = result.content[0].text.strip()
@@ -2131,9 +2587,12 @@ def run_evening_protocol(dry_run: bool = False):
         from telegram_utils import send_telegram_message
         sent = send_telegram_message(msg)
         if sent:
-            print(f"  Evening protocol sent: {msg[:80]}")
+            print(f"  Evening protocol sent: {msg[:100]}")
             upsert_coach_state("LAST_EVENING_PROTOCOL", str(today), "HIGH")
             upsert_coach_state("TOMORROW_PLAN", tomorrow_plan_summary, "HIGH")
+            # Write challenge cooldown if one was suggested
+            if challenge_suggestion and not dry_run:
+                upsert_coach_state("LAST_CHALLENGE", str(today), "HIGH")
         else:
             print("  Evening protocol: Telegram send failed.")
     except Exception as e:
@@ -2146,9 +2605,13 @@ def run_evening_protocol(dry_run: bool = False):
 
 def run_export(output_file: str = None, dry_run: bool = False):
     """
-    Export all Coach Memory tabs to JSON.
-    Writes to output_file if provided, otherwise prints to stdout.
-    Safe read-only operation — no writes to sheets.
+    Export all Coach Memory tabs to JSON and upload to Google Drive as a backup.
+
+    Two destinations:
+      1. Local file (output_file arg or auto-named coach_export_YYYYMMDD.json)
+      2. Google Drive folder 'coach_backups/' — uploaded via Drive API
+
+    Safe read-only on sheets. Drive upload is non-fatal if credentials lack Drive scope.
     """
     import json
     from memory import read_all, read_lift_history, read_health_log, read_telegram_log
@@ -2164,23 +2627,77 @@ def run_export(output_file: str = None, dry_run: bool = False):
 
     export = {
         "exported_at": str(today),
+        "version": "V12",
         "data": {k: v for k, v in data.items()},
     }
 
     json_str = json.dumps(export, indent=2, default=str)
+    byte_count = len(json_str.encode("utf-8"))
+    record_count = sum(len(v) if isinstance(v, list) else 1 for v in data.values())
+    print(f"  Export: {byte_count:,} bytes | {record_count} records")
 
-    if dry_run or not output_file:
-        print(f"Export: {len(json_str)} bytes | {sum(len(v) if isinstance(v, list) else 1 for v in data.values())} records")
-        if output_file:
-            with open(output_file, "w", encoding="utf-8") as f:
-                f.write(json_str)
-            print(f"  Exported to: {output_file}")
+    # --- Write local file ---
+    if not output_file:
+        from datetime import datetime as _dt
+        output_file = f"coach_export_{_dt.today().strftime('%Y%m%d')}.json"
+
+    if dry_run:
+        print(f"  [DRY RUN] Would write to {output_file} and upload to Google Drive")
+        print(json_str[:1000] + ("..." if len(json_str) > 1000 else ""))
+        return
+
+    with open(output_file, "w", encoding="utf-8") as f:
+        f.write(json_str)
+    print(f"  Written to: {output_file}")
+
+    # --- Upload to Google Drive ---
+    try:
+        import io
+        from googleapiclient.discovery import build as _gapi_build
+        from googleapiclient.http import MediaIoBaseUpload
+        from sheets import get_credentials  # reuse existing OAuth token
+
+        creds = get_credentials()
+        drive_service = _gapi_build("drive", "v3", credentials=creds)
+
+        # Find or create 'coach_backups' folder in Drive root
+        folder_id = None
+        results = drive_service.files().list(
+            q="name='coach_backups' and mimeType='application/vnd.google-apps.folder' and trashed=false",
+            fields="files(id, name)",
+            spaces="drive",
+        ).execute()
+        folders = results.get("files", [])
+        if folders:
+            folder_id = folders[0]["id"]
         else:
-            print(json_str[:2000] + ("..." if len(json_str) > 2000 else ""))
-    else:
-        with open(output_file, "w", encoding="utf-8") as f:
-            f.write(json_str)
-        print(f"  Exported {len(json_str)} bytes → {output_file}")
+            folder_meta = {
+                "name": "coach_backups",
+                "mimeType": "application/vnd.google-apps.folder",
+            }
+            folder = drive_service.files().create(body=folder_meta, fields="id").execute()
+            folder_id = folder.get("id")
+            print(f"  Created Drive folder 'coach_backups' (id={folder_id})")
+
+        # Upload JSON file to the folder
+        file_meta = {
+            "name": output_file,
+            "parents": [folder_id],
+        }
+        media = MediaIoBaseUpload(
+            io.BytesIO(json_str.encode("utf-8")),
+            mimetype="application/json",
+            resumable=False,
+        )
+        uploaded = drive_service.files().create(
+            body=file_meta, media_body=media, fields="id, name"
+        ).execute()
+        print(f"  Uploaded to Google Drive: {uploaded.get('name')} (id={uploaded.get('id')})")
+
+    except ImportError:
+        print("  Drive upload skipped: googleapiclient not available (pip install google-api-python-client)")
+    except Exception as e:
+        print(f"  Drive upload failed (non-fatal): {e}")
 
 
 # ---------------------------------------------------------------------------

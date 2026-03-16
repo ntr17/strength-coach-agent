@@ -30,7 +30,11 @@ CATEGORIES:
 - PENDING_CATCHUP  — athlete plans to do a session on a different day ("will train Monday instead",
                      "catching up tomorrow", "doing it Wednesday"). Extract the intended day/date if mentioned.
                      FACT format: "Week N Day D → planned for [day/date]", e.g. "Week 9 Day 3 → Monday 2026-03-16"
-- LIFE_EVENT       — travel, stress, illness, injury, life change that affects training
+- LIFE_EVENT       — travel, stress, illness, injury, life change that affects training.
+                     IMPORTANT: Return from vacation / resuming training is ALSO a LIFE_EVENT.
+                     Signals: "I'm back", "back from vacation", "resuming", "retomando", "de vuelta",
+                     "vuelta al gym", "back to training", "estoy de vuelta", "let's get back at it",
+                     "ready to train again". Always log these — they clear the vacation flag.
 - PREFERENCE       — athlete feedback about coaching output (charts, email length, topics, preferred channel).
                      Channel preferences: if athlete says "reach me on Telegram", "use Telegram primarily",
                      "contact me by email", etc. — format as: "primary_channel: telegram" or "primary_channel: email"
@@ -46,6 +50,11 @@ CATEGORIES:
 - MOOD_PERFORMANCE — qualitative notes about how a session felt, energy level during training, pain/discomfort
                      during specific exercises, RPE estimates, mental state. Capture anything that affects
                      how we interpret lift numbers. NOT pure health metrics (those are HEALTH_DATA).
+                     ALWAYS extract RPE if you can infer it from natural language:
+                       "felt like a 8" → rpe: 8 | "hard but doable" → rpe: 8 | "almost failed" → rpe: 9.5
+                       "easy" → rpe: 6 | "very easy" → rpe: 5 | "max effort" → rpe: 10 | "left 2 in tank" → rir: 2
+                       "8/10 effort" → rpe: 8 | "smooth" → rpe: 7 | "grinder" → rpe: 9
+                     If RPE/RIR can be inferred, append to the FACT: " | rpe: N" or " | rir: N"
                      Examples: "felt weak today, squats moved slow", "elbow pain on last bench set",
                      "energy was 6/10, slept poorly before", "RPE 9 on the last set — close to failure",
                      "back felt tight, stopped after 3 sets", "strongest session in weeks"
@@ -272,7 +281,7 @@ def _dispatch_events(events: list[dict], dry_run: bool = False) -> int:
 
             elif cat == "MOOD_PERFORMANCE":
                 # How a session felt — important context for interpreting lift data.
-                # Stored in Coach Focus (TRACKING) + Life Context for long-term reference.
+                # Stored in Coach Focus (TRACKING).
                 append_coach_focus(
                     "TRACKING",
                     f"[Session quality] {fact}",
@@ -280,7 +289,7 @@ def _dispatch_events(events: list[dict], dry_run: bool = False) -> int:
                 )
                 # If pain/injury keywords present, also flag as CONCERN
                 pain_keywords = ["pain", "hurt", "ache", "sharp", "swollen", "injury", "stopped early",
-                                 "dolor", "lesión", "paré"]
+                                 "dolor", "lesión", "paré", "elbow", "codo", "knee", "rodilla"]
                 if any(kw in fact.lower() for kw in pain_keywords):
                     append_coach_focus(
                         "CONCERN",
@@ -288,6 +297,24 @@ def _dispatch_events(events: list[dict], dry_run: bool = False) -> int:
                         last_mentioned=event_date if event_date != "unknown" else today,
                         priority="HIGH",
                     )
+                # If RPE/RIR present in fact, try to backfill the most recent Lift History entry
+                # for any matching lift mentioned in the fact
+                import re as _re
+                rpe_match = _re.search(r"rpe:\s*(\d+(?:\.\d+)?)", fact, _re.I)
+                rir_match = _re.search(r"rir:\s*(\d+(?:\.\d+)?)", fact, _re.I)
+                if rpe_match or rir_match:
+                    try:
+                        from memory import append_coach_focus as _acf
+                        rpe_note = ""
+                        if rpe_match:
+                            rpe_note += f"RPE {rpe_match.group(1)}"
+                        if rir_match:
+                            rpe_note += f" RIR {rir_match.group(1)}"
+                        _acf("TRACKING",
+                             f"[RPE from mood log] {rpe_note.strip()} — {fact[:80]}",
+                             last_mentioned=event_date if event_date != "unknown" else today)
+                    except Exception:
+                        pass
                 dispatched += 1
 
             elif cat == "PROGRAM_REQUEST":

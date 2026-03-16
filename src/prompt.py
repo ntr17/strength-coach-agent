@@ -1277,7 +1277,8 @@ def build_prompt(program_data: dict, memory_data: dict,
 # Proactive check-in prompt
 # ---------------------------------------------------------------------------
 
-def build_proactive_prompt(memory_data: dict, program_data: dict = None) -> tuple[str, str]:
+def build_proactive_prompt(memory_data: dict, program_data: dict = None,
+                           session_delta: dict = None) -> tuple[str, str]:
     """
     Build prompt for the proactive check-in pass.
     Claude reads memory + today's program schedule and decides whether to reach out.
@@ -1407,6 +1408,29 @@ def build_proactive_prompt(memory_data: dict, program_data: dict = None) -> tupl
     commit_text = _format_commitments(commitments)
     commit_section = f"\n## YOUR OPEN COMMITMENTS (promises to follow up on)\n{commit_text}" if commit_text else ""
 
+    # --- Weekly intent ---
+    coach_state_raw = memory_data.get("coach_state", {})
+    weekly_intent = coach_state_raw.get("WEEKLY_INTENT", {}).get("summary", "")
+    intent_section = f"\n## THIS WEEK'S COACHING INTENT\n  {weekly_intent}" if weekly_intent else ""
+
+    # --- Session delta: what changed in the program sheet since last check ---
+    delta_section = ""
+    if session_delta and session_delta.get("new_sessions_done"):
+        delta_lines = []
+        for s in session_delta["new_sessions_done"]:
+            line = (f"  NEW: {s['label']} — {s['exercises_done']}/{s['exercises_total']} exercises logged")
+            if s.get("skipped_names"):
+                line += f" | SKIPPED: {', '.join(s['skipped_names'])}"
+            if not s.get("has_rpe"):
+                line += " | NO RPE LOGGED"
+            delta_lines.append(line)
+        delta_section = (
+            "\n## SESSION DELTA (new since last check — HIGH PRIORITY)\n"
+            + "\n".join(delta_lines)
+            + "\n  → TRIGGER: If a new session is logged, reach out to ask how it went, "
+            "why exercises were skipped (if any), and request RPE if missing."
+        )
+
     user_message = f"""TODAY: {today.strftime('%A, %B %d, %Y')} ({time_of_day})
 
 ## YOUR COMPRESSED KNOWLEDGE (Coach State)
@@ -1425,7 +1449,7 @@ def build_proactive_prompt(memory_data: dict, program_data: dict = None) -> tupl
 {tg_text}
 
 ## ACTIVE COMMANDS (includes PENDING_CATCHUP, OPEN_QUESTION, PENDING_PROPOSAL)
-{cmd_text}{travel_section}{commit_section}
+{cmd_text}{travel_section}{commit_section}{intent_section}{delta_section}
 
 ---
 Today is {weekday_name}. Time of day: {time_of_day}. Should you reach out right now?
