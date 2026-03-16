@@ -14,7 +14,7 @@ from datetime import date
 
 import anthropic
 
-from config import ANTHROPIC_API_KEY, ATHLETE_NAME, CLAUDE_MODEL, resolve_program_start_date
+from config import ANTHROPIC_API_KEY, ATHLETE_NAME, CLAUDE_MODEL, CLAUDE_HAIKU, resolve_program_start_date
 
 
 # ---------------------------------------------------------------------------
@@ -348,7 +348,7 @@ def run_telegram_summarization(memory_data: dict, dry_run: bool = False) -> str:
     try:
         client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
         result = client.messages.create(
-            model="claude-haiku-4-5-20251001",
+            model=CLAUDE_HAIKU,
             max_tokens=500,
             messages=[{"role": "user", "content": prompt}],
         )
@@ -536,7 +536,7 @@ def run_lift_deep_dive(lift_name: str, full_history: list[dict],
 
     client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
     message = client.messages.create(
-        model="claude-haiku-4-5-20251001",  # fast + cheap for this sub-task
+        model=CLAUDE_HAIKU,  # fast + cheap for this sub-task
         max_tokens=300,
         system=system_prompt,
         messages=[{"role": "user", "content": prompt}]
@@ -655,7 +655,7 @@ def _initiate_steer_co(memory_data: dict, dry_run: bool = False) -> None:
     )
     try:
         opening_result = client.messages.create(
-            model="claude-haiku-4-5-20251001",
+            model=CLAUDE_HAIKU,
             max_tokens=150,
             messages=[{"role": "user", "content": opening_prompt}],
         )

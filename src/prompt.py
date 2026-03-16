@@ -26,6 +26,10 @@ You have your own agenda. You push on things he's not paying attention to — VO
 
 You think in years. Today is one data point. You have a roadmap for where he's going — the next program, the phase after that, the real target. You surface this context when it matters, not every day.
 
+When your context includes BEHAVIORAL PATTERNS, treat them as persistent coaching problems — not just observations. A skip pattern for Romanian Deadlifts means something: avoidance, time pressure, injury. Ask directly. When your context includes YOUR PSYCHOLOGICAL MODEL, let it actively shape how you write today — if he responds to direct challenge, challenge him; if he shuts down under pressure, ease in. The model is only useful if it changes your output.
+
+When your context includes WHY THIS WEEK IS STRUCTURED THIS WAY, include one sentence that teaches the principle. Not every email needs it — but when the week has a purpose (volume peak, deload, intensity build), say why. Athletes who understand their programming train smarter.
+
 **Channels — you are one coach, two surfaces:**
 Telegram is the primary coaching channel — real-time, conversational, direct. Email is the daily digest — the structured check-in with data, trend analysis, and anything that needs context. When the athlete talks to you on Telegram, that IS coaching. When you write the email, you've already read everything from Telegram since the last email. Don't repeat what was already covered. Build on it.
 
@@ -671,13 +675,35 @@ def _format_coach_focus(coach_focus: list[dict]) -> str:
     """
     Format the coach's active watch list for inclusion in the prompt.
     Only shows OPEN items. PINNED items always shown first; HIGH/NORMAL items follow.
+
+    Staleness gate: NORMAL-priority items older than 60 days are silently excluded
+    (they bloat every prompt but rarely add value — archive them in run_think instead).
+    HIGH and PINNED items are always shown regardless of age.
     """
-    open_items = [f for f in coach_focus if f.get("Status", "OPEN") == "OPEN"
-                  and not f.get("Item", "").startswith("#")]
-    if not open_items:
+    cutoff_normal = str(date.today() - timedelta(days=60))
+
+    open_items = []
+    stale_count = 0
+    for f in coach_focus:
+        if f.get("Status", "OPEN") != "OPEN":
+            continue
+        if f.get("Item", "").startswith("#"):
+            continue
+        priority = f.get("Priority", "NORMAL").upper()
+        if priority in ("HIGH", "PINNED"):
+            open_items.append(f)
+            continue
+        # NORMAL: exclude if older than 60 days
+        timestamp = f.get("Last Mentioned", "") or f.get("Date Added", "")
+        if timestamp and timestamp[:10] < cutoff_normal:
+            stale_count += 1
+            continue
+        open_items.append(f)
+
+    if not open_items and stale_count == 0:
         return ""
 
-    # Sort: PINNED first, HIGH second, NORMAL last (within each group: oldest first)
+    # Sort: PINNED first, HIGH second, NORMAL last
     priority_rank = {"PINNED": 0, "HIGH": 1, "NORMAL": 2, "": 2}
     open_items = sorted(open_items, key=lambda f: priority_rank.get(
         f.get("Priority", "NORMAL").upper(), 2))
@@ -692,6 +718,10 @@ def _format_coach_focus(coach_focus: list[dict]) -> str:
         timestamp = last or added
         badge = " [PINNED]" if priority == "PINNED" else (" [HIGH]" if priority == "HIGH" else "")
         lines.append(f"  [{cat}]{badge} {text}" + (f" [since {timestamp}]" if timestamp else ""))
+
+    if stale_count:
+        lines.append(f"  ({stale_count} NORMAL-priority items >60d old hidden — archive in next --think pass)")
+
     return "\n".join(lines)
 
 
@@ -757,7 +787,7 @@ def _format_coach_state(coach_state: dict) -> str:
         return ""
     domain_order = ["PROGRAM", "TOMORROW_PLAN", "SQUAT", "BENCH", "DEADLIFT", "OHP", "HEALTH",
                     "SCHEDULE", "WEEKLY_SCHEDULE", "NUTRITION", "SESSION_QUALITY", "LIFESTYLE",
-                    "GOALS", "ATHLETE_MODEL"]
+                    "GOALS", "ATHLETE_MODEL", "BEHAVIOR_PATTERNS", "COACHING_REASON"]
     lines = []
     seen = set()
     for domain in domain_order:
@@ -874,6 +904,123 @@ def _extract_travel_context(memory_data: dict) -> str:
     lines.extend(reversed(travel_mentions))
 
     return "\n".join(lines)
+
+
+def _format_projection_review(coach_state: dict, current_projections_text: str) -> str:
+    """
+    Compare current projections to last week's snapshot stored in Coach State.
+    Returns a formatted review block for the weekly email: what was predicted, what happened,
+    what the delta means. Pure Python — no LLM call.
+    """
+    import json as _json
+    snap_raw = coach_state.get("LAST_PROJECTION_SNAPSHOT", {}).get("summary", "")
+    if not snap_raw or not snap_raw.startswith("{"):
+        return ""
+
+    try:
+        snap = _json.loads(snap_raw)
+    except Exception:
+        return ""
+
+    snap_date = snap.get("date", "last week")
+    snap_week = snap.get("week_num", "?")
+    last_lifts = {e["exercise"].upper(): e for e in snap.get("lifts", []) if e.get("exercise")}
+
+    if not last_lifts:
+        return ""
+
+    lines = [f"vs snapshot from {snap_date} (Week {snap_week}):"]
+    # Parse current projections text for 1RM values (rough extraction)
+    # Format in projections_text: "Squat: est 1RM 102.5kg | trend +0.8kg/wk | ..."
+    import re as _re
+    for ex_upper, last in last_lifts.items():
+        last_1rm = last.get("current_1rm")
+        last_proj_end = last.get("projected_end_1rm")
+        last_on_track = last.get("on_track")
+        if last_1rm is None:
+            continue
+
+        # Try to extract current 1RM from projections_text
+        pattern = rf"{_re.escape(ex_upper.title())}[^|]*est\s+1RM\s+([\d.]+)kg"
+        m = _re.search(pattern, current_projections_text, _re.IGNORECASE)
+        if not m:
+            # Try just the domain key (SQUAT vs "Squat")
+            m = _re.search(rf"(?i){ex_upper}[^|]{{0,30}}1RM\s+([\d.]+)kg", current_projections_text)
+        if not m:
+            continue
+
+        try:
+            curr_1rm = float(m.group(1))
+        except (ValueError, TypeError):
+            continue
+
+        delta = round(curr_1rm - last_1rm, 1)
+        sign = "+" if delta >= 0 else ""
+        track_change = ""
+        # Detect on_track status change
+        if last_on_track is False and delta > 0:
+            track_change = " → improving"
+        elif last_on_track is True and delta < 0:
+            track_change = " → falling behind"
+
+        lines.append(
+            f"  {ex_upper.title()}: was {last_1rm}kg → now {curr_1rm}kg ({sign}{delta}kg/week)"
+            + (f" | projected end: {last_proj_end}kg" if last_proj_end else "")
+            + track_change
+        )
+
+    if len(lines) <= 1:
+        return ""
+
+    return "PROJECTION REVIEW (this week vs last week's snapshot — are you on course?)\n" + "\n".join(lines)
+
+
+def apply_output_preferences(prompt_text: str, athlete_prefs: list[dict]) -> str:
+    """
+    Enforce athlete output preferences as hard constraints appended to a prompt.
+    These are CODE-LEVEL gates — not hints to Claude, but strict rules prepended
+    to the prompt's Rules section so they override default behavior.
+
+    Called from run_brief, run_post_session, run_evening_protocol before each LLM call.
+    """
+    if not athlete_prefs:
+        return prompt_text
+
+    pref_text = " ".join(p.get("Preference", "").lower() for p in athlete_prefs)
+    constraints = []
+
+    # Output length
+    if any(kw in pref_text for kw in ("shorter", "brief", "concise", "too long", "less text")):
+        constraints.append("LENGTH: Maximum 2-3 sentences. Cut anything that isn't essential.")
+    elif any(kw in pref_text for kw in ("more detail", "explain more", "deeper", "breakdown")):
+        constraints.append("LENGTH: Be thorough. Explain the reasoning, not just the conclusion.")
+
+    # Motivational language
+    if any(kw in pref_text for kw in ("no motivation", "direct_no_bs", "no pandering",
+                                       "no cheerleading", "data over motivation")):
+        constraints.append("TONE: No motivational language. No 'let's go', 'crush it', 'you got this', "
+                           "'proud of you', or any empty energy. Facts and coaching only.")
+
+    # Charts / formatting
+    if any(kw in pref_text for kw in ("text_only", "no charts", "no tables", "no formatting")):
+        constraints.append("FORMAT: Plain text only. No bullet lists, no tables, no formatting symbols.")
+
+    # Data vs coaching balance
+    if any(kw in pref_text for kw in ("just numbers", "data first", "numbers first")):
+        constraints.append("STRUCTURE: Lead with the numbers. Interpretation comes after the data, not before.")
+    elif any(kw in pref_text for kw in ("just coach", "no numbers", "feel", "less data")):
+        constraints.append("STRUCTURE: Minimize raw numbers. Focus on what to do and why.")
+
+    if not constraints:
+        return prompt_text
+
+    constraint_block = "\nENFORCED PREFERENCES (non-negotiable — override defaults):\n" + \
+                       "\n".join(f"  • {c}" for c in constraints)
+
+    # Append before the final Rules line if present, else append at end
+    if "\nRules:" in prompt_text:
+        return prompt_text.replace("\nRules:", constraint_block + "\nRules:", 1)
+    return prompt_text + constraint_block
 
 
 def _extract_tone_directives(athlete_prefs: list) -> str:
@@ -1029,6 +1176,20 @@ def build_prompt(program_data: dict, memory_data: dict,
             + periodization_context
         )
 
+    # --- Annual arc (12-month roadmap — weekly email only, so the athlete sees the bigger picture) ---
+    annual_arc = coach_state.get("ANNUAL_ARC", {}).get("summary", "") if coach_state else ""
+    if annual_arc and is_weekly_summary:
+        # First 3 sentences — enough for context without bloating the prompt
+        arc_snippet = ". ".join(annual_arc.split(". ")[:3]).strip()
+        if arc_snippet and not arc_snippet.endswith("."):
+            arc_snippet += "."
+        sections.append(
+            "12-MONTH ARC (your long-term roadmap — reference the current phase and next milestone in this weekly email)\n"
+            f"  {arc_snippet}\n"
+            "  → Don't summarise the whole arc. Surface what's relevant NOW: "
+            "what phase are we in, what's the next milestone, is anything ahead of/behind schedule?"
+        )
+
     # --- Coach State (your compressed knowledge from last run — read this first) ---
     coach_state = memory_data.get("coach_state", {})
     state_text = _format_coach_state(coach_state)
@@ -1036,6 +1197,35 @@ def build_prompt(program_data: dict, memory_data: dict,
         sections.append(
             "YOUR CURRENT KNOWLEDGE (Coach State — what you wrote for yourself last run)\n"
             + state_text
+        )
+
+    # --- Behavior Patterns (weekly behavioral analysis — address these directly) ---
+    behavior_patterns = coach_state.get("BEHAVIOR_PATTERNS", {}).get("summary", "")
+    if behavior_patterns and "No significant" not in behavior_patterns:
+        sections.append(
+            "BEHAVIORAL PATTERNS (detected weekly — use these as coaching levers, not just data points)\n"
+            f"  {behavior_patterns}\n"
+            "  → Address any active skip patterns, RPE patterns, or day-of-week misses directly in this email. "
+            "Don't just note them — name them, ask about them, or propose a fix."
+        )
+
+    # --- Athlete Model (quarterly psychological profile — use as your coaching lens today) ---
+    athlete_model = coach_state.get("ATHLETE_MODEL", {}).get("summary", "")
+    if athlete_model:
+        sections.append(
+            "YOUR PSYCHOLOGICAL MODEL OF THIS ATHLETE (updated quarterly — use as a lens, not a script)\n"
+            f"  {athlete_model}\n"
+            "  → Let this calibrate your tone today: how direct to be, what to push on, what to let go."
+        )
+
+    # --- Coaching Reason (why this week's training is structured this way) ---
+    coaching_reason = coach_state.get("COACHING_REASON", {}).get("summary", "")
+    if coaching_reason:
+        sections.append(
+            "WHY THIS WEEK IS STRUCTURED THIS WAY (use this to educate, not just prescribe)\n"
+            f"  {coaching_reason}\n"
+            "  → Weave this reasoning into the email naturally — one sentence is enough. "
+            "The athlete should understand the principle, not just the prescription."
         )
 
     # --- Athlete Preferences (respect these before making any output decisions) ---
@@ -1149,6 +1339,12 @@ def build_prompt(program_data: dict, memory_data: dict,
     # --- Projections (computed facts — not hallucinated) ---
     if projections_text:
         sections.append(f"PROJECTIONS (computed — Python math, not estimated)\n{projections_text}")
+
+    # --- Projection review (weekly only — how does this week compare to last week's snapshot?) ---
+    if is_weekly_summary and projections_text:
+        proj_review = _format_projection_review(coach_state, projections_text)
+        if proj_review:
+            sections.append(proj_review)
 
     # --- Weekly tonnage per lift (volume load tracking) ---
     if tonnage_by_lift:

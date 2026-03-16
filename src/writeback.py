@@ -22,9 +22,9 @@ import sys
 sys.path.insert(0, os.path.dirname(__file__))
 
 import anthropic
-from config import ANTHROPIC_API_KEY, PROGRAM_SHEET_ID
+from config import ANTHROPIC_API_KEY, PROGRAM_SHEET_ID, CLAUDE_HAIKU
 
-HAIKU_MODEL = "claude-haiku-4-5-20251001"
+HAIKU_MODEL = CLAUDE_HAIKU
 
 
 # ---------------------------------------------------------------------------

@@ -20,7 +20,7 @@ sys.stdout.reconfigure(encoding="utf-8")
 
 import anthropic
 
-from config import ANTHROPIC_API_KEY, ATHLETE_NAME, CLAUDE_MODEL, KEY_LIFTS, compute_current_week, resolve_program_start_date
+from config import ANTHROPIC_API_KEY, ATHLETE_NAME, CLAUDE_MODEL, CLAUDE_HAIKU, KEY_LIFTS, compute_current_week, resolve_program_start_date
 
 
 # ---------------------------------------------------------------------------
@@ -171,7 +171,7 @@ def preprocess_email_replies(replies: list[dict], dry_run: bool = False) -> int:
 
         try:
             result = client.messages.create(
-                model="claude-haiku-4-5-20251001",
+                model=CLAUDE_HAIKU,
                 max_tokens=300,
                 messages=[{"role": "user", "content": prompt}],
             )
@@ -444,6 +444,32 @@ def write_coach_state_summaries(
             sched_summary = f"Week {week_num}: {done}/{total} days completed"
             _write_state(upsert_coach_state, "SCHEDULE", sched_summary, "HIGH", dry_run)
 
+        # --- PROJECTION SNAPSHOT (weekly only) — store for next week's review loop ---
+        if is_weekly_summary and projections:
+            try:
+                import json as _json
+                snap_parts = []
+                for proj in projections.get("lift_projections", []):
+                    if proj:
+                        snap_parts.append({
+                            "exercise": proj.get("exercise", ""),
+                            "current_1rm": proj.get("current_1rm"),
+                            "rate_per_week": proj.get("rate_per_week"),
+                            "projected_end_1rm": proj.get("projected_end_1rm"),
+                            "on_track": proj.get("on_track"),
+                            "target_1rm": proj.get("target_1rm"),
+                        })
+                if snap_parts:
+                    snap_json = _json.dumps({
+                        "date": str(date.today()),
+                        "week_num": week_num,
+                        "lifts": snap_parts,
+                    })
+                    _write_state(upsert_coach_state, "LAST_PROJECTION_SNAPSHOT",
+                                 snap_json, "HIGH", dry_run)
+            except Exception as e:
+                print(f"  Projection snapshot failed (non-fatal): {e}")
+
         # --- NUTRITION domain (Haiku, weekly only — derived insight, not critical daily) ---
         # Skip on daily runs to save budget (~$0.002/run × 30d = $0.06/mo)
         if is_weekly_summary:
@@ -665,6 +691,27 @@ def run_think(week_num: int = None, dry_run: bool = False):
     print("  Updating behavior patterns...")
     _update_behavior_patterns(memory_data, program_data=program_data, dry_run=dry_run)
 
+    # 2c. Archive stale Coach Focus items (NORMAL priority, no activity in 90+ days)
+    if not dry_run:
+        try:
+            from memory import read_coach_focus, update_coach_focus_status
+            focus_items = read_coach_focus()
+            cutoff_focus = str(today - timedelta(days=90))
+            archived_focus = 0
+            for item in focus_items:
+                if item.get("Status", "OPEN") != "OPEN":
+                    continue
+                if item.get("Priority", "NORMAL").upper() in ("HIGH", "PINNED"):
+                    continue
+                timestamp = item.get("Last Mentioned", "") or item.get("Date Added", "")
+                if timestamp and timestamp[:10] < cutoff_focus:
+                    update_coach_focus_status(item.get("Item", "")[:80], "STALE")
+                    archived_focus += 1
+            if archived_focus:
+                print(f"  Archived {archived_focus} stale Coach Focus items (>90d NORMAL).")
+        except Exception as e:
+            print(f"  Coach Focus archival failed (non-fatal): {e}")
+
     # 3. Archive old rows from Lift History and Health Log (rows > 1 year old)
     from memory import archive_old_rows, TAB_LIFT_HISTORY, TAB_HEALTH_LOG
     cutoff = today.replace(year=today.year - 1)
@@ -688,10 +735,107 @@ def run_think(week_num: int = None, dry_run: bool = False):
     run_planning_pass(program_data, memory_data, week_num, dry_run=dry_run)
     print("Planning pass complete.")
 
-    # 6. Bi-monthly steer co — initiate if ~60 days since last one
+    # 6. Program terminal summary — if ending within 1 week, write institutional memory
+    try:
+        from projections import run_all_projections
+        proj_check = run_all_projections(memory_data, program_data=program_data)
+        pp = proj_check.get("program_projection") or {}
+        if pp.get("weeks_remaining", 99) <= 1:
+            print("  Program ending — writing terminal summary...")
+            _write_program_terminal_summary(memory_data, dry_run=dry_run)
+    except Exception as e:
+        print(f"  Terminal summary check failed (non-fatal): {e}")
+
+    # 7. Bi-monthly steer co — initiate if ~60 days since last one
     from planner import _initiate_steer_co
     memory_data = read_all()  # re-read for fresh Coach State
     _initiate_steer_co(memory_data, dry_run=dry_run)
+
+
+def _write_program_terminal_summary(memory_data: dict, dry_run: bool = False) -> None:
+    """
+    Write a terminal program summary to Program History when the program is ending
+    (weeks_remaining <= 1). Called from run_think().
+
+    Captures: final lift numbers vs targets, key behavioral patterns, what worked,
+    what didn't, and a recommendation for next program. Prevents cross-program amnesia.
+    Uses Haiku — one-time cost, high long-term value.
+    """
+    from memory import read_coach_state, upsert_coach_state
+
+    coach_state = memory_data.get("coach_state") or read_coach_state()
+
+    # Only run once — gate on PROGRAM_TERMINAL_WRITTEN in Coach State
+    terminal_flag = coach_state.get("PROGRAM_TERMINAL_WRITTEN", {}).get("summary", "")
+    if terminal_flag and "written" in terminal_flag.lower():
+        print("  Terminal summary: already written for this program — skipping.")
+        return
+
+    # Gather evidence
+    lift_domains = ["SQUAT", "BENCH", "DEADLIFT", "OHP"]
+    lift_states = {
+        d: coach_state.get(d, {}).get("summary", "")
+        for d in lift_domains
+        if coach_state.get(d, {}).get("summary", "")
+    }
+    behavior_patterns = coach_state.get("BEHAVIOR_PATTERNS", {}).get("summary", "")
+    athlete_model = coach_state.get("ATHLETE_MODEL", {}).get("summary", "")
+    annual_arc = coach_state.get("ANNUAL_ARC", {}).get("summary", "")[:300]
+
+    coach_log = memory_data.get("coach_log", [])
+    log_snippets = "\n".join(
+        f"  [{e.get('Date', '')}] {e.get('Key Observations', '')[:100]}"
+        for e in coach_log[-10:]
+    )
+
+    lift_text = "\n".join(f"  {d}: {s}" for d, s in lift_states.items()) or "(no lift data)"
+
+    prompt = (
+        f"You are {ATHLETE_NAME}'s strength coach. This program is ending. Write a TERMINAL PROGRAM SUMMARY.\n\n"
+        f"FINAL LIFT NUMBERS:\n{lift_text}\n\n"
+        f"BEHAVIORAL PATTERNS THIS PROGRAM:\n  {behavior_patterns or '(none recorded)'}\n\n"
+        f"PSYCHOLOGICAL MODEL:\n  {athlete_model or '(none recorded)'}\n\n"
+        f"LONG-TERM ARC CONTEXT:\n  {annual_arc or '(none)'}\n\n"
+        f"RECENT COACH LOG:\n{log_snippets or '  (none)'}\n\n"
+        f"Write 6-8 sentences covering:\n"
+        f"1. Final numbers vs targets — honest assessment of what was hit, what was missed\n"
+        f"2. The 2-3 patterns that defined this program (training behavior, adherence, RPE tendencies)\n"
+        f"3. What worked well — what should be carried forward to the next program\n"
+        f"4. What didn't work — what should be changed or avoided\n"
+        f"5. One concrete recommendation for the next program (volume, frequency, focus)\n"
+        f"Be direct. This is your institutional memory. Future you will read this before designing the next block."
+    )
+
+    if dry_run:
+        print("  [DRY RUN] Would write program terminal summary.")
+        return
+
+    try:
+        client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+        result = client.messages.create(
+            model=CLAUDE_HAIKU,
+            max_tokens=500,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        summary_text = result.content[0].text.strip()
+
+        # Write to Program History via coach log (permanent record)
+        try:
+            from memory import log_coach_run
+            log_coach_run(
+                observations=f"[PROGRAM TERMINAL SUMMARY] {summary_text[:300]}",
+                email_summary=summary_text,
+            )
+            print("  Terminal summary written to Coach Log.")
+        except Exception as e:
+            print(f"  Terminal summary log write failed (non-fatal): {e}")
+
+        # Also write to Coach State as a domain for immediate access
+        upsert_coach_state("PROGRAM_TERMINAL", summary_text[:600], "HIGH")
+        upsert_coach_state("PROGRAM_TERMINAL_WRITTEN", "written", "HIGH")
+        print(f"  PROGRAM_TERMINAL Coach State written ({len(summary_text)} chars).")
+    except Exception as e:
+        print(f"  Program terminal summary failed (non-fatal): {e}")
 
 
 def _update_athlete_model(memory_data: dict, dry_run: bool = False) -> None:
@@ -722,6 +866,7 @@ def _update_athlete_model(memory_data: dict, dry_run: bool = False) -> None:
     coach_log = memory_data.get("coach_log", [])
     focus = memory_data.get("coach_focus", [])
     planning_notes = memory_data.get("planning_notes", [])
+    commands = memory_data.get("commands", [])
 
     log_snippets = "\n".join(
         f"  [{e.get('Date', '')}] {e.get('Key Observations', '')[:150]}"
@@ -734,16 +879,44 @@ def _update_athlete_model(memory_data: dict, dry_run: bool = False) -> None:
     )
     plan_snippet = planning_notes[-1].get("notes", "")[:400] if planning_notes else ""
 
+    # Coaching decisions: proposals accepted, declined, or ignored — reveals athlete's response pattern
+    decision_snippets = []
+    for cmd in commands[-30:]:
+        cmd_type = cmd.get("Command", "").upper()
+        applied = cmd.get("Applied", "").upper()
+        value = cmd.get("Value", "")[:100]
+        if cmd_type == "PENDING_PROPOSAL":
+            if applied == "Y":
+                decision_snippets.append(f"  [ACCEPTED] {value}")
+            elif applied == "DECLINED":
+                decision_snippets.append(f"  [DECLINED] {value}")
+            elif applied not in ("Y", "DECLINED") and value:
+                decision_snippets.append(f"  [IGNORED/PENDING] {value}")
+    decisions_text = "\n".join(decision_snippets[-10:]) or "  (no proposal history yet)"
+
+    # Resolved follow-ups — what the coach flagged and the athlete actually addressed
+    resolved = "\n".join(
+        f"  [RESOLVED] {f.get('Item', '')[:100]}"
+        for f in focus
+        if f.get("Status", "") == "RESOLVED"
+    )[-500:] or "  (none)"
+
     prompt = (
         f"Based on coaching history, build a psychological model of this athlete.\n\n"
         f"ATHLETE PROFILE:\n{profile[:400]}\n\n"
         f"RECENT COACH OBSERVATIONS:\n{log_snippets}\n\n"
         f"CURRENT WATCH LIST:\n{focus_snippets}\n\n"
+        f"COACHING DECISIONS (what was proposed, and how the athlete responded):\n{decisions_text}\n\n"
+        f"WHAT THE ATHLETE ACTUALLY RESOLVED (vs what stayed open):\n{resolved}\n\n"
         f"LAST PLANNING NOTES:\n{plan_snippet}\n\n"
         f"EXISTING MODEL (update, don't discard):\n{existing_model or '(none yet)'}\n\n"
-        f"Output 4-6 sentences covering: how the athlete responds to direct feedback, "
-        f"known psychological patterns (excuses, motivation triggers, avoidance), "
-        f"what coaching approach works best, weaknesses to keep watching."
+        f"Output 5-7 sentences covering:\n"
+        f"1. How the athlete responds to direct feedback vs indirect suggestion\n"
+        f"2. Known psychological patterns: avoidance, excuses, motivation triggers\n"
+        f"3. Response to proposals — does he accept, push back, or ignore? Is there a pattern?\n"
+        f"4. What coaching approach works best for him specifically\n"
+        f"5. Persistent weaknesses the coach should keep returning to (even if athlete resists)\n"
+        f"Be honest. This is your institutional memory. It only helps if it's accurate, not flattering."
     )
 
     if dry_run:
@@ -753,8 +926,8 @@ def _update_athlete_model(memory_data: dict, dry_run: bool = False) -> None:
     try:
         client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
         result = client.messages.create(
-            model="claude-haiku-4-5-20251001",
-            max_tokens=400,
+            model=CLAUDE_HAIKU,
+            max_tokens=600,
             messages=[{"role": "user", "content": prompt}],
         )
         model_text = result.content[0].text.strip()
@@ -1554,7 +1727,7 @@ def run_proactive(dry_run: bool = False):
 
     client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
     response = client.messages.create(
-        model="claude-haiku-4-5-20251001",
+        model=CLAUDE_HAIKU,
         max_tokens=500,
         messages=[{"role": "user", "content": user_message}],
         system=system_prompt,
@@ -2316,6 +2489,14 @@ CUE OPTIONS FOR {primary_lift.upper() or "TODAY'S PRIMARY LIFT"}:
 
 Rules: No greeting, no sign-off. Max 4 sentences. Direct coaching language only."""
 
+    # Enforce athlete output preferences as hard constraints
+    try:
+        from memory import read_athlete_preferences
+        from prompt import apply_output_preferences
+        prompt = apply_output_preferences(prompt, read_athlete_preferences())
+    except Exception:
+        pass
+
     if dry_run:
         print(f"  [DRY RUN] Brief would cover: {session_text[:80]}")
         return
@@ -2323,7 +2504,7 @@ Rules: No greeting, no sign-off. Max 4 sentences. Direct coaching language only.
     try:
         client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
         result = client.messages.create(
-            model="claude-haiku-4-5-20251001",
+            model=CLAUDE_HAIKU,
             max_tokens=220,
             messages=[{"role": "user", "content": prompt}],
         )
@@ -2334,6 +2515,12 @@ Rules: No greeting, no sign-off. Max 4 sentences. Direct coaching language only.
         if sent:
             print(f"  Brief sent: {brief_msg[:80]}")
             upsert_coach_state("LAST_BRIEF", str(today), "HIGH")
+            # Write DAILY_FOCUS so post-session and evening-protocol can reference today's emphasis
+            daily_focus = (
+                f"{today} | lift:{primary_lift} | "
+                f"intent:{brief_msg[:150].replace(chr(10), ' ')}"
+            )
+            upsert_coach_state("DAILY_FOCUS", daily_focus, "HIGH")
         else:
             print("  Brief: Telegram send failed.")
     except Exception as e:
@@ -2352,7 +2539,7 @@ def run_post_session(dry_run: bool = False):
     Deduped via LAST_POST_SESSION Coach State.
     """
     from sheets import read_program_data
-    from memory import read_coach_state, upsert_coach_state
+    from memory import read_coach_state, upsert_coach_state, read_commitments
 
     today = date.today()
     week_num = compute_current_week(resolve_program_start_date())
@@ -2426,6 +2613,19 @@ def run_post_session(dry_run: bool = False):
 
     weekly_intent = coach_state.get("WEEKLY_INTENT", {}).get("summary", "")
 
+    # DAILY_FOCUS: what today's brief emphasized — avoid contradicting it
+    daily_focus_raw = coach_state.get("DAILY_FOCUS", {}).get("summary", "")
+    daily_focus_today = ""
+    if daily_focus_raw and daily_focus_raw.startswith(str(today)):
+        daily_focus_today = daily_focus_raw[len(str(today)) + 3:]  # strip "DATE | "
+
+    # Open commitments due today or soon — surface in post-session if relevant
+    try:
+        open_commits = read_commitments("OPEN")
+        post_commitment_note = " | ".join(c["Commitment"][:80] for c in open_commits[:2]) if open_commits else ""
+    except Exception:
+        post_commitment_note = ""
+
     # Build context for Haiku
     skipped_names = [ex.get("name", "") for ex in skip_exs if ex.get("name")][:4]
     main_done = [
@@ -2469,7 +2669,9 @@ WHAT THE MESSAGE MUST DO:
 
 CONTEXT:
 Weekly intent: {weekly_intent or '(not set)'}
+{f"Today's pre-session brief focused on: {daily_focus_today}" if daily_focus_today else ""}
 Today's Telegram conversation: {today_tg_text}
+{f"OPEN COMMITMENT (follow up if relevant): {post_commitment_note}" if post_commitment_note else ""}
 
 Rules: No greeting, no sign-off. Reference actual data (weights, exercises). Don't repeat today's conversation."""
     else:
@@ -2489,6 +2691,14 @@ Weekly intent: {weekly_intent or '(not set)'}
 
 Rules: No greeting, no sign-off. Human and specific."""
 
+    # Enforce athlete output preferences as hard constraints
+    try:
+        from memory import read_athlete_preferences
+        from prompt import apply_output_preferences
+        prompt = apply_output_preferences(prompt, read_athlete_preferences())
+    except Exception:
+        pass
+
     if dry_run:
         print(f"  [DRY RUN] Post-session: {done_count}/{total_count} done, "
               f"skipped: {skipped_names}, rpe: {has_rpe}")
@@ -2497,7 +2707,7 @@ Rules: No greeting, no sign-off. Human and specific."""
     try:
         client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
         result = client.messages.create(
-            model="claude-haiku-4-5-20251001",
+            model=CLAUDE_HAIKU,
             max_tokens=200,
             messages=[{"role": "user", "content": prompt}],
         )
@@ -2668,7 +2878,7 @@ def run_weekly_schedule_discovery(dry_run: bool = False):
     try:
         client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
         result = client.messages.create(
-            model="claude-haiku-4-5-20251001",
+            model=CLAUDE_HAIKU,
             max_tokens=120,
             messages=[{"role": "user", "content": prompt}],
         )
@@ -2713,13 +2923,39 @@ def run_weekly_schedule_discovery(dry_run: bool = False):
             f"Write it now:"
         )
         intent_result = client.messages.create(
-            model="claude-haiku-4-5-20251001",
+            model=CLAUDE_HAIKU,
             max_tokens=150,
             messages=[{"role": "user", "content": intent_prompt}],
         )
         intent_text = intent_result.content[0].text.strip()
         upsert_coach_state("WEEKLY_INTENT", intent_text, "HIGH")
         print(f"  WEEKLY_INTENT written: {intent_text[:80]}")
+
+        # Generate COACHING_REASON — one sentence explaining the training science behind this week.
+        # This is injected into every brief and email so the athlete understands WHY, not just WHAT.
+        reason_prompt = (
+            f"You are a strength coach. In ONE sentence, explain the training science principle "
+            f"behind this week's programming. Focus on WHY the volume/intensity/structure matters "
+            f"right now — what adaptation are we targeting, and why this timing?\n\n"
+            f"PROGRAM: {program_summary}\n"
+            f"LIFT STATE:\n{lift_states_text}\n"
+            f"ANNUAL ARC: {annual_arc or '(not set)'}\n"
+            f"WEEKLY INTENT: {intent_text}\n\n"
+            f"Output just one sentence. Examples:\n"
+            f"'We're using higher reps this week to accumulate volume that will translate to "
+            f"heavier singles in the peak block four weeks from now.'\n"
+            f"'This deload is timed specifically — the body supercompensates after reduced load, "
+            f"so next week's PRs are built this week, not next.'\n"
+            f"Write it now:"
+        )
+        reason_result = client.messages.create(
+            model=CLAUDE_HAIKU,
+            max_tokens=80,
+            messages=[{"role": "user", "content": reason_prompt}],
+        )
+        reason_text = reason_result.content[0].text.strip()
+        upsert_coach_state("COACHING_REASON", reason_text, "HIGH")
+        print(f"  COACHING_REASON written: {reason_text[:80]}")
     except Exception as e:
         print(f"  WEEKLY_INTENT generation failed (non-fatal): {e}")
 
@@ -2968,6 +3204,12 @@ def run_evening_protocol(dry_run: bool = False):
     weekly_intent = coach_state.get("WEEKLY_INTENT", {}).get("summary", "")
     schedule_ctx = coach_state.get("WEEKLY_SCHEDULE", {}).get("summary", "")
 
+    # DAILY_FOCUS: what today's brief said — reference for continuity, avoid contradictions
+    daily_focus_raw = coach_state.get("DAILY_FOCUS", {}).get("summary", "")
+    daily_focus_today = ""
+    if daily_focus_raw and daily_focus_raw.startswith(str(today)):
+        daily_focus_today = daily_focus_raw[len(str(today)) + 3:]
+
     # Lift domain states for transparency
     lift_states: dict[str, str] = {}
     for domain in ("SQUAT", "BENCH", "DEADLIFT", "OHP"):
@@ -3089,6 +3331,7 @@ Key lifts: {lift_summary or 'see program'}
 Week {week_num}: {done_days}/{total_days} sessions done this week
 Weekly intent: {weekly_intent or 'not yet set — reference the current program phase'}
 Known schedule: {schedule_ctx or 'not established'}
+{f"Today's brief focused on: {daily_focus_today} (build on this, don't contradict)" if daily_focus_today else ""}
 
 LIFT STATE (for reasoning transparency):
 {lift_state_lines or '  (no state data)'}
@@ -3113,6 +3356,14 @@ PERSONA RULES:
 
 Write the message now:"""
 
+    # Enforce athlete output preferences as hard constraints
+    try:
+        from memory import read_athlete_preferences
+        from prompt import apply_output_preferences
+        prompt = apply_output_preferences(prompt, read_athlete_preferences())
+    except Exception:
+        pass
+
     if dry_run:
         print(f"  [DRY RUN] Evening protocol for: {tomorrow_plan_summary}")
         print(f"  [DRY RUN] Weekly intent: {weekly_intent[:80] if weekly_intent else 'none'}")
@@ -3121,7 +3372,7 @@ Write the message now:"""
     try:
         client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
         result = client.messages.create(
-            model="claude-haiku-4-5-20251001",
+            model=CLAUDE_HAIKU,
             max_tokens=300,
             messages=[{"role": "user", "content": prompt}],
         )

@@ -32,7 +32,7 @@ import anthropic
 sys.path.insert(0, os.path.join(os.path.dirname(__file__)))
 
 from config import (
-    ANTHROPIC_API_KEY, ATHLETE_NAME, CLAUDE_MODEL,
+    ANTHROPIC_API_KEY, ATHLETE_NAME, CLAUDE_MODEL, CLAUDE_HAIKU,
     TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID,
     bootstrap_google_credentials,
 )
@@ -47,8 +47,8 @@ from prompt import SYSTEM_PROMPT
 # Model routing
 # ---------------------------------------------------------------------------
 
-HAIKU_MODEL = "claude-haiku-4-5-20251001"
-SONNET_MODEL = CLAUDE_MODEL  # claude-sonnet-4-6
+HAIKU_MODEL = CLAUDE_HAIKU
+SONNET_MODEL = CLAUDE_MODEL
 
 # Use Haiku for short conversational messages, Sonnet for complex queries
 HAIKU_THRESHOLD_WORDS = 20  # if message < 20 words, use Haiku

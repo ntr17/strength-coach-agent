@@ -11,7 +11,7 @@ from datetime import date
 
 import anthropic
 
-from config import ANTHROPIC_API_KEY, ATHLETE_NAME
+from config import ANTHROPIC_API_KEY, ATHLETE_NAME, CLAUDE_HAIKU
 
 
 # ---------------------------------------------------------------------------
@@ -566,7 +566,7 @@ def process_telegram_messages(dry_run: bool = False) -> int:
     client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
     try:
         response = client.messages.create(
-            model="claude-haiku-4-5-20251001",
+            model=CLAUDE_HAIKU,
             max_tokens=800,
             system=PROCESSOR_SYSTEM,
             messages=[{"role": "user", "content": user_content}],

@@ -20,9 +20,9 @@ import sys
 sys.path.insert(0, os.path.dirname(__file__))
 
 import anthropic
-from config import ANTHROPIC_API_KEY, ATHLETE_NAME, CLAUDE_MODEL
+from config import ANTHROPIC_API_KEY, ATHLETE_NAME, CLAUDE_MODEL, CLAUDE_HAIKU
 
-HAIKU_MODEL = "claude-haiku-4-5-20251001"
+HAIKU_MODEL = CLAUDE_HAIKU
 SONNET_MODEL = CLAUDE_MODEL
 
 TRIGGER_KEYWORDS = [

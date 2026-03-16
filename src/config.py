@@ -116,8 +116,10 @@ GOOGLE_SCOPES_FULL = GOOGLE_SCOPES + [
     "https://www.googleapis.com/auth/gmail.readonly",
 ]
 
-# Claude model
-CLAUDE_MODEL = "claude-sonnet-4-6"
+# Claude model IDs — update here when new models ship, nowhere else
+CLAUDE_MODEL = "claude-sonnet-4-6"          # main coaching passes (full emails, planning)
+CLAUDE_HAIKU = "claude-haiku-4-5-20251001"  # lightweight passes (brief, proactive, processor)
+CLAUDE_OPUS  = "claude-opus-4-6"            # deep thinking (program design, extended thinking)
 
 # ---------------------------------------------------------------------------
 # Canonical lift list
