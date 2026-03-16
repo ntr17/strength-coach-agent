@@ -1598,5 +1598,450 @@ class TestScheduleDiscoveryDedup:
                     mock_upsert.assert_not_called()
 
 
+# ===========================================================================
+# V13 improvements — extract_schedule_markers, project_long_term,
+# format_long_term_projections, brief day-matching, missing-data section,
+# OPEN_QUESTION anchoring, LIFE_GOAL processor category
+# ===========================================================================
+
+from run_coach import extract_schedule_markers
+
+
+class TestExtractScheduleMarkers:
+    """I7 — dynamic scheduled messages."""
+
+    def test_no_markers_returns_clean_text(self):
+        text = "Great session today."
+        clean, items = extract_schedule_markers(text)
+        assert clean == text
+        assert items == []
+
+    def test_single_valid_marker_extracted(self):
+        text = "Well done.[SCHEDULE: 2026-04-01 | How's the elbow?]"
+        clean, items = extract_schedule_markers(text)
+        assert "SCHEDULE" not in clean
+        assert len(items) == 1
+        assert items[0]["target_date"] == "2026-04-01"
+        assert items[0]["message"] == "How's the elbow?"
+
+    def test_marker_removed_from_clean_text(self):
+        text = "Header.[SCHEDULE: 2026-05-01 | Check in]Footer."
+        clean, items = extract_schedule_markers(text)
+        assert "SCHEDULE" not in clean
+        assert "Header." in clean
+        assert "Footer." in clean
+
+    def test_multiple_markers_all_extracted(self):
+        text = (
+            "OK[SCHEDULE: 2026-04-10 | First follow-up]"
+            "and[SCHEDULE: 2026-04-20 | Second follow-up]done."
+        )
+        clean, items = extract_schedule_markers(text)
+        assert len(items) == 2
+        assert items[0]["target_date"] == "2026-04-10"
+        assert items[1]["target_date"] == "2026-04-20"
+
+    def test_marker_missing_pipe_ignored(self):
+        text = "Text[SCHEDULE: 2026-04-01]more."
+        clean, items = extract_schedule_markers(text)
+        assert items == []
+
+    def test_marker_empty_message_ignored(self):
+        text = "Text[SCHEDULE: 2026-04-01 | ]more."
+        clean, items = extract_schedule_markers(text)
+        assert items == []
+
+    def test_case_insensitive_schedule_keyword(self):
+        text = "[schedule: 2026-04-01 | lowercase test]"
+        clean, items = extract_schedule_markers(text)
+        assert len(items) == 1
+        assert items[0]["message"] == "lowercase test"
+
+    def test_pipe_inside_message_not_split_further(self):
+        # Only split on the FIRST " | "
+        text = "[SCHEDULE: 2026-04-01 | message with | extra pipe]"
+        clean, items = extract_schedule_markers(text)
+        assert len(items) == 1
+        assert items[0]["message"] == "message with | extra pipe"
+
+    def test_empty_string_returns_empty(self):
+        clean, items = extract_schedule_markers("")
+        assert clean == ""
+        assert items == []
+
+
+from projections import project_long_term, format_long_term_projections
+
+
+class TestProjectLongTerm:
+    """I6 — long-term 1yr/2yr projections with diminishing returns."""
+
+    def _squat_proj(self, current_1rm=100.0, rate=0.5, target=120.0):
+        return [{"exercise": "Squat", "current_1rm": current_1rm,
+                 "rate_per_week": rate, "target_1rm": target}]
+
+    def test_empty_input_returns_empty(self):
+        assert project_long_term([]) == {}
+
+    def test_none_rate_skipped(self):
+        result = project_long_term([{"exercise": "Squat", "current_1rm": 100.0,
+                                      "rate_per_week": None, "target_1rm": 120.0}])
+        assert result == {}
+
+    def test_zero_current_1rm_skipped(self):
+        result = project_long_term([{"exercise": "Squat", "current_1rm": 0,
+                                      "rate_per_week": 0.5, "target_1rm": 120.0}])
+        assert result == {}
+
+    def test_positive_rate_1yr_higher_than_end_of_program(self):
+        result = project_long_term(self._squat_proj(current_1rm=100.0, rate=0.5), weeks_remaining=10)
+        entry = result["Squat"]
+        assert entry["1yr"] > entry["end_of_program"]
+
+    def test_zero_rate_all_projections_equal_end_of_program(self):
+        result = project_long_term(self._squat_proj(current_1rm=100.0, rate=0.0), weeks_remaining=0)
+        entry = result["Squat"]
+        assert entry["end_of_program"] == 100.0
+        assert entry["6mo"] == 100.0
+        assert entry["1yr"] == 100.0
+        assert entry["2yr"] == 100.0
+
+    def test_diminishing_returns_2yr_less_than_double_1yr_gain(self):
+        result = project_long_term(self._squat_proj(current_1rm=100.0, rate=1.0), weeks_remaining=0)
+        entry = result["Squat"]
+        gain_1yr = entry["1yr"] - 100.0
+        gain_2yr = entry["2yr"] - 100.0
+        # With decay, 2yr gain should be less than 2x 1yr gain
+        assert gain_2yr < 2 * gain_1yr
+
+    def test_squat_includes_olympic_note(self):
+        result = project_long_term(self._squat_proj(current_1rm=120.0, rate=0.5))
+        assert "olympic_note" in result["Squat"]
+        assert "snatch" in result["Squat"]["olympic_note"]
+
+    def test_non_squat_has_no_olympic_note(self):
+        result = project_long_term([{"exercise": "Bench Press", "current_1rm": 100.0,
+                                      "rate_per_week": 0.5, "target_1rm": 110.0}])
+        assert "olympic_note" not in result["Bench Press"]
+
+    def test_negative_rate_projections_decline(self):
+        result = project_long_term(self._squat_proj(current_1rm=100.0, rate=-0.5), weeks_remaining=0)
+        entry = result["Squat"]
+        assert entry["1yr"] < 100.0
+
+    def test_weeks_remaining_used_for_end_of_program(self):
+        result = project_long_term(self._squat_proj(current_1rm=100.0, rate=1.0), weeks_remaining=10)
+        assert result["Squat"]["end_of_program"] == 110.0
+
+    def test_target_stored_in_result(self):
+        result = project_long_term(self._squat_proj(current_1rm=100.0, rate=0.5, target=120.0))
+        assert result["Squat"]["target"] == 120.0
+
+
+class TestFormatLongTermProjections:
+    """format_long_term_projections — output format checks."""
+
+    def test_empty_returns_empty_string(self):
+        assert format_long_term_projections({}) == ""
+
+    def test_none_returns_empty_string(self):
+        assert format_long_term_projections(None) == ""
+
+    def test_basic_output_contains_exercise(self):
+        data = {"Squat": {"end_of_program": 110.0, "6mo": 120.0, "1yr": 130.0,
+                           "2yr": 145.0, "target": 120.0}}
+        out = format_long_term_projections(data)
+        assert "Squat" in out
+        assert "130" in out  # 1yr value
+
+    def test_olympic_note_included_when_present(self):
+        data = {"Squat": {"end_of_program": 110.0, "6mo": 120.0, "1yr": 130.0,
+                           "2yr": 145.0, "olympic_note": "est. snatch ~71.5kg"}}
+        out = format_long_term_projections(data)
+        assert "snatch" in out
+
+
+class TestBriefDayMatching:
+    """I1 — brief falls back to WEEKLY_SCHEDULE when labels are 'DAY N:' style."""
+
+    def _make_week(self, labels, done_flags=None):
+        """Build a current_week dict with given day labels."""
+        if done_flags is None:
+            done_flags = [False] * len(labels)
+        days = []
+        for label, is_done in zip(labels, done_flags):
+            exercises = [{"name": "Squat", "weight": "100", "sets_reps": "5x5",
+                          "done": is_done}]
+            days.append({"label": label, "exercises": exercises})
+        return {"days": days}
+
+    def test_day_name_in_label_matches(self):
+        """Standard 'Monday - Squat' style labels should match directly."""
+        # The matching logic is: today_str.lower() in day["label"].lower()
+        today = date.today()
+        today_str = today.strftime("%A")  # e.g. "Monday"
+        # Use a label that definitely won't match today's name
+        other_label = "RestDay - Nothing"
+        week = self._make_week([f"{today_str} - Squat", other_label])
+        matching = [d for d in week["days"] if today_str.lower() in d["label"].lower()]
+        assert len(matching) == 1
+
+    def test_day_n_label_does_not_match_day_name(self):
+        """'DAY 1: Squat + Bench' should never match 'monday'."""
+        labels = ["DAY 1: Squat + Bench", "DAY 2: Deadlift"]
+        week = self._make_week(labels)
+        for day_name in ("monday", "tuesday", "wednesday", "thursday", "friday"):
+            matching = [d for d in week["days"] if day_name in d["label"].lower()]
+            assert matching == []
+
+    def test_fallback_picks_first_undone(self):
+        """Fallback logic: first session where no exercise is done."""
+        labels = ["DAY 1: Squat", "DAY 2: Bench", "DAY 3: Dead"]
+        done_flags = [True, False, False]  # DAY 1 done
+        week = self._make_week(labels, done_flags)
+        all_undone = [
+            d for d in week["days"]
+            if not any(ex.get("done") is True for ex in d.get("exercises", []))
+        ]
+        assert all_undone[0]["label"] == "DAY 2: Bench"
+
+    def test_fallback_empty_when_all_done(self):
+        labels = ["DAY 1: Squat", "DAY 2: Bench"]
+        done_flags = [True, True]
+        week = self._make_week(labels, done_flags)
+        all_undone = [
+            d for d in week["days"]
+            if not any(ex.get("done") is True for ex in d.get("exercises", []))
+        ]
+        assert all_undone == []
+
+
+class TestOpenQuestionAnchoring:
+    """I2 — FOLLOWUP creates a dated OPEN_QUESTION command."""
+
+    def test_followup_creates_open_question_with_date(self):
+        from unittest.mock import patch, MagicMock
+        from run_coach import write_coach_focus_updates
+
+        with patch("memory.append_coach_focus") as mock_focus, \
+             patch("memory.append_command") as mock_cmd, \
+             patch("memory.update_coach_focus_status"):
+            updates = [{"category": "FOLLOWUP", "item": "How did the squat feel?"}]
+            write_coach_focus_updates(updates)
+
+            mock_cmd.assert_called_once()
+            args = mock_cmd.call_args[0]
+            assert args[0] == "OPEN_QUESTION"
+            assert "[asked " in args[1]
+            assert "How did the squat feel?" in args[1]
+
+    def test_non_followup_does_not_create_open_question(self):
+        from unittest.mock import patch
+        from run_coach import write_coach_focus_updates
+
+        with patch("memory.append_coach_focus"), \
+             patch("memory.append_command") as mock_cmd, \
+             patch("memory.update_coach_focus_status"):
+            updates = [{"category": "TRACKING", "item": "Monitor squat progress"}]
+            write_coach_focus_updates(updates)
+            mock_cmd.assert_not_called()
+
+    def test_open_question_date_format_is_iso(self):
+        from unittest.mock import patch
+        from run_coach import write_coach_focus_updates
+        import re
+
+        with patch("memory.append_coach_focus"), \
+             patch("memory.append_command") as mock_cmd, \
+             patch("memory.update_coach_focus_status"):
+            updates = [{"category": "FOLLOWUP", "item": "Test question"}]
+            write_coach_focus_updates(updates)
+
+            args = mock_cmd.call_args[0]
+            # Should contain [asked YYYY-MM-DD]
+            match = re.search(r'\[asked (\d{4}-\d{2}-\d{2})\]', args[1])
+            assert match is not None
+
+
+class TestMissingDataSection:
+    """I3 — proactive prompt includes MISSING DATA section when health log is stale."""
+
+    def _build_health_log(self, days_ago: int):
+        past_date = (date.today() - timedelta(days=days_ago)).isoformat()
+        return [{"Date": past_date, "Bodyweight": "80"}]
+
+    def test_fresh_log_no_missing_data_section(self):
+        from prompt import build_proactive_prompt
+        memory_data = {
+            "coach_state": {},
+            "athlete_preferences": [],
+            "commands": [],
+            "coach_focus": [],
+            "health_log": self._build_health_log(1),
+        }
+        _, user_msg = build_proactive_prompt(memory_data)
+        assert "MISSING DATA" not in user_msg
+
+    def test_stale_log_triggers_missing_data_section(self):
+        from prompt import build_proactive_prompt
+        memory_data = {
+            "coach_state": {},
+            "athlete_preferences": [],
+            "commands": [],
+            "coach_focus": [],
+            "health_log": self._build_health_log(4),  # 4 days ago → triggers at ≥3
+        }
+        _, user_msg = build_proactive_prompt(memory_data)
+        assert "MISSING DATA" in user_msg
+
+    def test_empty_health_log_triggers_section(self):
+        from prompt import build_proactive_prompt
+        memory_data = {
+            "coach_state": {},
+            "athlete_preferences": [],
+            "commands": [],
+            "coach_focus": [],
+            "health_log": [],
+        }
+        _, user_msg = build_proactive_prompt(memory_data)
+        assert "MISSING DATA" in user_msg
+
+    def test_three_days_gap_triggers_section(self):
+        from prompt import build_proactive_prompt
+        memory_data = {
+            "coach_state": {},
+            "athlete_preferences": [],
+            "commands": [],
+            "coach_focus": [],
+            "health_log": self._build_health_log(3),
+        }
+        _, user_msg = build_proactive_prompt(memory_data)
+        assert "MISSING DATA" in user_msg
+
+    def test_two_days_gap_does_not_trigger(self):
+        from prompt import build_proactive_prompt
+        memory_data = {
+            "coach_state": {},
+            "athlete_preferences": [],
+            "commands": [],
+            "coach_focus": [],
+            "health_log": self._build_health_log(2),
+        }
+        _, user_msg = build_proactive_prompt(memory_data)
+        assert "MISSING DATA" not in user_msg
+
+
+class TestLifeGoalProcessorCategory:
+    """I5 — LIFE_GOAL is a valid processor category."""
+
+    def test_life_goal_in_valid_categories(self):
+        from processor import _parse_processor_output
+        output = "LIFE_GOAL | 2026-03-16 | Athlete wants to compete in Olympic weightlifting"
+        events = _parse_processor_output(output)
+        assert len(events) == 1
+        assert events[0]["category"] == "LIFE_GOAL"
+        assert "Olympic" in events[0]["fact"]
+
+    def test_life_goal_has_correct_date(self):
+        from processor import _parse_processor_output
+        output = "LIFE_GOAL | 2026-05-01 | Wants to compete in powerlifting"
+        events = _parse_processor_output(output)
+        assert events[0]["event_date"] == "2026-05-01"
+
+    def test_life_goal_unknown_date_normalized(self):
+        from processor import _parse_processor_output
+        output = "LIFE_GOAL | unknown | Dreams of doing track and field"
+        events = _parse_processor_output(output)
+        assert len(events) == 1
+        assert events[0]["category"] == "LIFE_GOAL"
+
+    def test_life_goal_does_not_fall_through_to_noise(self):
+        """LIFE_GOAL must not be classified as NOISE just because it's a dream."""
+        from processor import _parse_processor_output
+        output = "NOISE | 2026-03-16 | Athlete mentioned Olympic lifting dreams"
+        events = _parse_processor_output(output)
+        # NOISE events should be marked as noise, not life goals
+        assert events[0]["category"] == "NOISE"
+
+        output2 = "LIFE_GOAL | 2026-03-16 | Athlete mentioned Olympic lifting dreams"
+        events2 = _parse_processor_output(output2)
+        assert events2[0]["category"] == "LIFE_GOAL"
+
+
+class TestRunScheduledMessages:
+    """I7 — run_scheduled_messages fires due commands and skips future ones."""
+
+    def test_dry_run_returns_zero_sent(self):
+        from run_coach import run_scheduled_messages
+        # dry_run=True skips the read_commands call entirely (returns [])
+        result = run_scheduled_messages(dry_run=True)
+        assert result == 0
+
+    def test_no_scheduled_messages_returns_zero(self):
+        from unittest.mock import patch
+        from run_coach import run_scheduled_messages
+        with patch("memory.read_commands", return_value=[]):
+            result = run_scheduled_messages(dry_run=False)
+        assert result == 0
+
+    def test_future_message_not_sent(self):
+        from unittest.mock import patch
+        from run_coach import run_scheduled_messages
+        future = (date.today() + timedelta(days=5)).isoformat()
+        cmds = [{"Command": "SCHEDULED_MESSAGE", "Value": f"{future} | Check in soon",
+                 "Applied": ""}]
+        with patch("memory.read_commands", return_value=cmds):
+            with patch("telegram_utils.send_telegram_message") as mock_send:
+                result = run_scheduled_messages(dry_run=False)
+        mock_send.assert_not_called()
+        assert result == 0
+
+    def test_past_message_is_sent(self):
+        from unittest.mock import patch, MagicMock
+        from run_coach import run_scheduled_messages
+        past = (date.today() - timedelta(days=1)).isoformat()
+        cmds = [{"Command": "SCHEDULED_MESSAGE", "Value": f"{past} | Follow-up question",
+                 "Applied": "", "_row_index": 5}]
+        with patch("memory.read_commands", return_value=cmds):
+            with patch("telegram_utils.send_telegram_message", return_value=True) as mock_send:
+                with patch("memory.update_command_applied", create=True):
+                    result = run_scheduled_messages(dry_run=False)
+        mock_send.assert_called_once_with("Follow-up question")
+        assert result == 1
+
+    def test_already_applied_message_skipped(self):
+        from unittest.mock import patch
+        from run_coach import run_scheduled_messages
+        past = (date.today() - timedelta(days=1)).isoformat()
+        cmds = [{"Command": "SCHEDULED_MESSAGE", "Value": f"{past} | Old message",
+                 "Applied": "Y"}]
+        with patch("memory.read_commands", return_value=cmds):
+            with patch("telegram_utils.send_telegram_message") as mock_send:
+                result = run_scheduled_messages(dry_run=False)
+        mock_send.assert_not_called()
+        assert result == 0
+
+    def test_malformed_value_skipped(self):
+        from unittest.mock import patch
+        from run_coach import run_scheduled_messages
+        cmds = [{"Command": "SCHEDULED_MESSAGE", "Value": "no-pipe-here", "Applied": ""}]
+        with patch("memory.read_commands", return_value=cmds):
+            with patch("telegram_utils.send_telegram_message") as mock_send:
+                run_scheduled_messages(dry_run=False)
+        mock_send.assert_not_called()
+
+    def test_today_message_is_due(self):
+        from unittest.mock import patch
+        from run_coach import run_scheduled_messages
+        today = date.today().isoformat()
+        cmds = [{"Command": "SCHEDULED_MESSAGE", "Value": f"{today} | Today's message",
+                 "Applied": "", "_row_index": 3}]
+        with patch("memory.read_commands", return_value=cmds):
+            with patch("telegram_utils.send_telegram_message", return_value=True):
+                with patch("memory.update_command_applied", create=True):
+                    result = run_scheduled_messages(dry_run=False)
+        assert result == 1
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
