@@ -1415,20 +1415,32 @@ def build_proactive_prompt(memory_data: dict, program_data: dict = None,
 
     # --- Session delta: what changed in the program sheet since last check ---
     delta_section = ""
-    if session_delta and session_delta.get("new_sessions_done"):
+    if session_delta and (session_delta.get("new_sessions_done") or session_delta.get("new_health_data")):
         delta_lines = []
-        for s in session_delta["new_sessions_done"]:
-            line = (f"  NEW: {s['label']} — {s['exercises_done']}/{s['exercises_total']} exercises logged")
+        for s in session_delta.get("new_sessions_done", []):
+            line = (f"  NEW SESSION: {s['label']} — "
+                    f"{s['exercises_done']}/{s['exercises_total']} exercises ({s.get('completion_pct', '?')}%)")
             if s.get("skipped_names"):
-                line += f" | SKIPPED: {', '.join(s['skipped_names'])}"
+                line += f"\n    SKIPPED: {', '.join(s['skipped_names'])}"
+            if s.get("weight_deviations"):
+                line += f"\n    WEIGHT DEVIATIONS: {'; '.join(s['weight_deviations'])}"
+            if s.get("notable_notes"):
+                line += f"\n    NOTES: {' | '.join(s['notable_notes'])}"
             if not s.get("has_rpe"):
-                line += " | NO RPE LOGGED"
+                line += "\n    RPE: not logged"
             delta_lines.append(line)
+        # New health data in footer
+        new_health = session_delta.get("new_health_data", {})
+        if new_health:
+            health_parts = [f"{k}: {v}" for k, v in new_health.items() if v]
+            delta_lines.append(f"  NEW HEALTH DATA: {', '.join(health_parts)}")
         delta_section = (
-            "\n## SESSION DELTA (new since last check — HIGH PRIORITY)\n"
+            "\n## SESSION DELTA — WHAT CHANGED SINCE LAST CHECK (HIGH PRIORITY)\n"
             + "\n".join(delta_lines)
-            + "\n  → TRIGGER: If a new session is logged, reach out to ask how it went, "
-            "why exercises were skipped (if any), and request RPE if missing."
+            + "\n\n  → You are a coach who notices. Use this data to reach out with specific, "
+            "intelligent questions: ask about weight deviations, skipped exercises (WHY?), "
+            "session notes, RPE if missing. Don't send a generic 'how did it go?' — "
+            "reference what you actually see."
         )
 
     user_message = f"""TODAY: {today.strftime('%A, %B %d, %Y')} ({time_of_day})

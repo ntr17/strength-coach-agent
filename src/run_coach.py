@@ -934,29 +934,63 @@ def compute_session_quality(program_data: dict, lift_history: list[dict]) -> dic
 def _detect_session_delta(program_data: dict, coach_state: dict) -> dict:
     """
     Compare current program sheet state against LAST_PROGRAM_SNAPSHOT stored in Coach State.
-    Returns a delta dict describing what changed since the last check.
+    Returns a rich delta dict describing what changed since the last check.
+
+    The snapshot now stores per-exercise: {done, actual, notes} so we can detect:
+      - New sessions logged since last check
+      - Exercises skipped within a partially-logged session
+      - Actual weight vs prescribed weight (deviations — up or down)
+      - New session notes added
+      - Missing RPE in completed sessions
+      - Footer health data changes (bodyweight, sleep, energy)
 
     Delta keys:
-      new_sessions_done: list of {label, exercises_done, exercises_total}
-      newly_skipped:     list of exercise names that appear skipped in a logged session
-      no_rpe_sessions:   list of session labels completed without any RPE data
-      snapshot_updated:  bool (caller should write new snapshot to Coach State)
+      new_sessions_done:   list of {label, exercises_done, exercises_total, skipped_names,
+                                    has_rpe, weight_deviations, notable_notes, completion_pct}
+      newly_skipped:       list of exercise names that went done→skipped
+      new_health_data:     dict of {bodyweight, sleep, energy} if new footer data detected
+      no_rpe_sessions:     list of session labels completed without any RPE data
+      snapshot_updated:    bool (caller should write new snapshot)
     """
     import json as _json
+    import re as _rej
 
     current_week = program_data.get("current_week", {})
     days = current_week.get("days", [])
 
-    # Build current snapshot: {day_label: {exercise_name: done_bool}}
-    current_snapshot = {}
+    # Build current snapshot — richer: {day_label: {exercise_name: {done, actual, notes}}}
+    current_snapshot: dict = {}
     for day in days:
         label = day.get("label", "")
-        current_snapshot[label] = {
-            ex.get("name", f"ex{i}"): ex.get("done", False)
-            for i, ex in enumerate(day.get("exercises", []))
+        day_snap = {}
+        for i, ex in enumerate(day.get("exercises", [])):
+            name = ex.get("name") or f"ex{i}"
+            day_snap[name] = {
+                "done": ex.get("done", False),
+                "actual": (ex.get("actual") or "").strip(),
+                "notes": (ex.get("session_note") or ex.get("notes") or "").strip(),
+                "weight": (ex.get("weight") or "").strip(),
+            }
+        # Footer: bodyweight, sleep, energy (if present)
+        footer = day.get("footer", {})
+        if footer:
+            day_snap["__footer__"] = {
+                "bodyweight": str(footer.get("bodyweight", "")),
+                "sleep": str(footer.get("sleep", "")),
+                "energy": str(footer.get("energy", "")),
+            }
+        current_snapshot[label] = day_snap
+
+    # Also capture week-level footer if present
+    week_footer = current_week.get("footer", {})
+    if week_footer:
+        current_snapshot["__week_footer__"] = {
+            "bodyweight": str(week_footer.get("bodyweight", "")),
+            "sleep": str(week_footer.get("sleep", "")),
+            "energy": str(week_footer.get("energy", "")),
         }
 
-    # Load previous snapshot from Coach State
+    # Load previous snapshot
     prev_raw = coach_state.get("LAST_PROGRAM_SNAPSHOT", {}).get("summary", "")
     prev_snapshot: dict = {}
     if prev_raw:
@@ -968,50 +1002,120 @@ def _detect_session_delta(program_data: dict, coach_state: dict) -> dict:
     new_sessions_done: list[dict] = []
     newly_skipped: list[str] = []
     no_rpe_sessions: list[str] = []
+    new_health_data: dict = {}
+
+    # Check for new footer health data
+    for footer_key in ("__week_footer__",):
+        curr_f = current_snapshot.get(footer_key, {})
+        prev_f = prev_snapshot.get(footer_key, {})
+        if curr_f:
+            for field in ("bodyweight", "sleep", "energy"):
+                cv = curr_f.get(field, "")
+                pv = prev_f.get(field, "")
+                if cv and cv != pv:
+                    new_health_data[field] = cv
 
     for day in days:
         label = day.get("label", "")
         exercises = day.get("exercises", [])
+        curr_day = current_snapshot.get(label, {})
         prev_day = prev_snapshot.get(label, {})
 
         done_exs = [ex for ex in exercises if ex.get("done") is True]
         skip_exs = [ex for ex in exercises if ex.get("done") is False and ex.get("name")]
         total_exs = len([ex for ex in exercises if ex.get("name")])
 
-        # Session newly completed (now has done exercises, previously had none)
-        prev_done_count = sum(1 for v in prev_day.values() if v is True)
+        # Previous done count (from snapshot — may have nested dict or bool)
+        prev_done_count = 0
+        for k, v in prev_day.items():
+            if k.startswith("__"):
+                continue
+            if isinstance(v, dict) and v.get("done") is True:
+                prev_done_count += 1
+            elif v is True:
+                prev_done_count += 1
+
+        # Session newly logged (had zero done before, now has some)
         if done_exs and prev_done_count == 0:
-            # Check for RPE in session notes
             has_rpe = any(
-                _re_rpe.search((ex.get("session_note") or ex.get("notes") or ""))
+                _re_rpe.search(curr_day.get(ex.get("name", ""), {}).get("notes", "")
+                               if isinstance(curr_day.get(ex.get("name", ""), {}), dict)
+                               else "")
                 for ex in exercises
             )
+
+            # Weight deviations: actual vs prescribed
+            weight_deviations: list[str] = []
+            for ex in done_exs:
+                name = ex.get("name", "")
+                if not name:
+                    continue
+                ex_snap = curr_day.get(name, {})
+                if not isinstance(ex_snap, dict):
+                    continue
+                actual_raw = ex_snap.get("actual", "")
+                prescribed_raw = ex_snap.get("weight", "")
+                if actual_raw and prescribed_raw:
+                    # Extract numbers to compare
+                    actual_nums = _rej.findall(r"\d+(?:\.\d+)?", actual_raw)
+                    prescribed_nums = _rej.findall(r"\d+(?:\.\d+)?", prescribed_raw)
+                    if actual_nums and prescribed_nums:
+                        try:
+                            a_val = float(actual_nums[0])
+                            p_val = float(prescribed_nums[0])
+                            if abs(a_val - p_val) >= 2.5:
+                                direction = "above" if a_val > p_val else "below"
+                                weight_deviations.append(
+                                    f"{name}: {a_val}kg ({direction} programmed {p_val}kg)"
+                                )
+                        except (ValueError, TypeError):
+                            pass
+
+            # Notable notes (non-empty)
+            notable_notes: list[str] = []
+            for ex in done_exs:
+                name = ex.get("name", "")
+                if not name:
+                    continue
+                ex_snap = curr_day.get(name, {})
+                note = ex_snap.get("notes", "") if isinstance(ex_snap, dict) else ""
+                if note and len(note) > 5:
+                    notable_notes.append(f"{name}: {note[:80]}")
+
+            completion_pct = round(len(done_exs) / total_exs * 100) if total_exs else 0
+
             new_sessions_done.append({
                 "label": label,
                 "exercises_done": len(done_exs),
                 "exercises_total": total_exs,
+                "completion_pct": completion_pct,
                 "skipped_names": [ex.get("name", "") for ex in skip_exs if ex.get("name")],
                 "has_rpe": has_rpe,
+                "weight_deviations": weight_deviations,
+                "notable_notes": notable_notes,
             })
             if not has_rpe:
                 no_rpe_sessions.append(label)
 
-        # Exercises that were newly skipped in an existing partial session
+        # Exercises that went done → not-done (unusual but track it)
         for ex in exercises:
             name = ex.get("name", "")
             if not name:
                 continue
-            was_done_before = prev_day.get(name, None)
+            prev_ex = prev_day.get(name)
+            was_done = prev_ex.get("done") if isinstance(prev_ex, dict) else prev_ex
             is_done_now = ex.get("done")
-            if was_done_before is True and is_done_now is False:
+            if was_done is True and is_done_now is False:
                 newly_skipped.append(name)
 
+    has_changes = bool(new_sessions_done or newly_skipped or new_health_data)
     return {
         "new_sessions_done": new_sessions_done,
         "newly_skipped": newly_skipped,
         "no_rpe_sessions": no_rpe_sessions,
+        "new_health_data": new_health_data,
         "current_snapshot_json": _json.dumps(current_snapshot),
-        "snapshot_updated": bool(new_sessions_done or newly_skipped),
+        "snapshot_updated": has_changes,
     }
 
 
@@ -1792,8 +1896,10 @@ def run_brief(dry_run: bool = False):
 
 The message must:
 1. CONTEXT: Reference why this session matters — what the week is working toward, or where we are in the training block. One sentence.
-2. KEY FOCUS: Name the primary lift and exact target. Give ONE specific execution cue.
-   ALWAYS include: "Attack the concentric explosively — treat the bar like a sprint. The faster you push, the more motor units fire."
+2. KEY FOCUS: Name the primary lift and exact target. Give ONE execution cue that is actually relevant
+   today — decide based on RPE history, recent notes, and what the athlete likely needs. Could be tempo
+   (explosive concentric), setup, breathing, depth, bar path, mental approach, or anything else.
+   Don't default to the same cue every time. Make it specific and earn the coaching.
 3. ONE READINESS NOTE: Based on coach state / RPE history, set expectations. "Last time this felt RPE 8 — target the same today."
 4. OPTIONAL: If there's an open commitment or concern, one line.
 
@@ -2528,8 +2634,8 @@ Write a Telegram message for tonight's check-in (3-6 sentences). It must do ALL 
 1. REASONING: Explain WHY tomorrow's session matters — reference the weekly intent, the training block phase,
    or goal proximity. Be transparent: "Here's what I'm thinking..." / "We're doing this because..."
 2. SESSION SPECIFICS: Name tomorrow's session and its key lifts with exact weights/sets.
-   Mention execution quality: lifts should be done EXPLOSIVELY on the concentric (push/pull),
-   controlled on the eccentric (lower). "Attack the bar like a sprint — speed is strength."
+   If execution quality coaching is relevant (based on recent RPE, session notes, or an observed pattern),
+   include one specific cue. Don't force it — only when it genuinely adds value.
 3. RECOVERY TIP: One specific, actionable recovery or health recommendation for tonight.
    Based on the health data below (sleep, nutrition, injury), give a concrete suggestion.
    Examples: "7.5h sleep tonight — non-negotiable", "protein before bed",
