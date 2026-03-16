@@ -1278,7 +1278,8 @@ def build_prompt(program_data: dict, memory_data: dict,
 # ---------------------------------------------------------------------------
 
 def build_proactive_prompt(memory_data: dict, program_data: dict = None,
-                           session_delta: dict = None) -> tuple[str, str]:
+                           session_delta: dict = None,
+                           topic_coverage: dict = None) -> tuple[str, str]:
     """
     Build prompt for the proactive check-in pass.
     Claude reads memory + today's program schedule and decides whether to reach out.
@@ -1443,6 +1444,18 @@ def build_proactive_prompt(memory_data: dict, program_data: dict = None,
             "reference what you actually see."
         )
 
+    # --- Topics already covered today (smart dedup) ---
+    covered_section = ""
+    if topic_coverage:
+        covered = [topic for topic, covered in topic_coverage.items() if covered]
+        if covered:
+            covered_section = (
+                "\n## TOPICS ALREADY ADDRESSED TODAY (do NOT ask about these again)\n"
+                + "\n".join(f"  - {t}" for t in covered)
+                + "\n  → If one of your planned questions covers a topic above, pivot: "
+                "ask a different angle, acknowledge what was said, or skip that point entirely."
+            )
+
     user_message = f"""TODAY: {today.strftime('%A, %B %d, %Y')} ({time_of_day})
 
 ## YOUR COMPRESSED KNOWLEDGE (Coach State)
@@ -1461,7 +1474,7 @@ def build_proactive_prompt(memory_data: dict, program_data: dict = None,
 {tg_text}
 
 ## ACTIVE COMMANDS (includes PENDING_CATCHUP, OPEN_QUESTION, PENDING_PROPOSAL)
-{cmd_text}{travel_section}{commit_section}{intent_section}{delta_section}
+{cmd_text}{travel_section}{commit_section}{intent_section}{delta_section}{covered_section}
 
 ---
 Today is {weekday_name}. Time of day: {time_of_day}. Should you reach out right now?

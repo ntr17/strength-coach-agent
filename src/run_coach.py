@@ -661,6 +661,10 @@ def run_think(week_num: int = None, dry_run: bool = False):
     # 2. Update ATHLETE_MODEL Coach State — quarterly psychological model
     _update_athlete_model(memory_data, dry_run=dry_run)
 
+    # 2b. Update BEHAVIOR_PATTERNS — weekly behavioral analysis (pure Python, no LLM)
+    print("  Updating behavior patterns...")
+    _update_behavior_patterns(memory_data, program_data=program_data, dry_run=dry_run)
+
     # 3. Archive old rows from Lift History and Health Log (rows > 1 year old)
     from memory import archive_old_rows, TAB_LIFT_HISTORY, TAB_HEALTH_LOG
     cutoff = today.replace(year=today.year - 1)
@@ -758,6 +762,132 @@ def _update_athlete_model(memory_data: dict, dry_run: bool = False) -> None:
         print(f"  ATHLETE_MODEL Coach State written ({len(model_text)} chars).")
     except Exception as e:
         print(f"  ATHLETE_MODEL update failed (non-fatal): {e}")
+
+
+def _update_behavior_patterns(memory_data: dict, program_data: dict = None,
+                              dry_run: bool = False) -> None:
+    """
+    Accumulate behavioral patterns into BEHAVIOR_PATTERNS Coach State domain.
+    Called weekly from run_think. Pure Python analysis — no LLM calls.
+
+    Detects:
+    - Skip patterns per exercise (which exercises the athlete tends to skip)
+    - Weight deviation tendency (consistently above/below program)
+    - Session completion rate trend (improving/declining over 4 weeks)
+    - RPE patterns per lift (chronically high/low)
+    - Day-of-week performance (which days tend to be missed)
+    """
+    from memory import upsert_coach_state, read_lift_history
+
+    lift_history = memory_data.get("lift_history") or []
+    if not lift_history:
+        try:
+            lift_history = read_lift_history(limit=60)
+        except Exception:
+            pass
+
+    patterns = []
+
+    # --- Skip patterns: exercises skipped ≥3 times in last 4 weeks ---
+    skip_counts: dict[str, int] = {}
+    done_counts: dict[str, int] = {}
+
+    if program_data:
+        recent_weeks = program_data.get("recent_weeks", [])
+        current = program_data.get("current_week", {})
+        all_weeks = recent_weeks[-3:] + ([current] if current else [])
+        for week in all_weeks:
+            for day in week.get("days", []):
+                for ex in day.get("exercises", []):
+                    name = (ex.get("name") or "").strip()
+                    if not name:
+                        continue
+                    if ex.get("done") is False:
+                        skip_counts[name] = skip_counts.get(name, 0) + 1
+                    elif ex.get("done") is True:
+                        done_counts[name] = done_counts.get(name, 0) + 1
+
+        for ex_name, skips in skip_counts.items():
+            total = skips + done_counts.get(ex_name, 0)
+            if total >= 3 and skips / total >= 0.5:
+                patterns.append(f"SKIP_PATTERN: {ex_name} skipped {skips}/{total} sessions")
+
+    # --- Weight deviation tendency from lift history ---
+    # Look for cases where actual weight consistently differs from last logged weight
+    # We proxy this by checking Lift History entries for "(+X)" or "(-X)" notes
+    over_count = 0
+    under_count = 0
+    import re as _re_inner
+    for row in lift_history[-40:]:
+        notes = (row.get("Notes") or "").lower()
+        if _re_inner.search(r"\+\d+.*kg|went heavier|added weight|increased", notes):
+            over_count += 1
+        elif _re_inner.search(r"-\d+.*kg|went lighter|dropped weight|reduced", notes):
+            under_count += 1
+
+    if over_count >= 4 and over_count > under_count * 2:
+        patterns.append(f"WEIGHT_TENDENCY: consistently trains above program ({over_count} instances) — consider proactive weight bumps")
+    elif under_count >= 4 and under_count > over_count * 2:
+        patterns.append(f"WEIGHT_TENDENCY: consistently trains below program ({under_count} instances) — may indicate recovery issues or low confidence")
+
+    # --- RPE patterns per lift from lift history ---
+    rpe_by_lift: dict[str, list[float]] = {}
+    for row in lift_history[-40:]:
+        ex = (row.get("Exercise") or "").strip()
+        if not ex:
+            continue
+        notes = (row.get("Notes") or "").strip()
+        m = _re_inner.search(r"@?RPE\s*(\d+(?:\.\d+)?)", notes, _re_inner.IGNORECASE)
+        if m:
+            try:
+                rpe_by_lift.setdefault(ex, []).append(float(m.group(1)))
+            except (ValueError, TypeError):
+                pass
+
+    for lift_name, rpe_vals in rpe_by_lift.items():
+        if len(rpe_vals) < 3:
+            continue
+        avg = sum(rpe_vals[-5:]) / len(rpe_vals[-5:])
+        if avg >= 8.5:
+            patterns.append(f"RPE_PATTERN: {lift_name} avg RPE {avg:.1f} (last {min(5, len(rpe_vals))} sessions) — chronically heavy")
+        elif avg <= 5.5:
+            patterns.append(f"RPE_PATTERN: {lift_name} avg RPE {avg:.1f} — chronically light, may need progressive bump")
+
+    # --- Day-of-week miss patterns from program data ---
+    if program_data:
+        day_misses: dict[str, int] = {}
+        day_totals: dict[str, int] = {}
+        all_weeks_for_dow = (program_data.get("recent_weeks", [])[-4:]
+                             + ([program_data.get("current_week", {})] if program_data.get("current_week") else []))
+        for week in all_weeks_for_dow:
+            for day in week.get("days", []):
+                label = day.get("label", "").split()[0].capitalize() if day.get("label") else ""
+                if not label:
+                    continue
+                day_totals[label] = day_totals.get(label, 0) + 1
+                any_done = any(ex.get("done") is True for ex in day.get("exercises", []))
+                if not any_done:
+                    day_misses[label] = day_misses.get(label, 0) + 1
+
+        for day_name, misses in day_misses.items():
+            total = day_totals.get(day_name, 1)
+            if total >= 3 and misses / total >= 0.6:
+                patterns.append(f"DAY_PATTERN: {day_name} sessions missed {misses}/{total} times — likely schedule conflict")
+
+    if not patterns:
+        patterns.append("No significant behavioral patterns detected yet (need 3+ weeks of data)")
+
+    summary = " | ".join(patterns[:8])  # cap at 8 patterns to keep it concise
+
+    if dry_run:
+        print(f"  [DRY RUN] BEHAVIOR_PATTERNS: {summary[:120]}")
+        return
+
+    try:
+        upsert_coach_state("BEHAVIOR_PATTERNS", summary, "MEDIUM")
+        print(f"  BEHAVIOR_PATTERNS updated: {summary[:100]}")
+    except Exception as e:
+        print(f"  BEHAVIOR_PATTERNS update failed (non-fatal): {e}")
 
 
 def detect_rpe_patterns(lift_history: list[dict],
@@ -1123,6 +1253,229 @@ import re as _re_module
 _re_rpe = _re_module.compile(r"@?RPE\s*\d", _re_module.IGNORECASE)
 
 
+def _today_telegram_covers_topic(topic_keywords: list[str],
+                                  recent_tg: list[dict],
+                                  today_str: str = None) -> bool:
+    """
+    Returns True if today's inbound Telegram messages already cover the given topic.
+    Used to prevent the coach from asking about something the athlete already addressed.
+
+    topic_keywords: list of lowercase keywords/phrases to match (any one match = covered)
+    recent_tg: list of Telegram log dicts with 'Date', 'Direction', 'Message' keys
+    today_str: ISO date string (defaults to today)
+
+    Examples:
+      _today_telegram_covers_topic(["rpe", "felt like", "left in tank"], tg_log)
+      _today_telegram_covers_topic(["skipped", "didn't do", "couldn't", "missed"], tg_log)
+      _today_telegram_covers_topic(["how it went", "session done", "finished", "completed"], tg_log)
+    """
+    if not recent_tg or not topic_keywords:
+        return False
+
+    if today_str is None:
+        today_str = str(date.today())
+
+    for msg in recent_tg:
+        if msg.get("Date", "") != today_str:
+            continue
+        # Only check inbound messages (athlete → coach)
+        direction = (msg.get("Direction") or msg.get("direction") or "").upper()
+        if direction not in ("IN", "INBOUND", "ATHLETE", ""):
+            continue
+        text = (msg.get("Message") or msg.get("message") or "").lower()
+        if any(kw.lower() in text for kw in topic_keywords):
+            return True
+
+    return False
+
+
+# ---------------------------------------------------------------------------
+# Contextual cue library — real coaching cues per lift, organized by type.
+# The model selects from these rather than improvising, ensuring technical
+# accuracy and variety. _select_lift_cue() picks the most contextually
+# relevant cues and surfaces them in brief/evening prompts.
+# ---------------------------------------------------------------------------
+
+LIFT_CUE_BANK: dict[str, dict[str, list[str]]] = {
+    "SQUAT": {
+        "technique": [
+            "Brace your core before unracking — create 360° pressure, not just forward",
+            "Break at hips AND knees simultaneously — don't squat-morning it",
+            "Drive knees out actively throughout the descent, not just at the bottom",
+            "Cue 'chest up' in the hole — prevents the upper back rounding over",
+            "Foot pressure: big toe, pinky toe, heel — full tripod, don't let the arch collapse",
+        ],
+        "tempo": [
+            "Controlled descent (3 sec), brief pause at the bottom, explosive drive",
+            "Don't bounce out of the hole — own the bottom for 0.5 seconds",
+            "Slow eccentric builds motor control; make the descent your prep for the drive",
+        ],
+        "mental": [
+            "Visualize driving the floor away from you, not just standing up",
+            "Treat every warm-up set with the same intent as your top set",
+            "If the bar feels heavy in the rack, it'll feel heavier in the hole — brace harder",
+        ],
+        "setup": [
+            "Bar position: high bar sits on traps, low bar sits on rear delts — pick one and commit",
+            "Walk-out: 2 steps back max, set your stance, don't fidget",
+            "Take a big breath at the top, not halfway down",
+        ],
+    },
+    "BENCH": {
+        "technique": [
+            "Retract and depress the scapulae — pull your shoulder blades into your back pockets",
+            "Elbows at ~45°, not flared 90° — protects the shoulder and maintains power",
+            "Drive your feet into the floor; leg drive transfers through a stable arch",
+            "Touch the bar to your lower chest / sternum, not your clavicle",
+            "Think 'pull the bar apart' as you press — activates lats, creates stability",
+        ],
+        "tempo": [
+            "Controlled descent, 1-sec pause, explosive press — no bouncing",
+            "The descent controls your groove; slow it down to find the ideal bar path",
+            "Pause bench builds starting strength — treat the pause as the point, not an obstacle",
+        ],
+        "mental": [
+            "Visualize the path of the bar before you unrack: diagonal line, not straight up",
+            "Aggressive lockout — don't drift back over your face; drive the bar back slightly",
+            "Think 'push yourself into the bench' not 'push the bar up'",
+        ],
+        "setup": [
+            "Arch is not cheating — it's shortening the range while staying safe",
+            "Grip width: pinkies on the ring marks is a good starting point",
+            "Get tight before unracking — setup is 50% of the lift",
+        ],
+    },
+    "DEADLIFT": {
+        "technique": [
+            "Push the floor away first — deadlift is a leg press that happens to hold a bar",
+            "Bar stays over mid-foot at setup; if it drifts forward, you lose leverage",
+            "Lat engagement ('protect your armpits') keeps the bar close all the way up",
+            "Lock your hips and shoulders out simultaneously at the top — no hyperextending",
+            "On the eccentric: hinge first (push hips back), then bend knees once bar passes them",
+        ],
+        "tempo": [
+            "No bouncing between reps — reset position and brace each time",
+            "Touch-and-go is a skill; if form breaks, switch to dead stop",
+            "Slow the last 20% of the descent — teaches control and saves your lower back",
+        ],
+        "mental": [
+            "Think 'bend the bar around your legs' before initiating the pull",
+            "Big air, brace, pull — in that order, every single rep",
+            "Before the pull: create tension in the whole system. Don't just yank it.",
+        ],
+        "setup": [
+            "Hip height at setup: hips above knees, shoulders above the bar, mid-foot under bar",
+            "Sumo: push knees out hard off the floor — don't let them cave inward",
+            "Conventional: shoulder-width stance, double overhand grip until grip is the limit",
+        ],
+    },
+    "OHP": {
+        "technique": [
+            "Bar starts at upper chest, elbows slightly in front — not fully flared",
+            "Press in a slight backward arc, not straight up — the head moves back, then forward at lockout",
+            "Lock out aggressively at the top — full elbow extension and shrug overhead",
+            "Squeeze your glutes and quads — a rigid base transfers force from legs to shoulders",
+            "Wrist position: straight, not cocked back — saves the wrist and improves power transfer",
+        ],
+        "tempo": [
+            "No leg drive for strict press — if you dip, that's a push press. Pick one and commit.",
+            "Control the descent — lowering slowly builds overhead stability and mass",
+        ],
+        "mental": [
+            "Think 'push yourself under the bar' rather than 'push the bar up'",
+            "The lockout is where the lift happens — don't relax at the top",
+        ],
+        "setup": [
+            "Bar sits on the heel of the palm, not in the fingers",
+            "Chin slightly back off the bar path — the bar goes over your face, not around it",
+        ],
+    },
+    "GENERAL": {
+        "breathing": [
+            "Valsalva maneuver: big breath into your belly, brace, then lift — exhale at the top",
+            "Don't exhale during the hardest part of the rep",
+        ],
+        "recovery": [
+            "Full rest between top sets: 3-5 minutes. Strength is lost in incomplete rest.",
+            "Between warm-ups: 90 seconds is enough. Use that time to rehearse the movement mentally.",
+        ],
+        "mental": [
+            "Warm-up sets are rehearsal, not just temperature — treat them like the real thing",
+            "If a set felt too easy, it probably was — don't chase false confidence",
+        ],
+    },
+}
+
+
+def _select_lift_cue(lift_name: str, coach_state: dict,
+                     session_notes: str = "") -> list[str]:
+    """
+    Pick 2-3 contextually relevant cues for a given lift.
+    Uses RPE history and session notes to select the cue type:
+    - High RPE (>=8.5) → mental / breathing cues
+    - Low RPE (<=5.5) → technique / tempo cues (go harder)
+    - Notes mention 'form' / 'technique' → technique cues
+    - Notes mention 'heavy' / 'hard' → mental cues
+    - Default → mix of technique + setup
+    """
+    import random
+
+    lift_key = "GENERAL"
+    for key in LIFT_CUE_BANK:
+        if key == "GENERAL":
+            continue
+        if key.lower() in lift_name.lower() or lift_name.lower() in key.lower():
+            lift_key = key
+            break
+
+    bank = LIFT_CUE_BANK.get(lift_key, LIFT_CUE_BANK["GENERAL"])
+    general = LIFT_CUE_BANK["GENERAL"]
+
+    # Determine context from RPE history
+    rpe_summary = coach_state.get(lift_key, {}).get("summary", "").lower()
+    notes_lower = (session_notes or "").lower()
+
+    avg_rpe = None
+    m = _re_module.search(r"avg rpe (\d+(?:\.\d+)?)", rpe_summary)
+    if m:
+        try:
+            avg_rpe = float(m.group(1))
+        except (ValueError, TypeError):
+            pass
+
+    selected: list[str] = []
+
+    if avg_rpe and avg_rpe >= 8.5:
+        # Heavy — mental + breathing help most
+        selected += random.sample(bank.get("mental", []), min(2, len(bank.get("mental", []))))
+        selected += random.sample(general.get("breathing", []), 1)
+    elif avg_rpe and avg_rpe <= 5.5:
+        # Light — push harder, technique focus
+        selected += random.sample(bank.get("technique", []), min(2, len(bank.get("technique", []))))
+        selected += random.sample(bank.get("tempo", []) or bank.get("technique", []), 1)
+    elif any(kw in notes_lower for kw in ("form", "technique", "bar path", "depth")):
+        selected += random.sample(bank.get("technique", []), min(2, len(bank.get("technique", []))))
+        selected += random.sample(bank.get("setup", bank.get("technique", [])), 1)
+    elif any(kw in notes_lower for kw in ("heavy", "hard", "failed", "grind")):
+        selected += random.sample(bank.get("mental", []), min(2, len(bank.get("mental", []))))
+        selected += random.sample(general.get("breathing", []), 1)
+    else:
+        # Default: technique + setup, varied
+        selected += random.sample(bank.get("technique", []), min(1, len(bank.get("technique", []))))
+        selected += random.sample(bank.get("setup", bank.get("technique", [])), min(1, len(bank.get("setup", bank.get("technique", [])))))
+        selected += random.sample(bank.get("mental", []) or general.get("mental", []), 1)
+
+    # Deduplicate while preserving order
+    seen: set[str] = set()
+    result: list[str] = []
+    for c in selected:
+        if c not in seen:
+            seen.add(c)
+            result.append(c)
+
+    return result[:3]
+
+
 def run_proactive(dry_run: bool = False):
     """
     Lightweight proactive check-in. No email, no program sheet, no Tier 0 archives.
@@ -1168,8 +1521,35 @@ def run_proactive(dry_run: bool = False):
     except Exception as e:
         print(f"  Proactive: program load failed (non-fatal): {e}")
 
+    # Smart dedup: check which topics athlete already addressed in today's Telegram
+    today_tg_for_dedup = [
+        m for m in memory_data.get("telegram_log", [])
+        if m.get("Date", "") == str(today)
+    ]
+    topic_coverage = {
+        "RPE / effort feedback": _today_telegram_covers_topic(
+            ["rpe", "felt like", "left in tank", "rir", "rate of perceived"],
+            today_tg_for_dedup, str(today)
+        ),
+        "session recap / completion": _today_telegram_covers_topic(
+            ["session done", "finished", "completed", "all done", "trained", "workout done",
+             "did it", "went well", "went badly"],
+            today_tg_for_dedup, str(today)
+        ),
+        "skipped exercises / why": _today_telegram_covers_topic(
+            ["skipped", "didn't do", "couldn't", "missed", "left it out", "cut it short"],
+            today_tg_for_dedup, str(today)
+        ),
+        "schedule / availability": _today_telegram_covers_topic(
+            ["can't train", "won't train", "rest day", "no session", "rescheduling",
+             "moving it", "pushing it"],
+            today_tg_for_dedup, str(today)
+        ),
+    }
+
     system_prompt, user_message = build_proactive_prompt(
-        memory_data, program_data=program_data_p, session_delta=session_delta
+        memory_data, program_data=program_data_p, session_delta=session_delta,
+        topic_coverage=topic_coverage
     )
 
     client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
@@ -1887,6 +2267,20 @@ def run_brief(dry_run: bool = False):
     if open_commitments:
         commitment_note = " | ".join(c["Commitment"][:80] for c in open_commitments[:2])
 
+    # Select contextually relevant cues for today's primary lift
+    primary_lift = ""
+    primary_lift_notes = ""
+    for day in today_sessions:
+        for ex in day.get("exercises", []):
+            if ex.get("weight"):
+                primary_lift = ex.get("name", "")
+                primary_lift_notes = ex.get("notes", "") or ex.get("session_note", "") or ""
+                break
+        if primary_lift:
+            break
+    cues = _select_lift_cue(primary_lift, coach_state, primary_lift_notes) if primary_lift else []
+    cue_text = "\n".join(f"  - {c}" for c in cues) if cues else "(no specific cues — use general principles)"
+
     # Build brief via Haiku
     session_text = "\n".join(session_lines) or "session details unavailable"
     state_text = "\n".join(state_notes) or "(no state data)"
@@ -1897,9 +2291,9 @@ def run_brief(dry_run: bool = False):
 The message must:
 1. CONTEXT: Reference why this session matters — what the week is working toward, or where we are in the training block. One sentence.
 2. KEY FOCUS: Name the primary lift and exact target. Give ONE execution cue that is actually relevant
-   today — decide based on RPE history, recent notes, and what the athlete likely needs. Could be tempo
-   (explosive concentric), setup, breathing, depth, bar path, mental approach, or anything else.
-   Don't default to the same cue every time. Make it specific and earn the coaching.
+   today — decide based on RPE history, recent notes, and what the athlete likely needs.
+   Choose from the CUE OPTIONS below (or combine/rephrase them), but always pick what is most
+   relevant to this specific session. Don't include all of them — choose ONE best cue.
 3. ONE READINESS NOTE: Based on coach state / RPE history, set expectations. "Last time this felt RPE 8 — target the same today."
 4. OPTIONAL: If there's an open commitment or concern, one line.
 
@@ -1914,6 +2308,9 @@ COACH STATE:
 
 RPE HISTORY:
 {rpe_text}
+
+CUE OPTIONS FOR {primary_lift.upper() or "TODAY'S PRIMARY LIFT"}:
+{cue_text}
 
 {f"OPEN COMMITMENT: {commitment_note}" if commitment_note else ""}
 
@@ -2000,17 +2397,32 @@ def run_post_session(dry_run: bool = False):
     )
 
     # Today's Telegram — avoid repeating what was already discussed
+    today_tg_raw: list[dict] = []
     try:
-        today_tg = [
-            m for m in read_telegram_log(limit=10)
-            if m.get("Date", "") == str(today)
-        ]
+        all_tg = read_telegram_log(limit=10)
+        today_tg_raw = [m for m in all_tg if m.get("Date", "") == str(today)]
         today_tg_text = "\n".join(
             f"  [{m.get('Direction','')}] {m.get('Message','')[:100]}"
-            for m in today_tg[-6:]
+            for m in today_tg_raw[-6:]
         ) or "(none)"
     except Exception:
         today_tg_text = "(unavailable)"
+
+    # Smart dedup: check if athlete already covered RPE or skip reasons in today's Telegram
+    tg_covers_rpe = _today_telegram_covers_topic(
+        ["rpe", "felt like", "left in tank", "rir", "rate of perceived", "exertion"],
+        today_tg_raw, str(today)
+    ) or has_rpe
+    tg_covers_skips = _today_telegram_covers_topic(
+        ["skipped", "didn't do", "couldn't", "missed", "no rows", "no accessory",
+         "left it out", "cut it short", "didn't finish"],
+        today_tg_raw, str(today)
+    )
+    tg_covers_session = _today_telegram_covers_topic(
+        ["session done", "finished", "completed", "all done", "wrapped up",
+         "trained", "hit the gym", "workout done"],
+        today_tg_raw, str(today)
+    )
 
     weekly_intent = coach_state.get("WEEKLY_INTENT", {}).get("summary", "")
 
@@ -2024,18 +2436,35 @@ def run_post_session(dry_run: bool = False):
     any_complete = done_count > 0
 
     if any_complete:
+        # Adjust what the coach asks based on what's already been discussed today
+        rpe_instruction = (
+            "3. RPE already discussed today — don't ask again. Instead, give one forward-looking note."
+            if tg_covers_rpe else
+            "3. If no RPE logged, ask for it: \"RPE on the main sets? Helps me calibrate next week.\""
+        )
+        skip_instruction = (
+            "2. Skip reason already discussed today — acknowledge it briefly instead of asking again."
+            if (tg_covers_skips and skipped_names) else
+            ("2. If exercises were skipped, ask specifically WHY — not accusatorially, with curiosity.\n"
+             '   "You skipped the rows — was it time, the elbow, or just done?"')
+        )
+        session_ack = (
+            "The athlete has already reported the session in Telegram — acknowledge briefly, don't recap what they said."
+            if tg_covers_session else
+            f"The athlete completed {session_label}: {done_count}/{total_count} exercises done."
+        )
+
         prompt = f"""You are {ATHLETE_NAME}'s strength coach. Write a post-session Telegram message (3-5 sentences).
 
-The athlete completed {session_label}: {done_count}/{total_count} exercises done.
+{session_ack}
 Exercises completed: {', '.join(main_done) or 'see program'}
 Exercises skipped: {', '.join(skipped_names) if skipped_names else 'none'}
 RPE data logged: {'yes' if has_rpe else 'no'}
 
 WHAT THE MESSAGE MUST DO:
 1. Acknowledge the session briefly and specifically (name the key lift done, not just "good session").
-2. If exercises were skipped, ask specifically WHY — not accusatorially, with curiosity.
-   "You skipped the rows — was it time, the elbow, or just done?"
-3. If no RPE logged, ask for it: "RPE on the main sets? Helps me calibrate next week."
+{skip_instruction}
+{rpe_instruction}
 4. One forward-looking note: how today connects to the weekly goal or next session.
 
 CONTEXT:
@@ -2620,6 +3049,12 @@ def run_evening_protocol(dry_run: bool = False):
     except Exception:
         pass
 
+    # Select contextually relevant cues for tomorrow's primary lift
+    primary_tomorrow_lift = main_lifts[0].get("name", "") if main_lifts else ""
+    primary_tomorrow_notes = main_lifts[0].get("notes", "") or main_lifts[0].get("session_note", "") if main_lifts else ""
+    tomorrow_cues = _select_lift_cue(primary_tomorrow_lift, coach_state, primary_tomorrow_notes) if primary_tomorrow_lift else []
+    tomorrow_cue_text = "\n".join(f"  - {c}" for c in tomorrow_cues) if tomorrow_cues else ""
+
     # Build Lift domain context lines for transparency
     lift_state_lines = "\n".join(
         f"  {domain}: {summary}" for domain, summary in lift_states.items()
@@ -2636,6 +3071,8 @@ Write a Telegram message for tonight's check-in (3-6 sentences). It must do ALL 
 2. SESSION SPECIFICS: Name tomorrow's session and its key lifts with exact weights/sets.
    If execution quality coaching is relevant (based on recent RPE, session notes, or an observed pattern),
    include one specific cue. Don't force it — only when it genuinely adds value.
+   CUE OPTIONS (choose the ONE most relevant, or skip if not needed):
+{tomorrow_cue_text or "  (no specific cues — use your judgment)"}
 3. RECOVERY TIP: One specific, actionable recovery or health recommendation for tonight.
    Based on the health data below (sleep, nutrition, injury), give a concrete suggestion.
    Examples: "7.5h sleep tonight — non-negotiable", "protein before bed",
