@@ -98,6 +98,19 @@ def _build_bot_context() -> str:
 
         sections = []
 
+        # --- System capabilities (so bot knows what it is and what the pipeline does) ---
+        sections.append(
+            "SYSTEM CAPABILITIES (what this coaching system does and when):\n"
+            "  - Morning brief (--brief): 07:00 UTC Mon-Sat (08:00/09:00 Spain) — automated cron\n"
+            "  - Proactive check-in (--proactive): 08:00 + 14:00 UTC (09:00 + 15:00 Spain) — automated cron\n"
+            "  - Post-session check-in (--post-session): 13:00 UTC (14:00 Spain) — automated cron\n"
+            "  - Evening protocol (--evening-protocol): 19:00 UTC Mon-Sat (20:00/21:00 Spain) — automated cron\n"
+            "  - Weekly email + strategic pass (--weekly, --think): 19:00 + 21:00 UTC Sunday — automated cron\n"
+            "  - Telegram bot (this process): online 24/7 on Railway — responds to direct messages only\n"
+            "  NOTE: You are the Telegram bot. You do NOT control or trigger the crons above. "
+            "If an automated message didn't arrive, tell the athlete honestly — you cannot investigate or retry it."
+        )
+
         # --- Tier 1: Coach State (compressed domain summaries — the coach's brain) ---
         coach_state = read_coach_state()
         commands = read_commands()
@@ -984,6 +997,10 @@ async def _generate_response_with_tools(user_message: str, chat_id: int, bot,
         "NARRATION RULE: Every coaching response must include at least ONE sentence that shows reasoning. "
         "Pattern: 'Veo que [dato] — esto [qué significa] — [recomendación concreta].' "
         "Do not just state what to do — explain why based on actual data from the context.\n\n"
+        "HONESTY RULE: Do NOT promise future automated actions (protocols, check-ins, emails) that depend "
+        "on cron jobs you do not control. If the athlete says an automated message didn't arrive, "
+        "say honestly: 'El pipeline automático puede haber fallado — no puedo verificarlo desde aquí.' "
+        "Never invent a future delivery or promise a check-in to satisfy the question.\n\n"
         + focus_note +
         "Read tools: get_coach_brain, get_lift_history, get_program_week, list_programs, "
         "get_projections, get_data_summary, get_health_log\n"

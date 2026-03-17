@@ -26,6 +26,9 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
+      - name: Install optional Garmin dependency
+        run: pip install "garminconnect>=0.2.22" || echo "garminconnect unavailable — Garmin sync disabled"
+
       - name: Write Google credentials
         env:
           GOOGLE_CREDENTIALS_B64: ${{ secrets.GOOGLE_CREDENTIALS_B64 }}
