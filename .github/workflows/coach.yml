@@ -9,6 +9,11 @@ on:
     # 21:00 UTC — Sunday strategic pass + export (after weekly email is sent)
     - cron: '0 21 * * 0'
   workflow_dispatch:
+    inputs:
+      mode:
+        description: 'Override mode (evening-protocol, weekly, think). Leave blank for time-based routing.'
+        required: false
+        default: 'evening-protocol'
 
 jobs:
   run-coach:
@@ -53,7 +58,11 @@ jobs:
         run: |
           HOUR=$(date -u +%H)
           DAY=$(date +%u)  # 1=Mon ... 7=Sun
-          if [ "$DAY" = "7" ] && [ "$HOUR" = "19" ]; then
+          MODE="${{ github.event.inputs.mode }}"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "$MODE" ]; then
+            echo "Manual dispatch — running: $MODE"
+            python src/run_coach.py --${MODE}
+          elif [ "$DAY" = "7" ] && [ "$HOUR" = "19" ]; then
             echo "Sunday 19:00 UTC — running weekly coaching email..."
             python src/run_coach.py --weekly
           elif [ "$HOUR" = "19" ]; then
