@@ -2656,5 +2656,189 @@ class TestFormatCurrentWeekRPE:
         assert "[RPE not logged]" not in out
 
 
+# ===========================================================================
+# SheetSyncEngine tests
+# ===========================================================================
+
+class TestSheetSyncWatermark:
+    """Tests for watermark load/save and first-run baseline."""
+
+    def _engine(self):
+        import sys, os
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
+        from sheet_sync import SheetSyncEngine
+        return SheetSyncEngine()
+
+    def test_load_watermark_returns_none_when_absent(self):
+        from unittest.mock import patch
+        engine = self._engine()
+        with patch.object(engine, "load_watermark", return_value=None):
+            result = engine.load_watermark()
+        assert result is None
+
+    def test_first_run_saves_baseline_and_returns_no_events(self):
+        from unittest.mock import patch
+        engine = self._engine()
+        days = [
+            {"label": "DAY 1", "exercises": [{"done": True}]},
+            {"label": "DAY 2", "exercises": [{"done": None}]},
+        ]
+        health_log = [{"Date": "2026-03-17", "Bodyweight (kg)": "82"}]
+        lift_history = [{"Exercise": "Squat", "Date": "2026-03-17"}]
+
+        saved = {}
+        def fake_save(data):
+            saved.update(data)
+
+        with patch.object(engine, "load_watermark", return_value=None), \
+             patch.object(engine, "save_watermark", side_effect=fake_save):
+            events = engine.detect_deltas(9, days, health_log, lift_history)
+
+        assert events == []
+        assert saved["week"] == 9
+        assert saved["done_per_day"] == [True, False]
+        assert saved["lift_history_rows"] == 1
+        assert saved["health_log_rows"] == 1
+
+
+class TestSheetSyncDeltaDetection:
+    """Tests for delta detection — session_done, new_health_row, new_lift_row."""
+
+    def _engine(self):
+        import sys, os
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
+        from sheet_sync import SheetSyncEngine
+        return SheetSyncEngine()
+
+    def _run(self, engine, watermark, week_num, days, health_log, lift_history):
+        from unittest.mock import patch
+        saved = {}
+        with patch.object(engine, "load_watermark", return_value=watermark), \
+             patch.object(engine, "save_watermark", side_effect=lambda d: saved.update(d)):
+            events = engine.detect_deltas(week_num, days, health_log, lift_history)
+        return events, saved
+
+    def test_session_done_emitted_when_day_transitions_to_done(self):
+        engine = self._engine()
+        wm = {"week": 9, "done_per_day": [False, False], "lift_history_rows": 0, "health_log_rows": 0}
+        days = [
+            {"label": "DAY 1", "exercises": [{"done": True}]},
+            {"label": "DAY 2", "exercises": [{"done": None}]},
+        ]
+        events, _ = self._run(engine, wm, 9, days, [], [])
+        assert len(events) == 1
+        assert events[0]["type"] == "session_done"
+        assert events[0]["day_number"] == 1
+
+    def test_no_event_when_day_was_already_done(self):
+        engine = self._engine()
+        wm = {"week": 9, "done_per_day": [True, False], "lift_history_rows": 0, "health_log_rows": 0}
+        days = [
+            {"label": "DAY 1", "exercises": [{"done": True}]},
+            {"label": "DAY 2", "exercises": [{"done": None}]},
+        ]
+        events, _ = self._run(engine, wm, 9, days, [], [])
+        assert events == []
+
+    def test_new_health_row_emitted_when_count_grows(self):
+        engine = self._engine()
+        wm = {"week": 9, "done_per_day": [], "lift_history_rows": 0, "health_log_rows": 1}
+        new_entry = {"Date": "2026-03-18", "Bodyweight (kg)": "81.5", "Sleep (hrs)": "7.0"}
+        events, _ = self._run(engine, wm, 9, [], [new_entry, {"Date": "2026-03-17"}], [])
+        health_events = [e for e in events if e["type"] == "new_health_row"]
+        assert len(health_events) == 1
+        assert health_events[0]["entry"]["Date"] == "2026-03-18"
+
+    def test_new_lift_row_emitted_when_count_grows(self):
+        engine = self._engine()
+        wm = {"week": 9, "done_per_day": [], "lift_history_rows": 2, "health_log_rows": 0}
+        new_lift = {"Exercise": "Squat", "Date": "2026-03-18", "Actual": "105kg 4x4"}
+        lift_history = [new_lift, {"Exercise": "Bench"}, {"Exercise": "OHP"}]
+        events, _ = self._run(engine, wm, 9, [], [], lift_history)
+        lift_events = [e for e in events if e["type"] == "new_lift_row"]
+        assert len(lift_events) == 1
+
+    def test_week_advance_resets_done_per_day(self):
+        engine = self._engine()
+        # Watermark says week 8, current is week 9
+        wm = {"week": 8, "done_per_day": [True, True, True, True], "lift_history_rows": 0, "health_log_rows": 0}
+        days = [{"label": "DAY 1", "exercises": [{"done": None}]}]
+        events, saved = self._run(engine, wm, 9, days, [], [])
+        assert saved["week"] == 9
+        assert saved["done_per_day"] == [False]
+        assert events == []  # no session_done on week reset
+
+
+class TestSheetSyncDispatch:
+    """Tests for dispatch — PENDING_CATCHUP resolution and Coach State updates."""
+
+    def _engine(self):
+        import sys, os
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
+        from sheet_sync import SheetSyncEngine
+        return SheetSyncEngine()
+
+    def test_session_done_resolves_matching_pending_catchup(self):
+        from unittest.mock import patch
+        engine = self._engine()
+        commands = [
+            {"Command": "PENDING_CATCHUP", "Value": "Week 9 Day 2 → planned for 2026-03-15",
+             "Applied": "N", "_row_index": 5}
+        ]
+        events = [{"type": "session_done", "day_number": 2, "label": "DAY 2", "date": "2026-03-18"}]
+        applied = []
+        with patch("memory.mark_command_applied", side_effect=lambda i: applied.append(i)), \
+             patch("memory.upsert_coach_state"), \
+             patch("memory.read_tracked_lifts", return_value=[]):
+            result = engine.dispatch(events, commands)
+        assert 5 in applied
+        assert result["resolved_catchups"] == 1
+
+    def test_session_done_does_not_resolve_different_day(self):
+        from unittest.mock import patch
+        engine = self._engine()
+        commands = [
+            {"Command": "PENDING_CATCHUP", "Value": "Week 9 Day 3 → planned for 2026-03-15",
+             "Applied": "N", "_row_index": 5}
+        ]
+        events = [{"type": "session_done", "day_number": 2, "label": "DAY 2", "date": "2026-03-18"}]
+        applied = []
+        with patch("memory.mark_command_applied", side_effect=lambda i: applied.append(i)), \
+             patch("memory.upsert_coach_state"), \
+             patch("memory.read_tracked_lifts", return_value=[]):
+            result = engine.dispatch(events, commands)
+        assert applied == []
+        assert result["resolved_catchups"] == 0
+
+    def test_new_health_row_updates_health_domain(self):
+        from unittest.mock import patch
+        engine = self._engine()
+        events = [{"type": "new_health_row", "entry": {
+            "Date": "2026-03-18", "Bodyweight (kg)": "81.5",
+            "Sleep (hrs)": "7.2", "Food Quality (1-10)": "8"
+        }}]
+        upserted = {}
+        with patch("memory.upsert_coach_state", side_effect=lambda d, s, c="MEDIUM": upserted.update({d: s})), \
+             patch("memory.read_tracked_lifts", return_value=[]):
+            engine.dispatch(events, [])
+        assert "HEALTH" in upserted
+        assert "81.5kg" in upserted["HEALTH"]
+        assert "7.2h" in upserted["HEALTH"]
+
+    def test_new_lift_row_updates_matching_domain(self):
+        from unittest.mock import patch
+        engine = self._engine()
+        events = [{"type": "new_lift_row", "entry": {
+            "exercise_name": "Squat", "actual": "105kg 4x4", "date": "2026-03-18"
+        }}]
+        upserted = {}
+        tracked = [{"match_pattern": "squat", "domain": "SQUAT", "active": "Y"}]
+        with patch("memory.upsert_coach_state", side_effect=lambda d, s, c="MEDIUM": upserted.update({d: s})), \
+             patch("memory.read_tracked_lifts", return_value=tracked):
+            engine.dispatch(events, [])
+        assert "SQUAT" in upserted
+        assert "105kg 4x4" in upserted["SQUAT"]
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
