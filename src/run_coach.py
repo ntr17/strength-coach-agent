@@ -4177,11 +4177,13 @@ def run_evening_protocol(dry_run: bool = False):
     # Read context still needed directly in prompt
     weekly_intent = coach_state.get("WEEKLY_INTENT", {}).get("summary", "")
 
-    # Recent health summary (last 3 days)
+    # Recent health summary — only entries from last 3 days to avoid presenting stale data as current
     try:
-        health_log = read_health_log(limit=3)
+        _cutoff = today - timedelta(days=3)
+        _all_health = read_health_log(limit=10)
+        _fresh = [e for e in _all_health if e.get("Date", "") >= str(_cutoff)]
         health_lines = []
-        for e in health_log:
+        for e in _fresh[:3]:
             d = e.get("Date", "?")
             sleep = e.get("Sleep (hrs)", "")
             bw = e.get("Bodyweight (kg)", "")
@@ -4193,7 +4195,7 @@ def run_evening_protocol(dry_run: bool = False):
             if food: parts.append(f"food:{food}/10")
             if notes: parts.append(f"note:{notes[:50]}")
             health_lines.append(" ".join(parts))
-        health_summary = "\n".join(health_lines) or "(no recent health data)"
+        health_summary = "\n".join(health_lines) or "(no health data logged in last 3 days)"
     except Exception:
         health_summary = "(health data unavailable)"
 
@@ -4291,6 +4293,11 @@ def run_evening_protocol(dry_run: bool = False):
     prompt = f"""You are {ATHLETE_NAME}'s strength coach — not just a programming tool, but a real coach who cares.
 You are his mentor and father figure in training. You hold him accountable through goals, not guilt.
 
+=== WHAT WAS ALREADY DISCUSSED TODAY (read this FIRST) ===
+{today_tg_text}
+CRITICAL: Do NOT ask about anything the athlete already reported or confirmed above.
+Do NOT present health data older than 3 days as if it happened recently — always check the date.
+
 === COACHING CONTEXT — WORK THROUGH ALL 4 LAYERS BEFORE WRITING ===
 
 {cascade}
@@ -4302,7 +4309,7 @@ CUE OPTIONS for {primary_tomorrow_lift or 'primary lift'} (choose ONE if relevan
 {tomorrow_cue_text or "  (no specific cues — use your judgment)"}
 
 === HEALTH & CONCERNS ===
-Recent health (last 3 days):
+Recent health (entries from last 3 days only — if empty, there is no recent data):
 {health_summary}
 Active concerns (elbow, injury, follow-ups): {concerns_text}
 {challenge_suggestion}
@@ -4314,25 +4321,22 @@ Write this as if you're texting your athlete — warm, direct, personal. NOT a s
    Pick whichever is truest from the cascade:
    - A goal he's closing in on ("estás a 2.5kg del objetivo en sentadilla")
    - A pattern you're seeing ("llevas dos semanas fuerte — este bloque está funcionando")
-   - A readiness note ("dormiste menos de 7h dos días seguidos — arranca con el primer set más conservador")
+   - A readiness note (only if health data above is from the last 3 days — never invent it)
    - A strategic context point ("esta semana eleva el volumen — hoy es el pico")
 
 2. Then 1-2 sentences on the actual session: name the key lift + weight. ONE cue if it adds value.
 
-3. End with ONE specific question. Not "¿cómo te sientes?" — something real:
+3. End with ONE specific question — but NOT about something the athlete already told you today.
    e.g. "¿Cómo quedó el codo hoy?", "¿Puedes entrenar mañana a la mañana o más tarde?"
 
 4. If Layer 3 shows a CONFLICT (pending catch-ups vs. tomorrow's plan), address it conversationally —
    don't list it as a bug report. Just: "Oye, sigo con el catch-up de [X] o vamos con [Y] mañana?"
 
-NARRACIÓN OBLIGATORIA: La respuesta debe incluir al menos UNA frase que muestre tu razonamiento.
-Plantilla: "Veo que [dato] — esto [qué significa] — [recomendación]."
-Ejemplo: "Veo que las últimas 3 sentadillas fueron RPE 9 — el peso está cerca del límite — si el primer
-set mañana se siente cargado, baja 2.5kg sin pensarlo."
+REASONING RULE: Include at least ONE sentence showing your reasoning.
+Pattern: "I see [data] — this means [what] — [concrete recommendation]."
 
-No bullet lists. No numbered points. No headers. Conversational Spanish.
-Max 200 words. This is a text message, not a report.
-TODAY'S TELEGRAM (do not repeat): {today_tg_text}
+No bullet lists. No numbered points. No headers.
+Write in Spanish (Spain — tuteo, not voseo, not Argentine). Max 200 words. This is a text message, not a report.
 
 Write the message now:"""
 
