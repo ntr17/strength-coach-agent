@@ -2043,5 +2043,302 @@ class TestRunScheduledMessages:
         assert result == 1
 
 
+# ===========================================================================
+# V15: infer_week_from_sheet (unit tests — no real Sheets calls)
+# ===========================================================================
+
+class TestInferWeekFromSheet:
+    """
+    Tests for sheets.infer_week_from_sheet().
+    All tests mock gspread so no real API calls happen.
+    The function scans week tabs for Done=Yes entries to derive the current week.
+    """
+
+    def _make_parsed_week(self, done_flags: list[bool | None]) -> dict:
+        """
+        Return a fake _parse_week_tab result with one day and exercises matching done_flags.
+        done_flags: list of True/False/None per exercise.
+        """
+        exercises = [
+            {"name": f"Exercise {i + 1}", "done": flag}
+            for i, flag in enumerate(done_flags)
+        ]
+        return {"days": [{"label": "Day 1", "exercises": exercises}]}
+
+    def _patch_sheet(self, week_data_by_num: dict):
+        """
+        Return a context manager that patches gspread worksheet() to return
+        fake data for the given week numbers and raise WorksheetNotFound for others.
+        """
+        import gspread
+        from unittest.mock import MagicMock, patch
+
+        def make_ws(_week_num):
+            ws = MagicMock()
+            ws.get_all_values.return_value = []  # not used; we mock _parse_week_tab
+            return ws
+
+        mock_sheet = MagicMock()
+
+        def worksheet_side_effect(tab_name):
+            for num, data in week_data_by_num.items():
+                if tab_name in (f"Week {num}", f"Semana {num}", f"W{num}"):
+                    return make_ws(num)
+            raise gspread.WorksheetNotFound(tab_name)
+
+        mock_sheet.worksheet.side_effect = worksheet_side_effect
+        return mock_sheet, week_data_by_num
+
+    def _run_infer(self, week_data_by_num: dict, calendar_week: int) -> int:
+        """
+        Run infer_week_from_sheet() with mocked sheet and calendar week.
+        """
+        import gspread
+        from unittest.mock import MagicMock, patch
+
+        mock_sheet = MagicMock()
+
+        def worksheet_side_effect(tab_name):
+            for num in week_data_by_num:
+                if tab_name in (f"Week {num}", f"Semana {num}", f"W{num}"):
+                    ws = MagicMock()
+                    ws.get_all_values.return_value = []
+                    return ws
+            raise gspread.WorksheetNotFound(tab_name)
+
+        mock_sheet.worksheet.side_effect = worksheet_side_effect
+
+        parsed_data = week_data_by_num
+
+        with patch("sheets.get_client") as mock_gc, \
+             patch("sheets.get_program_sheet_id", return_value="fake-id"), \
+             patch("sheets.compute_current_week", return_value=calendar_week), \
+             patch("sheets.resolve_program_start_date", return_value="2026-01-13"), \
+             patch("sheets._parse_week_tab", side_effect=lambda rows: parsed_data.get(
+                 # Determine which week was requested from the last worksheet() call
+                 next(
+                     (num for num in parsed_data
+                      if mock_sheet.worksheet.call_args and
+                      any(mock_sheet.worksheet.call_args[0][0].endswith(str(num))
+                          for _ in [None])),
+                     list(parsed_data.keys())[0]
+                 ), {}
+             )):
+            mock_gc.return_value.open_by_key.return_value = mock_sheet
+            from sheets import infer_week_from_sheet
+            return infer_week_from_sheet()
+
+    def test_in_progress_week_returned(self):
+        """Week 9 has 2 done, 2 undone → return 9 (in progress)."""
+        from unittest.mock import patch, MagicMock
+        import gspread
+
+        week9_data = {"days": [{"label": "Day 1", "exercises": [
+            {"name": "Squat", "done": True},
+            {"name": "Bench", "done": True},
+            {"name": "OHP", "done": False},
+            {"name": "Row", "done": False},
+        ]}]}
+
+        call_log = []
+
+        def make_mock_sheet(data_map):
+            mock_sheet = MagicMock()
+            def worksheet_side_effect(tab_name):
+                for num in data_map:
+                    if tab_name in (f"Week {num}", f"Semana {num}", f"W{num}"):
+                        call_log.append(num)
+                        ws = MagicMock()
+                        ws.get_all_values.return_value = []
+                        return ws
+                raise gspread.WorksheetNotFound(tab_name)
+            mock_sheet.worksheet.side_effect = worksheet_side_effect
+            return mock_sheet
+
+        data_map = {9: week9_data}
+        mock_sheet = make_mock_sheet(data_map)
+
+        def parse_side_effect(_rows):
+            if call_log:
+                return data_map.get(call_log[-1], {})
+            return {}
+
+        with patch("sheets.get_client") as mock_gc, \
+             patch("sheets.get_program_sheet_id", return_value="fake"), \
+             patch("sheets.compute_current_week", return_value=10), \
+             patch("sheets.resolve_program_start_date", return_value="2026-01-13"), \
+             patch("sheets._parse_week_tab", side_effect=parse_side_effect):
+            mock_gc.return_value.open_by_key.return_value = mock_sheet
+            from sheets import infer_week_from_sheet
+            result = infer_week_from_sheet()
+
+        assert result == 9
+
+    def test_fully_done_week_returns_next(self):
+        """Week 8 is fully done, Week 9 not started → return 9."""
+        from unittest.mock import patch, MagicMock
+        import gspread
+
+        week8_data = {"days": [{"label": "Day 1", "exercises": [
+            {"name": "Squat", "done": True},
+            {"name": "Bench", "done": True},
+        ]}]}
+
+        call_log = []
+        data_map = {8: week8_data}
+
+        mock_sheet = MagicMock()
+        def worksheet_side_effect(tab_name):
+            for num in data_map:
+                if tab_name in (f"Week {num}", f"Semana {num}", f"W{num}"):
+                    call_log.append(num)
+                    ws = MagicMock()
+                    ws.get_all_values.return_value = []
+                    return ws
+            raise gspread.WorksheetNotFound(tab_name)
+        mock_sheet.worksheet.side_effect = worksheet_side_effect
+
+        def parse_side_effect(rows):
+            return data_map.get(call_log[-1], {}) if call_log else {}
+
+        with patch("sheets.get_client") as mock_gc, \
+             patch("sheets.get_program_sheet_id", return_value="fake"), \
+             patch("sheets.compute_current_week", return_value=9), \
+             patch("sheets.resolve_program_start_date", return_value="2026-01-13"), \
+             patch("sheets._parse_week_tab", side_effect=parse_side_effect):
+            mock_gc.return_value.open_by_key.return_value = mock_sheet
+            from sheets import infer_week_from_sheet
+            result = infer_week_from_sheet()
+
+        assert result == 9  # fully done → week+1
+
+    def test_no_done_entries_falls_back_to_calendar(self):
+        """No Done=Yes entries anywhere → falls back to calendar week."""
+        from unittest.mock import patch, MagicMock
+        import gspread
+
+        # All weeks have exercises but nothing done
+        week10_data = {"days": [{"label": "Day 1", "exercises": [
+            {"name": "Squat", "done": False},
+        ]}]}
+
+        call_log = []
+        data_map = {10: week10_data}
+        mock_sheet = MagicMock()
+
+        def worksheet_side_effect(tab_name):
+            for num in data_map:
+                if tab_name in (f"Week {num}", f"Semana {num}", f"W{num}"):
+                    call_log.append(num)
+                    ws = MagicMock()
+                    ws.get_all_values.return_value = []
+                    return ws
+            raise gspread.WorksheetNotFound(tab_name)
+        mock_sheet.worksheet.side_effect = worksheet_side_effect
+
+        def parse_side_effect(rows):
+            return data_map.get(call_log[-1], {}) if call_log else {}
+
+        with patch("sheets.get_client") as mock_gc, \
+             patch("sheets.get_program_sheet_id", return_value="fake"), \
+             patch("sheets.compute_current_week", return_value=10), \
+             patch("sheets.resolve_program_start_date", return_value="2026-01-13"), \
+             patch("sheets._parse_week_tab", side_effect=parse_side_effect):
+            mock_gc.return_value.open_by_key.return_value = mock_sheet
+            from sheets import infer_week_from_sheet
+            result = infer_week_from_sheet()
+
+        assert result == 10  # fallback to calendar
+
+    def test_sheet_error_falls_back_to_calendar(self):
+        """Exception during sheet read → falls back to calendar week."""
+        from unittest.mock import patch
+
+        with patch("sheets.get_client", side_effect=Exception("network error")), \
+             patch("sheets.compute_current_week", return_value=9), \
+             patch("sheets.resolve_program_start_date", return_value="2026-01-13"):
+            from sheets import infer_week_from_sheet
+            result = infer_week_from_sheet()
+
+        assert result == 9
+
+    def test_higher_week_takes_precedence(self):
+        """If Week 10 has done entries, it wins over Week 9 (search goes top-down)."""
+        from unittest.mock import patch, MagicMock
+        import gspread
+
+        week10_data = {"days": [{"label": "Day 1", "exercises": [
+            {"name": "Squat", "done": True},
+            {"name": "Bench", "done": False},
+        ]}]}
+        week9_data = {"days": [{"label": "Day 1", "exercises": [
+            {"name": "Squat", "done": True},
+            {"name": "Bench", "done": True},
+        ]}]}
+
+        call_log = []
+        data_map = {9: week9_data, 10: week10_data}
+        mock_sheet = MagicMock()
+
+        def worksheet_side_effect(tab_name):
+            for num in data_map:
+                if tab_name in (f"Week {num}", f"Semana {num}", f"W{num}"):
+                    call_log.append(num)
+                    ws = MagicMock()
+                    ws.get_all_values.return_value = []
+                    return ws
+            raise gspread.WorksheetNotFound(tab_name)
+        mock_sheet.worksheet.side_effect = worksheet_side_effect
+
+        def parse_side_effect(rows):
+            return data_map.get(call_log[-1], {}) if call_log else {}
+
+        with patch("sheets.get_client") as mock_gc, \
+             patch("sheets.get_program_sheet_id", return_value="fake"), \
+             patch("sheets.compute_current_week", return_value=10), \
+             patch("sheets.resolve_program_start_date", return_value="2026-01-13"), \
+             patch("sheets._parse_week_tab", side_effect=parse_side_effect):
+            mock_gc.return_value.open_by_key.return_value = mock_sheet
+            from sheets import infer_week_from_sheet
+            result = infer_week_from_sheet()
+
+        assert result == 10  # Week 10 in progress (not fully done)
+
+
+# ===========================================================================
+# V15: _get_authoritative_week_num (unit tests)
+# ===========================================================================
+
+class TestGetAuthoritativeWeekNum:
+
+    def test_uses_sheet_when_available(self):
+        """When infer_week_from_sheet returns a value, _get_authoritative_week_num returns it."""
+        import sys, types
+        import run_coach
+        fake_sheets = types.ModuleType("sheets")
+        fake_sheets.infer_week_from_sheet = lambda **_kw: 9
+        from unittest.mock import patch
+        with patch.dict(sys.modules, {"sheets": fake_sheets}), \
+             patch("run_coach.compute_current_week", return_value=10), \
+             patch("run_coach.resolve_program_start_date", return_value="2026-01-13"):
+            result = run_coach._get_authoritative_week_num()
+        assert result == 9
+
+    def test_falls_back_on_sheet_error(self):
+        """When infer_week_from_sheet raises, falls back to compute_current_week."""
+        from unittest.mock import patch
+        import run_coach
+        with patch("run_coach.compute_current_week", return_value=9), \
+             patch("run_coach.resolve_program_start_date", return_value="2026-01-13"):
+            # Simulate infer_week_from_sheet raising inside the function
+            import sys
+            import types
+            fake_sheets = types.ModuleType("sheets")
+            fake_sheets.infer_week_from_sheet = lambda: (_ for _ in ()).throw(Exception("fail"))
+            with patch.dict(sys.modules, {"sheets": fake_sheets}):
+                result = run_coach._get_authoritative_week_num()
+        assert result == 9
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
