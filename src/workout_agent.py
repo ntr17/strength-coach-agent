@@ -68,17 +68,23 @@ def _format_program_for_context(program_data: dict) -> str:
             day_name = day_data.get("label", day_data.get("day_name", "Day"))
             exercises = day_data.get("exercises", [])
             lines.append(f"\n  {day_name}:")
-            for ex in exercises:
+            for idx, ex in enumerate(exercises, start=1):
                 name = ex.get("name", ex.get("exercise", ""))
                 weight = ex.get("weight", "")
                 sets_reps = ex.get("sets_reps", "")
                 actual = ex.get("actual", "")
                 ex_done = ex.get("done", False)
                 if name:
+                    # Import inline to avoid circular dependency at module load
+                    try:
+                        from run_coach import _infer_muscle_group
+                        muscle = f" [{_infer_muscle_group(name)}]"
+                    except Exception:
+                        muscle = ""
                     prescribed = f"{weight} {sets_reps}".strip()
                     actual_str = f" → actual: {actual}" if actual and ex_done else ""
                     tick = " ✓" if ex_done else ""
-                    lines.append(f"    {name}: {prescribed}{actual_str}{tick}")
+                    lines.append(f"    {idx}.{muscle} {name}: {prescribed}{actual_str}{tick}")
 
     session_notes = current_week.get("session_notes", "")
     if session_notes:

@@ -1511,6 +1511,452 @@ import re as _re_module
 _re_rpe = _re_module.compile(r"@?RPE\s*\d", _re_module.IGNORECASE)
 
 
+# ---------------------------------------------------------------------------
+# Cascade context helpers — multi-layer coaching coherence system
+# ---------------------------------------------------------------------------
+
+_MUSCLE_HINTS: dict[str, str] = {
+    "squat": "quad/posterior", "deadlift": "posterior/back", "rdl": "posterior",
+    "sumo": "posterior/back", "trap bar": "posterior/back",
+    "bench": "push/chest", "incline": "push/chest", "decline": "push/chest",
+    "flye": "push/chest", "fly": "push/chest",
+    "overhead press": "push/shoulder", "ohp": "push/shoulder", "military": "push/shoulder",
+    "dip": "push/tricep", "pushdown": "push/tricep", "tricep": "push/tricep",
+    "row": "pull/back", "pullup": "pull/back", "pull-up": "pull/back",
+    "pulldown": "pull/back", "chin": "pull/back",
+    "curl": "pull/bicep",
+    "lunge": "quad/unilateral", "split squat": "quad/unilateral", "step up": "quad/unilateral",
+    "nordic": "hamstring", "glute bridge": "posterior", "hip thrust": "posterior",
+    "lateral raise": "shoulder/delt", "face pull": "shoulder/rear delt",
+    "press": "push",  # generic push — matches overhead press, etc. (last resort)
+    "calf": "calf", "ab": "core", "plank": "core",
+}
+
+
+def _infer_muscle_group(name: str) -> str:
+    """Return a muscle group label for an exercise name (best-effort keyword match)."""
+    name_lower = name.lower()
+    for key, group in _MUSCLE_HINTS.items():
+        if key in name_lower:
+            return group
+    return "general"
+
+
+def _detect_program_phase(week_num: int, total_weeks: int) -> str:
+    """Return training block phase name based on program position."""
+    if total_weeks <= 0:
+        return "unknown phase"
+    pct = week_num / total_weeks
+    if pct < 0.25:
+        return "early accumulation"
+    elif pct < 0.55:
+        return "mid-block accumulation"
+    elif pct < 0.75:
+        return "intensification"
+    elif pct < 0.90:
+        return "peak / realization"
+    else:
+        return "taper / program end"
+
+
+def _detect_session_conflicts(coach_state: dict, commands: list) -> str:
+    """
+    Detect conflicts between TOMORROW_PLAN and unresolved pending catch-ups.
+    Returns a conflict description string or 'clear'.
+    """
+    tomorrow_plan = coach_state.get("TOMORROW_PLAN", {}).get("summary", "")
+    last_evening = coach_state.get("LAST_EVENING_PROTOCOL", {}).get("summary", "")
+    yesterday = str(date.today() - timedelta(days=1))
+
+    pending_catchups = [
+        c for c in commands
+        if c.get("Command", "").upper() == "PENDING_CATCHUP"
+        and c.get("Applied", "").upper() not in ("Y", "DECLINED")
+    ]
+
+    if not pending_catchups:
+        return "clear"
+
+    catchup_str = " | ".join(c.get("Value", "") for c in pending_catchups[:3])
+    if tomorrow_plan and last_evening == yesterday:
+        return (
+            f"⚠️ CONFLICT: TOMORROW_PLAN='{tomorrow_plan}' but "
+            f"{len(pending_catchups)} catch-up(s) unresolved: {catchup_str}. "
+            f"Must address explicitly — do not silently ignore."
+        )
+    return f"{len(pending_catchups)} catch-up(s) pending: {catchup_str}"
+
+
+def _build_cascade_l1(coach_state: dict, projections: dict | None = None) -> str:
+    """Layer 1 — Strategic: program position, goals, annual arc, long-term vision."""
+    lines = ["LAYER 1 — STRATEGIC (where in the journey)"]
+
+    program_summary = coach_state.get("PROGRAM", {}).get("summary", "")
+    if program_summary:
+        lines.append(f"  Program: {program_summary[:180]}")
+
+    # Goal proximity from projections
+    if projections:
+        proximity = projections.get("goal_proximity", [])
+        for item in proximity[:3]:
+            lift = item.get("lift", "")
+            current = item.get("current_1rm", "")
+            target = item.get("target", "")
+            if lift and current and target:
+                try:
+                    gap = float(target) - float(current)
+                    if gap <= 0:
+                        status = "🏆 GOAL REACHED"
+                    elif gap <= 5:
+                        status = f"🎯 {gap:.1f}kg from target — critical"
+                    else:
+                        status = f"{gap:.1f}kg from target"
+                    lines.append(f"  Goal: {lift} {current}kg / {target}kg — {status}")
+                except (ValueError, TypeError):
+                    pass
+
+    # Annual arc — first 2 sentences
+    annual_arc = coach_state.get("ANNUAL_ARC", {}).get("summary", "")
+    if annual_arc:
+        sentences = annual_arc.replace("\n", " ").split(". ")
+        arc_brief = ". ".join(sentences[:2]).strip()
+        if arc_brief:
+            lines.append(f"  Annual arc: {arc_brief[:200]}")
+
+    # Long-term projections (1yr view per lift)
+    if projections:
+        long_term = projections.get("long_term", {})
+        for lift_name, lt in list(long_term.items())[:2]:
+            rate = lt.get("current_rate", 0)
+            end_prog = lt.get("end_of_program", "")
+            yr1 = lt.get("1yr", "")
+            if end_prog or yr1:
+                lines.append(
+                    f"  Projection: {lift_name} → end-of-program {end_prog}kg | "
+                    f"1yr {yr1}kg | trend {rate:+.1f}kg/wk"
+                )
+
+    # Long-term vision
+    dreams = coach_state.get("ATHLETE_DREAMS", {}).get("summary", "")
+    if dreams:
+        lines.append(f"  Long-term vision: {dreams[:150]}")
+
+    return "\n".join(lines) if len(lines) > 1 else ""
+
+
+def _build_cascade_l2(
+    coach_state: dict,
+    projections: dict | None,
+    current_week_days: list,
+) -> str:
+    """Layer 2 — Mesocycle: weekly intent, periodization, recovery, compliance."""
+    lines = ["LAYER 2 — MESOCYCLE (this week's purpose)"]
+
+    weekly_intent = coach_state.get("WEEKLY_INTENT", {}).get("summary", "")
+    if weekly_intent:
+        lines.append(f"  Intent: {weekly_intent[:200]}")
+
+    coaching_reason = coach_state.get("COACHING_REASON", {}).get("summary", "")
+    if coaching_reason:
+        lines.append(f"  Periodization: {coaching_reason[:160]}")
+
+    # Session compliance
+    done_count = sum(
+        1 for d in current_week_days
+        if any(ex.get("done") is True for ex in d.get("exercises", []))
+    )
+    total_days = len(current_week_days)
+    schedule_ctx = coach_state.get("WEEKLY_SCHEDULE", {}).get("summary", "")
+    sessions_line = f"  Sessions: {done_count}/{total_days} done this week"
+    if schedule_ctx:
+        sessions_line += f" | Schedule: {schedule_ctx[:80]}"
+    lines.append(sessions_line)
+
+    # TSB / recovery state
+    if projections:
+        fatigue = projections.get("fatigue", {})
+        tsb = fatigue.get("TSB", None)
+        readiness = fatigue.get("readiness", "")
+        if tsb is not None:
+            lines.append(f"  Recovery: TSB = {tsb:+.1f} ({readiness})")
+        vol_spikes = projections.get("volume_spikes", [])
+        if vol_spikes:
+            spike = vol_spikes[0]
+            lines.append(
+                f"  ⚠️ Volume spike: {spike.get('lift', '?')} this week ({spike.get('alert', '?')})"
+            )
+
+    # Behavior patterns (brief)
+    behavior = coach_state.get("BEHAVIOR_PATTERNS", {}).get("summary", "")
+    if behavior:
+        lines.append(f"  Patterns: {behavior[:130]}")
+
+    return "\n".join(lines) if len(lines) > 1 else ""
+
+
+def _build_cascade_l3(
+    coach_state: dict,
+    commands: list,
+    current_week_days: list,
+    health_log: list | None,
+    orientation: str,
+    today: date,
+) -> str:
+    """
+    Layer 3 — Session: committed plan, conflicts, resolved session, lift state, health.
+    orientation: "today" | "tomorrow" | "session_end"
+    """
+    header = "LAYER 3 — TODAY'S SESSION" if orientation != "tomorrow" else "LAYER 3 — TOMORROW'S SESSION"
+    lines = [header]
+
+    tomorrow_plan = coach_state.get("TOMORROW_PLAN", {}).get("summary", "")
+    last_evening = coach_state.get("LAST_EVENING_PROTOCOL", {}).get("summary", "")
+    yesterday = str(today - timedelta(days=1))
+    plan_is_fresh = bool(tomorrow_plan and last_evening == yesterday)
+
+    if orientation == "tomorrow":
+        lines.append("  Building tomorrow's plan — pending catch-ups must be resolved first")
+    else:
+        if plan_is_fresh:
+            lines.append(f"  Commitment (last night): {tomorrow_plan}")
+        else:
+            lines.append("  Commitment (last night): none — derive from program sheet")
+
+    # Pending catch-ups
+    pending_catchups = [
+        c for c in commands
+        if c.get("Command", "").upper() == "PENDING_CATCHUP"
+        and c.get("Applied", "").upper() not in ("Y", "DECLINED")
+    ]
+    if pending_catchups:
+        catchup_str = " | ".join(c.get("Value", "") for c in pending_catchups[:3])
+        lines.append(f"  Pending catch-ups: {catchup_str}")
+    else:
+        lines.append("  Pending catch-ups: none")
+
+    # Conflict status
+    conflict = _detect_session_conflicts(coach_state, commands)
+    lines.append(f"  Conflicts: {conflict}")
+
+    # Daily focus (what this morning's brief said) — relevant for session_end/tomorrow
+    if orientation in ("session_end", "tomorrow"):
+        daily_focus_raw = coach_state.get("DAILY_FOCUS", {}).get("summary", "")
+        if daily_focus_raw and daily_focus_raw.startswith(str(today)):
+            daily_focus_today = daily_focus_raw[len(str(today)) + 3:]
+            lines.append(f"  Today's brief focused on: {daily_focus_today[:150]}")
+
+    # Primary lift domain state
+    today_str = today.strftime("%A")
+    today_session = None
+    for day in current_week_days:
+        if today_str.lower() in day.get("label", "").lower():
+            today_session = day
+            break
+    # If no day-name match, try TOMORROW_PLAN label
+    if not today_session and plan_is_fresh and orientation != "tomorrow":
+        plan_label = tomorrow_plan.split(" | ")[0].strip() if " | " in tomorrow_plan else ""
+        if plan_label:
+            for day in current_week_days:
+                if plan_label.lower() in day.get("label", "").lower():
+                    today_session = day
+                    break
+
+    if today_session:
+        main_lifts = [ex for ex in today_session.get("exercises", []) if ex.get("weight")]
+        if main_lifts:
+            primary_name = main_lifts[0].get("name", "")
+            name_lower = primary_name.lower()
+            lift_domain = None
+            if "squat" in name_lower:
+                lift_domain = "SQUAT"
+            elif "bench" in name_lower:
+                lift_domain = "BENCH"
+            elif "deadlift" in name_lower or "rdl" in name_lower:
+                lift_domain = "DEADLIFT"
+            elif "press" in name_lower or "ohp" in name_lower:
+                lift_domain = "OHP"
+            if lift_domain:
+                state = coach_state.get(lift_domain, {}).get("summary", "")
+                if state:
+                    lines.append(f"  {primary_name} state: {state[:160]}")
+
+    # Health inputs
+    if health_log:
+        try:
+            latest = health_log[0]
+            sleep = latest.get("Sleep (hrs)", "")
+            energy = latest.get("Energy (1-10)", "")
+            bw = latest.get("Bodyweight (kg)", "")
+            health_parts = []
+            if sleep:
+                health_parts.append(f"Sleep {sleep}h")
+            if energy:
+                health_parts.append(f"Energy {energy}/10")
+            if bw:
+                health_parts.append(f"BW {bw}kg")
+            if health_parts:
+                lines.append(f"  Health inputs: {' | '.join(health_parts)}")
+        except Exception:
+            pass
+
+    return "\n".join(lines) if len(lines) > 1 else ""
+
+
+def _build_cascade_l4(
+    coach_state: dict,
+    telegram_log: list,
+    coach_focus: list,
+    today: date,
+) -> str:
+    """Layer 4 — Immediate: last brief, today's Telegram, new concerns."""
+    lines = ["LAYER 4 — LAST 24H (immediate context)"]
+    today_str = str(today)
+
+    # Last brief content
+    last_brief_content = coach_state.get("LAST_BRIEF_CONTENT", {}).get("summary", "")
+    if last_brief_content and last_brief_content.startswith(today_str):
+        brief_text = last_brief_content[len(today_str) + 3:]  # strip "DATE | "
+        lines.append(f"  Last brief sent: {brief_text[:200]}")
+    else:
+        lines.append("  Last brief: none yet today")
+
+    # Today's Telegram (in/out)
+    today_tg = [m for m in telegram_log if m.get("Date", "") == today_str]
+    if today_tg:
+        in_msgs = [
+            m.get("Message", "")[:80]
+            for m in today_tg
+            if m.get("Direction", "").upper() == "IN"
+        ][-3:]
+        out_msgs = [
+            m.get("Message", "")[:80]
+            for m in today_tg
+            if m.get("Direction", "").upper() == "OUT"
+        ][-2:]
+        if in_msgs:
+            lines.append(f"  Athlete said today: {' / '.join(in_msgs)}")
+        if out_msgs:
+            lines.append(f"  Coach sent today: {' / '.join(out_msgs)}")
+    else:
+        lines.append("  Today's Telegram: none yet")
+
+    # New concerns/followups from today
+    new_concerns = [
+        f.get("Item", "")[:100]
+        for f in coach_focus
+        if f.get("Status", "") == "OPEN"
+        and f.get("Category", "") in ("CONCERN", "FOLLOWUP")
+        and str(f.get("Date", "")).startswith(today_str)
+    ][:3]
+    if new_concerns:
+        lines.append(f"  New concerns today: {' | '.join(new_concerns)}")
+
+    return "\n".join(lines) if len(lines) > 1 else ""
+
+
+def _build_cascade_context(
+    coach_state: dict,
+    commands: list,
+    projections: dict | None,
+    current_week_days: list,
+    health_log: list | None,
+    telegram_log: list,
+    coach_focus: list,
+    today: date,
+    orientation: str = "today",
+) -> str:
+    """
+    Build a 4-layer coaching context cascade for structured reasoning.
+
+    orientation: "today" (brief) | "tomorrow" (evening protocol) | "session_end" (endsession/post)
+
+    Each layer feeds the next — Layer 3 is derived from Layers 1+2 commitments, Layer 4 validates.
+    The LLM must reason through all 4 layers before generating output.
+    """
+    blocks = []
+    for fn, args in [
+        (_build_cascade_l1, (coach_state, projections)),
+        (_build_cascade_l2, (coach_state, projections, current_week_days)),
+        (_build_cascade_l3, (coach_state, commands, current_week_days, health_log, orientation, today)),
+        (_build_cascade_l4, (coach_state, telegram_log, coach_focus, today)),
+    ]:
+        try:
+            block = fn(*args)
+            if block:
+                blocks.append(block)
+        except Exception as e:
+            print(f"[Cascade] Layer build failed (non-fatal): {e}")
+
+    return "\n\n".join(blocks) if blocks else "(cascade unavailable)"
+
+
+def _build_ordered_exercise_context(exercises: list) -> tuple[str, str]:
+    """
+    Build an ordered exercise list with muscle group labels.
+
+    Returns:
+        (ordered_text, fatigue_notes)
+        ordered_text — numbered list for prompt injection
+        fatigue_notes — auto-generated notes about skip impacts on downstream exercises
+    """
+    ordered_lines = []
+    for i, ex in enumerate(exercises, start=1):
+        name = ex.get("name", "")
+        if not name:
+            continue
+        weight = ex.get("weight", "")
+        sets_reps = ex.get("sets_reps", "")
+        done = ex.get("done")
+        actual = ex.get("actual", "")
+        note = ex.get("session_note", "")
+        muscle = _infer_muscle_group(name)
+
+        if done is True:
+            actual_str = actual or f"{weight} {sets_reps}".strip()
+            status = f"COMPLETED ({actual_str})"
+        elif done is False:
+            status = "SKIPPED"
+        else:
+            status = "NOT LOGGED"
+
+        line = f"  {i}. {name} [{muscle}]: {weight} {sets_reps}".rstrip() + f" — {status}"
+        if note:
+            line += f" | note: {note[:60]}"
+        ordered_lines.append(line)
+
+    # Auto-generate fatigue chain notes for skipped exercises
+    fatigue_notes = []
+    for i, ex in enumerate(exercises):
+        if ex.get("done") is not False:
+            continue
+        skipped_name = ex.get("name", "")
+        if not skipped_name:
+            continue
+        skipped_muscle = _infer_muscle_group(skipped_name)
+        # Find downstream exercises with same/overlapping muscle group
+        downstream = []
+        for j, later_ex in enumerate(exercises[i + 1:], start=i + 2):
+            later_name = later_ex.get("name", "")
+            if not later_name:
+                continue
+            later_muscle = _infer_muscle_group(later_name)
+            # Check for muscle group overlap (shared first keyword)
+            sk_root = skipped_muscle.split("/")[0]
+            lt_root = later_muscle.split("/")[0]
+            if sk_root == lt_root or skipped_muscle in later_muscle or later_muscle in skipped_muscle:
+                status = "completed" if later_ex.get("done") is True else "not yet done"
+                downstream.append(f"{later_name} (pos {j}, {status})")
+        if downstream:
+            fatigue_notes.append(
+                f"NOTE: {skipped_name} [pos {i + 1}, {skipped_muscle}] was SKIPPED — "
+                f"downstream {skipped_muscle} exercises had fresh muscles: {', '.join(downstream)}"
+            )
+
+    ordered_text = "\n".join(ordered_lines) if ordered_lines else "(no exercises)"
+    fatigue_note_text = "\n".join(fatigue_notes) if fatigue_notes else ""
+    return ordered_text, fatigue_note_text
+
+
 def _today_telegram_covers_topic(topic_keywords: list[str],
                                   recent_tg: list[dict],
                                   today_str: str = None) -> bool:
@@ -2547,16 +2993,6 @@ def run_brief(dry_run: bool = False):
                 f"  {ex.get('name', '?')}: {ex.get('weight', '?')} × {ex.get('sets_reps', '?')}"
             )
 
-    # Pull relevant Coach State context
-    state_notes = []
-    for domain in ("SQUAT", "BENCH", "DEADLIFT", "OHP", "HEALTH", "SESSION_QUALITY"):
-        s = coach_state.get(domain, {}).get("summary", "")
-        if s:
-            state_notes.append(f"  {domain}: {s[:120]}")
-
-    # Weekly intent — the reason this session matters
-    weekly_intent = coach_state.get("WEEKLY_INTENT", {}).get("summary", "")
-
     # Open commitments
     open_commitments = read_commitments("OPEN")
     commitment_note = ""
@@ -2599,29 +3035,46 @@ def run_brief(dry_run: bool = False):
     cues = _select_lift_cue(primary_lift, coach_state, primary_lift_notes) if primary_lift else []
     cue_text = "\n".join(f"  - {c}" for c in cues) if cues else "(use general principles)"
 
-    # Build brief via Haiku — free-form, not templated
+    # Load extra context for cascade
+    commands_for_cascade = []
+    coach_focus_for_cascade = []
+    try:
+        from memory import read_commands, read_coach_focus
+        commands_for_cascade = read_commands()
+        coach_focus_for_cascade = read_coach_focus()
+    except Exception:
+        pass
+
+    # Build cascade context (no projections — too expensive for brief)
+    _brief_tg_log: list = []
+    try:
+        _brief_tg_log = all_tg  # already loaded above for tech notes
+    except NameError:
+        pass
+
+    cascade = _build_cascade_context(
+        coach_state=coach_state,
+        commands=commands_for_cascade,
+        projections=None,
+        current_week_days=current_week.get("days", []),
+        health_log=None,
+        telegram_log=_brief_tg_log,
+        coach_focus=coach_focus_for_cascade,
+        today=today,
+        orientation="today",
+    )
+
     session_text = "\n".join(session_lines) or "session details unavailable"
-    state_text = "\n".join(state_notes) or "(no state data)"
 
     prompt = f"""You are {ATHLETE_NAME}'s strength coach. Write a pre-session Telegram message.
 
-STRICT RULES:
-- 2-4 sentences MAX. No greeting, no sign-off.
-- Do NOT follow a template. Every brief must feel different from the last.
-- Lead with the single most important thing from the context below — it might be a form cue,
-  a readiness note, a motivating connection to the weekly goal, or a specific concern.
-- Reference actual numbers, actual lift names, actual context. Never be generic.
-- If recent Telegram mentioned a technique issue, address it. If RPE was high last session, say so.
-- One specific cue for the primary lift — choose from the options below, but only use it if it fits.
+=== COACHING CONTEXT — REASON THROUGH THIS BEFORE WRITING ===
 
-TODAY'S SESSION ({today_str}):
+{cascade}
+
+=== SESSION DETAILS ===
+TODAY'S EXERCISES:
 {session_text}
-
-WEEKLY INTENT:
-{weekly_intent or '(not set)'}
-
-COACH STATE (RPE history, trends, concerns):
-{state_text}
 
 TECHNIQUE CUE OPTIONS FOR {primary_lift.upper() or "TODAY'S MAIN LIFT"}:
 {cue_text}
@@ -2629,7 +3082,13 @@ TECHNIQUE CUE OPTIONS FOR {primary_lift.upper() or "TODAY'S MAIN LIFT"}:
 {f"RECENT ATHLETE TECHNIQUE MENTIONS: {recent_tech_notes}" if recent_tech_notes else ""}
 {f"OPEN COMMITMENT: {commitment_note}" if commitment_note else ""}
 
-Write the message now. Make it land. Every brief should feel different."""
+=== OUTPUT RULES ===
+1. Work through the cascade above (all 4 layers) before writing — do not skip to the session details.
+2. If Layer 3 shows a CONFLICT, name it explicitly in your message instead of silently picking a side.
+3. If Layer 3 COMMITMENT (last night) matches today's session, build on it — do not re-derive independently.
+4. Lead with the single most important thing across all 4 layers (cue, goal connection, concern, readiness).
+5. Reference actual numbers, actual lift names, actual context. Never generic.
+6. 2–4 sentences MAX. No greeting, no sign-off. Every brief must feel different from the last."""
 
     # Enforce athlete output preferences as hard constraints
     try:
@@ -2657,6 +3116,12 @@ Write the message now. Make it land. Every brief should feel different."""
         if sent:
             print(f"  Brief sent: {brief_msg[:80]}")
             upsert_coach_state("LAST_BRIEF", str(today), "HIGH")
+            # Store full brief content so subsequent messages can verify consistency (Layer 4)
+            upsert_coach_state(
+                "LAST_BRIEF_CONTENT",
+                f"{today} | {brief_msg[:400].replace(chr(10), ' ')}",
+                "HIGH",
+            )
             # Write DAILY_FOCUS so post-session and evening-protocol can reference today's emphasis
             daily_focus = (
                 f"{today} | lift:{primary_lift} | "
@@ -2768,12 +3233,11 @@ def run_post_session(dry_run: bool = False):
     except Exception:
         post_commitment_note = ""
 
+    # Build ordered exercise context with muscle group labels and fatigue notes
+    ordered_ex_text, fatigue_note_text = _build_ordered_exercise_context(exercises)
+
     # Build context for Haiku
     skipped_names = [ex.get("name", "") for ex in skip_exs if ex.get("name")][:4]
-    main_done = [
-        f"{ex.get('name', '?')} {ex.get('weight', '')}".strip()
-        for ex in done_exs if ex.get("weight")
-    ][:3]
 
     any_complete = done_count > 0
 
@@ -2799,9 +3263,10 @@ def run_post_session(dry_run: bool = False):
         prompt = f"""You are {ATHLETE_NAME}'s strength coach. Write a post-session Telegram message (3-5 sentences).
 
 {session_ack}
-Exercises completed: {', '.join(main_done) or 'see program'}
-Exercises skipped: {', '.join(skipped_names) if skipped_names else 'none'}
-RPE data logged: {'yes' if has_rpe else 'no'}
+
+SESSION ORDER (fatigue accumulates top to bottom — reason about this when interpreting performance):
+{ordered_ex_text}
+{fatigue_note_text}
 
 WHAT THE MESSAGE MUST DO:
 1. Acknowledge the session briefly and specifically (name the key lift done, not just "good session").
@@ -2862,6 +3327,210 @@ Rules: No greeting, no sign-off. Human and specific."""
             upsert_coach_state("LAST_POST_SESSION", str(today), "HIGH")
     except Exception as e:
         print(f"  Post-session check-in failed (non-fatal): {e}")
+
+
+# ---------------------------------------------------------------------------
+# End-session protocol: athlete-triggered structured check-in
+# ---------------------------------------------------------------------------
+
+def run_endsession_protocol(user_message: str = "", dry_run: bool = False) -> str:
+    """
+    Called when athlete signals session end — via /endsession command or NL detection.
+
+    Flow:
+    1. Dedup check (LAST_POST_SESSION == today) → short ack if already ran
+    2. Load today's program session + read done/actual state from sheet
+    3. Build 4-layer cascade context (orientation="session_end")
+    4. Build ordered exercise list with muscle group labels
+    5. Parse user_message for already-reported info (don't re-ask)
+    6. Detect multi-session (AM/PM keywords) → keep day open if partial
+    7. Ask targeted questions: RPE for completed lifts, skip reasoning with fatigue chain
+    8. Write LAST_POST_SESSION to prevent cron duplicate
+
+    Returns the response string (also sends via Telegram if not dry_run).
+    """
+    from sheets import read_program_data
+    from memory import (
+        read_coach_state, upsert_coach_state, read_commands,
+        read_coach_focus, read_telegram_log, read_health_log,
+    )
+
+    today = date.today()
+    week_num = compute_current_week(resolve_program_start_date())
+    print(f"[{today}] Running endsession protocol (Week {week_num})...")
+
+    coach_state = read_coach_state()
+
+    # Dedup: if post-session already ran today, return short ack
+    last_post = coach_state.get("LAST_POST_SESSION", {}).get("summary", "")
+    if last_post == str(today):
+        return "Ya registré el check-in de hoy — ¿algo más que añadir?"
+
+    # Load program data
+    try:
+        program_data = read_program_data(week_num=week_num, lookback=0)
+    except Exception as e:
+        print(f"  EndSession: program load failed: {e}")
+        return "No pude cargar el programa ahora mismo — mándame los datos manualmente."
+
+    current_week = program_data.get("current_week", {})
+    today_str = today.strftime("%A")
+    today_sessions = [
+        day for day in current_week.get("days", [])
+        if today_str.lower() in day.get("label", "").lower()
+    ]
+
+    # Fallback: use TOMORROW_PLAN label if no day-name match
+    if not today_sessions:
+        tomorrow_plan = coach_state.get("TOMORROW_PLAN", {}).get("summary", "")
+        last_evening = coach_state.get("LAST_EVENING_PROTOCOL", {}).get("summary", "")
+        yesterday = str(today - timedelta(days=1))
+        if tomorrow_plan and last_evening == yesterday:
+            plan_label = tomorrow_plan.split(" | ")[0].strip()
+            today_sessions = [
+                day for day in current_week.get("days", [])
+                if plan_label.lower() in day.get("label", "").lower()
+            ]
+
+    # Last resort: next undone session
+    if not today_sessions:
+        undone = [
+            day for day in current_week.get("days", [])
+            if not any(ex.get("done") is True for ex in day.get("exercises", []))
+        ]
+        if undone:
+            today_sessions = [undone[0]]
+
+    if not today_sessions:
+        return "No encontré sesión para hoy — ¿qué hiciste? Mándame los detalles."
+
+    session = today_sessions[0]
+    session_label = session.get("label", "today's session")
+    exercises = session.get("exercises", [])
+
+    # Build ordered exercise context with fatigue chain notes
+    ordered_ex_text, fatigue_note_text = _build_ordered_exercise_context(exercises)
+
+    # Detect multi-session (AM / PM keywords)
+    msg_lower = user_message.lower()
+    is_partial_day = any(
+        kw in msg_lower
+        for kw in ("am ", "morning", "mañana", "primera sesión", "primera sesion",
+                   "first session", "am session", "entreno de mañana")
+    )
+
+    # Parse user_message for already-reported info (to avoid re-asking)
+    already_reported_parts = []
+    if any(kw in msg_lower for kw in ("rpe", "rir", "felt like", "@")):
+        already_reported_parts.append("RPE/exertion level")
+    if any(kw in msg_lower for kw in ("skipped", "didn't do", "no hice", "dejé", "sin bench",
+                                       "sin row", "no rows")):
+        already_reported_parts.append("skip explanations")
+    # Extract lift names mentioned
+    known_lifts = ["squat", "bench", "deadlift", "press", "row", "lunge", "dip", "nordic",
+                   "pullup", "curl", "sentadilla", "press banca", "peso muerto"]
+    mentioned_lifts = [lift for lift in known_lifts if lift in msg_lower]
+    if mentioned_lifts:
+        already_reported_parts.append(f"mentioned: {', '.join(mentioned_lifts)}")
+    already_reported_text = (
+        " | ".join(already_reported_parts) if already_reported_parts else "nothing yet"
+    )
+
+    # Load context for cascade
+    commands_list = []
+    coach_focus_list = []
+    health_log_list = []
+    tg_log_list = []
+    try:
+        commands_list = read_commands()
+        coach_focus_list = read_coach_focus()
+        health_log_list = read_health_log(limit=1)
+        tg_log_list = read_telegram_log(limit=12)
+    except Exception:
+        pass
+
+    cascade = _build_cascade_context(
+        coach_state=coach_state,
+        commands=commands_list,
+        projections=None,
+        current_week_days=current_week.get("days", []),
+        health_log=health_log_list,
+        telegram_log=tg_log_list,
+        coach_focus=coach_focus_list,
+        today=today,
+        orientation="session_end",
+    )
+
+    # Determine done/skipped counts for strategic framing
+    done_exs = [ex for ex in exercises if ex.get("done") is True]
+    total_named = len([ex for ex in exercises if ex.get("name")])
+
+    prompt = f"""You are {ATHLETE_NAME}'s strength coach. The athlete just finished a session. Write a check-in message.
+
+=== COACHING CONTEXT ===
+
+{cascade}
+
+=== SESSION JUST COMPLETED: {session_label} ===
+({len(done_exs)}/{total_named} exercises completed)
+
+SESSION ORDER (fatigue accumulates top to bottom — use this to interpret performance):
+{ordered_ex_text}
+
+{fatigue_note_text}
+
+=== WHAT THE ATHLETE ALREADY REPORTED ===
+{already_reported_text}
+
+{"=== PARTIAL DAY NOTE ===" if is_partial_day else ""}
+{"This appears to be an AM/first session — do NOT assume the day is over. Ask if there's a PM session." if is_partial_day else ""}
+
+=== WHAT TO ASK (priority order) ===
+1. RPE for each COMPLETED main lift (one question per lift) — SKIP if already reported above.
+2. For each SKIPPED exercise: ask why specifically — reference the fatigue chain notes above.
+   E.g.: "You skipped bench [push/chest, pos 2] — your chest was fresh when you got to dips [pos 4];
+   dips being easy makes sense. What happened with bench?"
+3. If Layer 3 shows a pending catch-up, ask if it needs rescheduling.
+4. If partial day: ask if there's a PM session planned.
+
+=== RULES ===
+- Max 3–4 questions total, grouped naturally.
+- Reference actual exercise names, positions, muscle groups from the ordered list above.
+- Direct coach voice. No sign-off.
+- Do NOT re-ask anything already in WHAT THE ATHLETE ALREADY REPORTED.
+- Write in Spanish (the athlete's primary language)."""
+
+    # Enforce athlete output preferences
+    try:
+        from memory import read_athlete_preferences
+        from prompt import apply_output_preferences
+        prompt = apply_output_preferences(prompt, read_athlete_preferences())
+    except Exception:
+        pass
+
+    if dry_run:
+        print(f"  [DRY RUN] EndSession: {session_label} | done={len(done_exs)}/{total_named}")
+        return f"[DRY RUN] EndSession check-in for {session_label}"
+
+    try:
+        client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+        result = client.messages.create(
+            model=CLAUDE_HAIKU,
+            max_tokens=300,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        response = result.content[0].text.strip()
+
+        from telegram_utils import send_telegram_message
+        sent = send_telegram_message(response)
+        if sent:
+            print(f"  EndSession check-in sent: {response[:80]}")
+            upsert_coach_state("LAST_POST_SESSION", str(today), "HIGH")
+        return response
+
+    except Exception as e:
+        print(f"  EndSession failed (non-fatal): {e}")
+        return "Algo falló al generar el check-in — mándame los datos directamente."
 
 
 # ---------------------------------------------------------------------------
@@ -3342,22 +4011,8 @@ def run_evening_protocol(dry_run: bool = False):
     # Count of exercises in session for context
     total_ex_count = len([ex for ex in exercises if ex.get("name")])
 
-    # Read rich context for the prompt
+    # Read context still needed directly in prompt
     weekly_intent = coach_state.get("WEEKLY_INTENT", {}).get("summary", "")
-    schedule_ctx = coach_state.get("WEEKLY_SCHEDULE", {}).get("summary", "")
-
-    # DAILY_FOCUS: what today's brief said — reference for continuity, avoid contradictions
-    daily_focus_raw = coach_state.get("DAILY_FOCUS", {}).get("summary", "")
-    daily_focus_today = ""
-    if daily_focus_raw and daily_focus_raw.startswith(str(today)):
-        daily_focus_today = daily_focus_raw[len(str(today)) + 3:]
-
-    # Lift domain states for transparency
-    lift_states: dict[str, str] = {}
-    for domain in ("SQUAT", "BENCH", "DEADLIFT", "OHP"):
-        s = coach_state.get(domain, {}).get("summary", "")
-        if s:
-            lift_states[domain] = s[:120]
 
     # Recent health summary (last 3 days)
     try:
@@ -3408,10 +4063,6 @@ def run_evening_protocol(dry_run: bool = False):
     except Exception:
         concerns_text = "(unavailable)"
 
-    # Week progress summary
-    done_days = sum(1 for d in days if any(ex.get("done") for ex in d.get("exercises", [])))
-    total_days = len(days)
-
     # Projections for goal proximity
     projections: dict = {}
     try:
@@ -3439,62 +4090,80 @@ def run_evening_protocol(dry_run: bool = False):
     tomorrow_cues = _select_lift_cue(primary_tomorrow_lift, coach_state, primary_tomorrow_notes) if primary_tomorrow_lift else []
     tomorrow_cue_text = "\n".join(f"  - {c}" for c in tomorrow_cues) if tomorrow_cues else ""
 
-    # Build Lift domain context lines for transparency
-    lift_state_lines = "\n".join(
-        f"  {domain}: {summary}" for domain, summary in lift_states.items()
-    )
-
     tomorrow_plan_summary = f"{label} | {lift_summary}" if lift_summary else label
+
+    # Load commands for cascade conflict detection
+    _ep_commands: list = []
+    try:
+        from memory import read_commands
+        _ep_commands = read_commands()
+    except Exception:
+        pass
+
+    # Build cascade context (with projections already computed above)
+    _ep_health_log: list = []
+    try:
+        _ep_health_log = read_health_log(limit=3)
+    except Exception:
+        pass
+
+    _ep_tg_log: list = []
+    try:
+        _ep_tg_log = recent_tg if "recent_tg" in dir() else read_telegram_log(limit=15)
+    except Exception:
+        pass
+
+    cascade = _build_cascade_context(
+        coach_state=coach_state,
+        commands=_ep_commands,
+        projections=projections,
+        current_week_days=days,
+        health_log=_ep_health_log,
+        telegram_log=_ep_tg_log,
+        coach_focus=focus_items if "focus_items" in dir() else [],
+        today=today,
+        orientation="tomorrow",
+    )
 
     prompt = f"""You are {ATHLETE_NAME}'s strength coach — not just a programming tool, but a real coach who cares.
 You are his mentor and father figure in training. You hold him accountable through goals, not guilt.
 
-Write a Telegram message for tonight's check-in (3-6 sentences). It must do ALL of the following:
-1. REASONING: Explain WHY tomorrow's session matters — reference the weekly intent, the training block phase,
-   or goal proximity. Be transparent: "Here's what I'm thinking..." / "We're doing this because..."
-2. SESSION SPECIFICS: Name tomorrow's session and its key lifts with exact weights/sets.
-   If execution quality coaching is relevant (based on recent RPE, session notes, or an observed pattern),
-   include one specific cue. Don't force it — only when it genuinely adds value.
-   CUE OPTIONS (choose the ONE most relevant, or skip if not needed):
-{tomorrow_cue_text or "  (no specific cues — use your judgment)"}
-3. RECOVERY TIP: One specific, actionable recovery or health recommendation for tonight.
-   Based on the health data below (sleep, nutrition, injury), give a concrete suggestion.
-   Examples: "7.5h sleep tonight — non-negotiable", "protein before bed",
-   "use binaural beats to wind down", "ice the elbow for 10 min", "visualize the squat before sleep"
-4. ONE QUESTION: Ask one specific, targeted question. Not generic. Reference actual data.
-   Examples: "How did today feel? I saw you did X — any notes on the elbow?",
-   "RPE on those squats?", "Did you eat enough today? Your last food quality score was 6."
-5. OPTIONAL CHALLENGE (only if challenge section below is filled): Mention it naturally, briefly.
-   Always frame it as transparent reasoning + athlete's choice.
+=== COACHING CONTEXT — WORK THROUGH ALL 4 LAYERS BEFORE WRITING ===
 
-CONTEXT:
-Tomorrow's session: {label} ({total_ex_count} exercises total)
+{cascade}
+
+=== CATCH-UP RESOLUTION RULE ===
+If Layer 3 shows any CONFLICT (pending catch-ups vs. planned session):
+- You MUST address it explicitly in your message.
+- Either: confirm tomorrow's plan is correct and explain why the catch-up will be done another day.
+- Or: override with the catch-up session and explain why it takes priority.
+- Do NOT silently ignore pending catch-ups and write about a different session as if the conflict doesn't exist.
+
+=== TOMORROW'S SESSION ===
+Session: {label} ({total_ex_count} exercises total)
 Key lifts: {lift_summary or 'see program'}
-Week {week_num}: {done_days}/{total_days} sessions done this week
-Weekly intent: {weekly_intent or 'not yet set — reference the current program phase'}
-Known schedule: {schedule_ctx or 'not established'}
-{f"Today's brief focused on: {daily_focus_today} (build on this, don't contradict)" if daily_focus_today else ""}
+CUE OPTIONS for {primary_tomorrow_lift or 'primary lift'} (choose ONE if relevant, skip if not):
+{tomorrow_cue_text or "  (no specific cues — use your judgment)"}
 
-LIFT STATE (for reasoning transparency):
-{lift_state_lines or '  (no state data)'}
-
-RECENT HEALTH (last 3 days):
+=== HEALTH & CONCERNS ===
+Recent health (last 3 days):
 {health_summary}
-
-ACTIVE CONCERNS (elbow, injury, follow-ups):
-{concerns_text}
-
-TODAY'S TELEGRAM CONVERSATION (do not repeat what was already discussed):
-{today_tg_text}
+Active concerns (elbow, injury, follow-ups): {concerns_text}
 {challenge_suggestion}
 
-PERSONA RULES:
-- Be a human coach. Warm but direct. No hollow phrases like "let's crush it" or "you got this" without substance.
-- Motivate through goals and reasoning, not empty energy.
-- Reference personal details when relevant (golfer's elbow, insulin resistance, travel schedule).
-- If sleep has been poor, mention it and explain the impact on the session.
-- End with the specific question — it shows you're paying attention.
-- Max 250 words. No greeting, no sign-off.
+=== OUTPUT RULES ===
+Write a Telegram message (3-6 sentences) that:
+1. REASONING: Explains WHY tomorrow matters — from Layer 1 goal trajectory + Layer 2 intent.
+   Be transparent: "Here's what I'm thinking..." / "We're doing this because..."
+2. SESSION SPECIFICS: Names session + key lifts + exact weights/sets. ONE cue if relevant.
+3. RECOVERY TIP: One specific, actionable recommendation based on health data above.
+4. ONE QUESTION: Specific, data-referenced. Not generic.
+5. OPTIONAL CHALLENGE: Only if challenge section is filled. Frame as transparent reasoning + athlete's choice.
+
+Persona: warm but direct. Motivate through goals and reasoning, not empty energy.
+Reference personal details when relevant (golfer's elbow, insulin resistance, travel schedule).
+Max 250 words. No greeting, no sign-off.
+TODAY'S TELEGRAM (do not repeat): {today_tg_text}
 
 Write the message now:"""
 

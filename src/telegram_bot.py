@@ -100,6 +100,64 @@ def _build_bot_context() -> str:
 
         # --- Tier 1: Coach State (compressed domain summaries — the coach's brain) ---
         coach_state = read_coach_state()
+        commands = read_commands()
+
+        # --- Cascade summary: 4-layer context for coherent reasoning ---
+        try:
+            from datetime import date as _date, timedelta as _timedelta
+            from run_coach import (
+                _build_cascade_l1, _build_cascade_l2,
+                _detect_session_conflicts,
+            )
+
+            _today = _date.today()
+            _today_str = str(_today)
+            _yesterday_str = str(_today - _timedelta(days=1))
+
+            # Layer 1 — strategic (no projections in bot context for speed)
+            _l1 = _build_cascade_l1(coach_state, None)
+
+            # Layer 2 — mesocycle (no projections)
+            _l2 = _build_cascade_l2(coach_state, None, [])
+
+            # Layer 3 — active commitments (the most critical for coherence)
+            _tomorrow_plan = coach_state.get("TOMORROW_PLAN", {}).get("summary", "")
+            _last_evening = coach_state.get("LAST_EVENING_PROTOCOL", {}).get("summary", "")
+            _last_brief_content = coach_state.get("LAST_BRIEF_CONTENT", {}).get("summary", "")
+            _last_brief_date = coach_state.get("LAST_BRIEF", {}).get("summary", "")
+            _conflict = _detect_session_conflicts(coach_state, commands)
+
+            _commitment_lines = []
+            if _tomorrow_plan and _last_evening == _yesterday_str:
+                _commitment_lines.append(f"  Committed (last night): {_tomorrow_plan}")
+            if _last_brief_content and _last_brief_date == _today_str:
+                _brief_text = _last_brief_content[len(_today_str) + 3:]
+                _commitment_lines.append(f"  Briefed (this morning): {_brief_text[:200]}")
+            if _conflict != "clear":
+                _commitment_lines.append(f"  {_conflict}")
+
+            _cascade_lines = []
+            if _l1:
+                _cascade_lines.append(_l1)
+            if _l2:
+                _cascade_lines.append(_l2)
+            if _commitment_lines:
+                _l3_block = (
+                    "LAYER 3 — ACTIVE COMMITMENTS\n"
+                    + "\n".join(_commitment_lines)
+                    + "\n  RULE: Before claiming anything about today's session, verify it matches these commitments.\n"
+                    "  If no commitment is set, derive from Layer 1 + Layer 2 — not from 'next undone session' alone.\n"
+                    "  If a CONFLICT exists, surface it explicitly rather than silently picking one side."
+                )
+                _cascade_lines.append(_l3_block)
+
+            if _cascade_lines:
+                sections.append(
+                    "=== COACHING CONTEXT (reason through this before responding) ===\n\n"
+                    + "\n\n".join(_cascade_lines)
+                )
+        except Exception as _e:
+            print(f"[BotContext] Cascade build failed (non-fatal): {_e}")
         if coach_state:
             lines = []
             for domain, data in coach_state.items():
@@ -905,9 +963,13 @@ async def _generate_response_with_tools(user_message: str, chat_id: int, bot,
         f"You are {ATHLETE_NAME}'s strength coach — the same coach who writes the daily email. "
         "One coach, two channels. Telegram is the primary coaching channel: real-time, direct, conversational. "
         "Email is the daily structured check-in. Everything here feeds back into the email and vice versa.\n\n"
-        "Call get_coach_brain first — it includes LAST_EMAIL (what the email said today and questions asked). "
-        "Don't repeat what was already covered in the email; build on it. "
-        "If the athlete is answering a question from the email, acknowledge it and move forward.\n\n"
+        "Call get_coach_brain first — it includes a COACHING CONTEXT cascade (4 layers: strategic, mesocycle, "
+        "active commitments, last 24h) AND the full Coach State.\n\n"
+        "COHERENCE RULE: Before making any claim about today's training session, read the COACHING CONTEXT "
+        "cascade in get_coach_brain output. Derive today's session from Layer 1 (strategic) + Layer 2 "
+        "(weekly intent) — do NOT re-derive independently from scratch. Validate against Layer 3 "
+        "(ACTIVE COMMITMENTS). If a CONFLICT exists in Layer 3, surface it to the athlete — never "
+        "silently pick one side.\n\n"
         + focus_note +
         "Read tools: get_coach_brain, get_lift_history, get_program_week, list_programs, "
         "get_projections, get_data_summary, get_health_log\n"
@@ -1184,6 +1246,28 @@ def _is_authorized(update: Update) -> bool:
 # Handlers
 # ---------------------------------------------------------------------------
 
+async def handle_endsession_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /endsession command — triggers structured post-session check-in immediately."""
+    if not _is_authorized(update):
+        return
+    extra = " ".join(context.args) if context.args else ""
+    user_text = extra or "session done"
+    _log_message("IN", f"/endsession {extra}".strip())
+    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
+    try:
+        import asyncio as _asyncio
+        loop = _asyncio.get_event_loop()
+        from run_coach import run_endsession_protocol
+        response = await loop.run_in_executor(
+            None, lambda: run_endsession_protocol(user_message=user_text, dry_run=False)
+        )
+    except Exception as e:
+        print(f"[EndSession/cmd] Failed: {e}")
+        response = "No pude cargar el check-in ahora mismo — mándame los datos directamente."
+    await update.message.reply_text(response)
+    _log_message("OUT", response)
+
+
 async def handle_start(update: Update, _context: ContextTypes.DEFAULT_TYPE) -> None:
     if not _is_authorized(update):
         return
@@ -1311,6 +1395,11 @@ def _classify_intent(message: str) -> str:
             system=(
                 "You are a message router for a strength coaching app. "
                 "Classify the athlete's message into exactly one category:\n"
+                "ENDSESSION — athlete signals they just finished a training session. Signals: "
+                "'/endsession', 'just finished training', 'done with the session', 'session done', "
+                "'workout done', 'just got done', 'finished my workout', 'salí del gym', "
+                "'terminé el entreno', 'acabo de entrenar', 'terminé de entrenar', "
+                "'acabo de salir', 'terminé la sesión'\n"
                 "WORKOUT — questions about today's session, exercise substitutions, sets/reps/weights, "
                 "fatigue during training, skipping/modifying a session\n"
                 "HEALTH — nutrition, recovery, sleep, blood tests, HRV, injury/pain management, supplements\n"
@@ -1323,12 +1412,12 @@ def _classify_intent(message: str) -> str:
                 "GENERAL — everything else: progress updates, checking in, motivation, life context, "
                 "adding notes or comments to the sheet, simple weight/reps tweaks, anything that is NOT "
                 "a full program redesign\n\n"
-                "Reply with exactly one word: WORKOUT, HEALTH, PROGRAM, META, or GENERAL."
+                "Reply with exactly one word: ENDSESSION, WORKOUT, HEALTH, PROGRAM, META, or GENERAL."
             ),
             messages=[{"role": "user", "content": message}],
         )
         intent = result.content[0].text.strip().upper()
-        if intent in ("WORKOUT", "HEALTH", "PROGRAM", "META", "GENERAL"):
+        if intent in ("ENDSESSION", "WORKOUT", "HEALTH", "PROGRAM", "META", "GENERAL"):
             return intent
         return "GENERAL"
     except Exception as e:
@@ -1416,6 +1505,20 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             return
         except Exception as e:
             print(f"[WorkoutToolUse] Failed (falling back): {e}")
+
+    elif intent == "ENDSESSION":
+        try:
+            import asyncio as _asyncio
+            loop = _asyncio.get_event_loop()
+            from run_coach import run_endsession_protocol
+            response = await loop.run_in_executor(
+                None, lambda: run_endsession_protocol(user_message=user_text, dry_run=False)
+            )
+            await update.message.reply_text(response)
+            _log_message("OUT", response)
+            return
+        except Exception as e:
+            print(f"[EndSession] Failed (falling back to GENERAL): {e}")
 
     elif intent == "META":
         try:
@@ -1759,6 +1862,7 @@ def main() -> None:
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", handle_start))
+    app.add_handler(CommandHandler("endsession", handle_endsession_cmd))
     app.add_handler(CommandHandler("summary", handle_summary))
     app.add_handler(CommandHandler("week", handle_week))
     app.add_handler(CommandHandler("chart", handle_chart))
