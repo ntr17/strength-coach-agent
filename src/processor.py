@@ -261,6 +261,24 @@ def _dispatch_events(events: list[dict], dry_run: bool = False) -> int:
                     )
                     # Write RPE to program sheet if present (non-fatal)
                     _try_write_rpe_to_sheet(parsed)
+                    # Auto-resolve PENDING_CATCHUPs whose planned date <= this lift's date
+                    # (if athlete was active enough to log a lift, the catch-up either happened or was dropped)
+                    try:
+                        import re as _re_catchup
+                        from memory import read_commands as _rc, mark_command_applied as _mca
+                        _lift_date = parsed.get("date", today)
+                        _open = [c for c in _rc()
+                                 if c.get("Command", "").upper() == "PENDING_CATCHUP"
+                                 and c.get("Applied", "").upper() not in ("Y", "DECLINED")]
+                        for _cmd in _open:
+                            _m = _re_catchup.search(r"(\d{4}-\d{2}-\d{2})", _cmd.get("Value", ""))
+                            if _m and _m.group(1) <= _lift_date:
+                                _ridx = _cmd.get("_row_index")
+                                if _ridx:
+                                    _mca(_ridx)
+                                    print(f"  [Processor] Resolved PENDING_CATCHUP: {_cmd.get('Value','')[:60]}")
+                    except Exception:
+                        pass
                 else:
                     append_coach_focus("LANDMARK", f"[Lift update via Telegram] {fact}", last_mentioned=today)
                 dispatched += 1

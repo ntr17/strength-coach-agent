@@ -1584,6 +1584,73 @@ def _detect_program_phase(week_num: int, total_weeks: int) -> str:
         return "taper / program end"
 
 
+def _auto_cleanup_stale_catchups(commands: list, current_week_days: list) -> int:
+    """
+    Auto-resolve PENDING_CATCHUP commands that are no longer relevant.
+
+    Two resolution triggers:
+    1. The referenced session Day N is Done=True in current_week_days (sheet is ground truth).
+    2. The planned date in the fact is >7 days ago (stale — athlete either did it or skipped it).
+
+    Returns count of commands resolved. Should be called before cascade builds
+    so conflicts are never surfaced for completed sessions.
+    """
+    import re as _re2
+
+    open_catchups = [
+        c for c in commands
+        if c.get("Command", "").upper() == "PENDING_CATCHUP"
+        and c.get("Applied", "").upper() not in ("Y", "DECLINED")
+    ]
+    if not open_catchups:
+        return 0
+
+    # Build day-done map from current week: {day_number: True/False}
+    day_done: dict = {}
+    for i, day in enumerate(current_week_days, start=1):
+        exercises = day.get("exercises", [])
+        day_done[i] = sum(1 for ex in exercises if ex.get("done") is True) > 0
+
+    try:
+        from memory import mark_command_applied
+    except ImportError:
+        return 0
+
+    stale_cutoff = str(date.today() - timedelta(days=7))
+    resolved = 0
+
+    for cmd in open_catchups:
+        val = cmd.get("Value", "")
+        row_idx = cmd.get("_row_index")
+        if not row_idx:
+            continue
+
+        reason = None
+
+        # Check 1: session is Done in the sheet
+        m_day = _re2.search(r"Day\s+(\d+)", val, _re2.I)
+        if m_day:
+            day_num = int(m_day.group(1))
+            if day_done.get(day_num, False):
+                reason = f"Day {day_num} is Done in sheet"
+
+        # Check 2: planned date is >7 days ago (stale)
+        if not reason:
+            m_date = _re2.search(r"(\d{4}-\d{2}-\d{2})", val)
+            if m_date and m_date.group(1) <= stale_cutoff:
+                reason = f"planned date {m_date.group(1)} is >7 days ago"
+
+        if reason:
+            try:
+                mark_command_applied(row_idx)
+                resolved += 1
+                print(f"  [CatchupCleanup] Resolved ({reason}): {val[:80]}")
+            except Exception as _e:
+                print(f"  [CatchupCleanup] Failed to resolve '{val[:40]}': {_e}")
+
+    return resolved
+
+
 def _detect_session_conflicts(coach_state: dict, commands: list) -> str:
     """
     Detect conflicts between TOMORROW_PLAN and unresolved pending catch-ups.
@@ -4139,6 +4206,18 @@ def run_evening_protocol(dry_run: bool = False):
 
     current_week = program_data.get("current_week", {})
     days = current_week.get("days", [])
+
+    # Auto-resolve stale PENDING_CATCHUPs before cascade runs (sheet is ground truth)
+    try:
+        _ep_commands_early = []
+        from memory import read_commands as _rc_early
+        _ep_commands_early = _rc_early()
+        _resolved = _auto_cleanup_stale_catchups(_ep_commands_early, days)
+        if _resolved:
+            # Reload commands so cascade sees the resolved state
+            _ep_commands_early = _rc_early()
+    except Exception as _e:
+        print(f"  Catchup cleanup failed (non-fatal): {_e}")
 
     # Find next incomplete session
     next_session = None
