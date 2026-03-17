@@ -4352,7 +4352,7 @@ Write the message now:"""
     try:
         client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
         result = client.messages.create(
-            model=CLAUDE_SONNET,
+            model=CLAUDE_MODEL,
             max_tokens=600,
             messages=[{"role": "user", "content": prompt}],
         )
