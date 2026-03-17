@@ -69,9 +69,11 @@ import sys as _sys
 _sys.path.insert(0, str(Path(__file__).parent))
 
 # CURRENT_WEEK env var is an optional manual override; normally computed from date.
+# Uses resolve_program_start_date() so it reads from the Active Sheets registry first,
+# falling back to PROGRAM_START_DATE env var or the hardcoded default — not a bare fallback.
 _CURRENT_WEEK_OVERRIDE = os.environ.get("CURRENT_WEEK", "")
 CURRENT_WEEK = int(_CURRENT_WEEK_OVERRIDE) if _CURRENT_WEEK_OVERRIDE else compute_current_week(
-    PROGRAM_START_DATE or "2026-01-13"
+    resolve_program_start_date()
 )
 EMAIL_HOUR = int(os.environ.get("EMAIL_HOUR", "22"))  # 10 PM default
 

@@ -552,6 +552,68 @@ def read_program_data(week_num: Optional[int] = None, lookback: int = 3,
 
 
 # ---------------------------------------------------------------------------
+# Sheet-derived week inference
+# ---------------------------------------------------------------------------
+
+def infer_week_from_sheet(sheet_id: str = None, max_weeks: int = 35) -> int:
+    """
+    Infer the current training week from actual sheet data.
+
+    Searches week tabs from (calendar_week+2) downwards. Returns:
+    - The highest week that has at least one Done=Yes entry and is NOT fully done
+      (i.e., at least one named exercise is undone) → athlete is still in this week.
+    - If the highest started week IS fully done → return week+1 (athlete finished it).
+    - Falls back to compute_current_week() if sheet is unreadable or no activity found.
+
+    This prevents the calendar-math off-by-one that fires when the athlete hasn't started
+    the calendar-computed week yet but still has undone sessions in the previous week.
+    """
+    try:
+        calendar_week = compute_current_week(resolve_program_start_date())
+        client = get_client()
+        sheet = client.open_by_key(get_program_sheet_id(sheet_id))
+
+        scan_start = min(calendar_week + 2, max_weeks)
+        scan_end = max(1, calendar_week - 4)
+
+        for w in range(scan_start, scan_end - 1, -1):
+            data = None
+            for tab_name in (f"Week {w}", f"Semana {w}", f"W{w}"):
+                try:
+                    ws = sheet.worksheet(tab_name)
+                    data = _parse_week_tab(ws.get_all_values())
+                    break
+                except gspread.WorksheetNotFound:
+                    continue
+
+            if data is None:
+                continue
+
+            named_exs = [
+                ex
+                for day in data.get("days", [])
+                for ex in day.get("exercises", [])
+                if ex.get("name")
+            ]
+            if not named_exs:
+                continue
+
+            done_count = sum(1 for ex in named_exs if ex.get("done") is True)
+            if done_count == 0:
+                continue  # week not started — skip
+
+            # Found the highest week with any activity
+            all_done = done_count == len(named_exs)
+            if all_done:
+                return min(w + 1, max_weeks)  # fully complete — athlete is on next week
+            return w  # in progress
+
+        return calendar_week
+    except Exception:
+        return compute_current_week(resolve_program_start_date())
+
+
+# ---------------------------------------------------------------------------
 # Write-back (used only when agent decides to update the sheet)
 # ---------------------------------------------------------------------------
 

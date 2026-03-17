@@ -151,6 +151,17 @@ def _build_bot_context() -> str:
                 )
                 _cascade_lines.append(_l3_block)
 
+            # Layer 4 — last 24h active conversation
+            _current_flow = coach_state.get("CURRENT_FLOW", {}).get("summary", "")
+            if _current_flow and _current_flow.startswith(f"endsession | {_today_str}"):
+                _l4_block = (
+                    "LAYER 4 — ACTIVE CONVERSATION\n"
+                    + f"  {_current_flow}\n"
+                    + "  RULE: The athlete's reply is likely answering these questions — continue the thread, "
+                    "don't start fresh. Log any RPE or session data they provide."
+                )
+                _cascade_lines.append(_l4_block)
+
             if _cascade_lines:
                 sections.append(
                     "=== COACHING CONTEXT (reason through this before responding) ===\n\n"
@@ -970,6 +981,9 @@ async def _generate_response_with_tools(user_message: str, chat_id: int, bot,
         "(weekly intent) — do NOT re-derive independently from scratch. Validate against Layer 3 "
         "(ACTIVE COMMITMENTS). If a CONFLICT exists in Layer 3, surface it to the athlete — never "
         "silently pick one side.\n\n"
+        "NARRATION RULE: Every coaching response must include at least ONE sentence that shows reasoning. "
+        "Pattern: 'Veo que [dato] — esto [qué significa] — [recomendación concreta].' "
+        "Do not just state what to do — explain why based on actual data from the context.\n\n"
         + focus_note +
         "Read tools: get_coach_brain, get_lift_history, get_program_week, list_programs, "
         "get_projections, get_data_summary, get_health_log\n"

@@ -1515,6 +1515,29 @@ _re_rpe = _re_module.compile(r"@?RPE\s*\d", _re_module.IGNORECASE)
 # Cascade context helpers — multi-layer coaching coherence system
 # ---------------------------------------------------------------------------
 
+def _get_authoritative_week_num() -> int:
+    """
+    Return the current training week using the sheet as ground truth.
+
+    Calls infer_week_from_sheet() which scans actual Done entries — this handles
+    the off-by-one that fires when calendar math says Week 10 but the athlete is
+    still training Week 9 sessions. Falls back to calendar computation on error.
+    Prints a warning when sheet-derived and calendar-derived weeks disagree.
+    """
+    try:
+        from sheets import infer_week_from_sheet
+        sheet_week = infer_week_from_sheet()
+        calendar_week = compute_current_week(resolve_program_start_date())
+        if abs(sheet_week - calendar_week) > 1:
+            print(
+                f"  [WeekCheck] Sheet says Week {sheet_week}, "
+                f"calendar says Week {calendar_week} — using sheet."
+            )
+        return sheet_week
+    except Exception:
+        return compute_current_week(resolve_program_start_date())
+
+
 _MUSCLE_HINTS: dict[str, str] = {
     "squat": "quad/posterior", "deadlift": "posterior/back", "rdl": "posterior",
     "sumo": "posterior/back", "trap bar": "posterior/back",
@@ -2927,7 +2950,7 @@ def run_brief(dry_run: bool = False):
     from memory import read_coach_state, upsert_coach_state, read_commitments
 
     today = date.today()
-    week_num = compute_current_week(resolve_program_start_date())
+    week_num = _get_authoritative_week_num()
     print(f"[{today}] Running pre-session brief (Week {week_num})...")
 
     # Dedup: only send once per day
@@ -3088,7 +3111,11 @@ TECHNIQUE CUE OPTIONS FOR {primary_lift.upper() or "TODAY'S MAIN LIFT"}:
 3. If Layer 3 COMMITMENT (last night) matches today's session, build on it — do not re-derive independently.
 4. Lead with the single most important thing across all 4 layers (cue, goal connection, concern, readiness).
 5. Reference actual numbers, actual lift names, actual context. Never generic.
-6. 2–4 sentences MAX. No greeting, no sign-off. Every brief must feel different from the last."""
+6. 2–4 sentences MAX. No greeting, no sign-off. Every brief must feel different from the last.
+
+NARRACIÓN OBLIGATORIA: Incluye al menos UNA frase que conecte observación, significado y acción.
+Plantilla: Veo que [dato] — esto [qué significa] — [recomendación concreta].
+Ejemplo: Veo que las últimas 3 sentadillas fueron RPE 9 — el peso está cerca del límite — si el primer set se siente cargado hoy, baja 2.5kg sin pensarlo."""
 
     # Enforce athlete output preferences as hard constraints
     try:
@@ -3116,6 +3143,8 @@ TECHNIQUE CUE OPTIONS FOR {primary_lift.upper() or "TODAY'S MAIN LIFT"}:
         if sent:
             print(f"  Brief sent: {brief_msg[:80]}")
             upsert_coach_state("LAST_BRIEF", str(today), "HIGH")
+            # Clear any stale CURRENT_FLOW from a previous session — new day, fresh start
+            upsert_coach_state("CURRENT_FLOW", "", "LOW")
             # Store full brief content so subsequent messages can verify consistency (Layer 4)
             upsert_coach_state(
                 "LAST_BRIEF_CONTENT",
@@ -3149,7 +3178,7 @@ def run_post_session(dry_run: bool = False):
     from memory import read_coach_state, upsert_coach_state, read_commitments
 
     today = date.today()
-    week_num = compute_current_week(resolve_program_start_date())
+    week_num = _get_authoritative_week_num()
     print(f"[{today}] Running post-session check-in (Week {week_num})...")
 
     from memory import read_telegram_log
@@ -3356,7 +3385,7 @@ def run_endsession_protocol(user_message: str = "", dry_run: bool = False) -> st
     )
 
     today = date.today()
-    week_num = compute_current_week(resolve_program_start_date())
+    week_num = _get_authoritative_week_num()
     print(f"[{today}] Running endsession protocol (Week {week_num})...")
 
     coach_state = read_coach_state()
@@ -3498,7 +3527,9 @@ SESSION ORDER (fatigue accumulates top to bottom — use this to interpret perfo
 - Reference actual exercise names, positions, muscle groups from the ordered list above.
 - Direct coach voice. No sign-off.
 - Do NOT re-ask anything already in WHAT THE ATHLETE ALREADY REPORTED.
-- Write in Spanish (the athlete's primary language)."""
+- Write in Spanish (the athlete's primary language).
+- NARRACIÓN OBLIGATORIA: Al menos UNA frase debe mostrar tu razonamiento.
+  Plantilla: Veo que [dato] — esto [qué significa] — [pregunta o recomendación concreta]."""
 
     # Enforce athlete output preferences
     try:
@@ -3526,6 +3557,16 @@ SESSION ORDER (fatigue accumulates top to bottom — use this to interpret perfo
         if sent:
             print(f"  EndSession check-in sent: {response[:80]}")
             upsert_coach_state("LAST_POST_SESSION", str(today), "HIGH")
+            # Track what was asked so the bot can continue this conversation if athlete replies
+            _questions_summary = (
+                f"RPE for completed lifts in {session_label}"
+                + (f"; skip reasons for {', '.join(ex['name'] for ex in exercises if ex.get('done') is False and ex.get('name'))[:60]}" if any(ex.get('done') is False for ex in exercises) else "")
+            )
+            upsert_coach_state(
+                "CURRENT_FLOW",
+                f"endsession | {today} | {session_label} | asked: {_questions_summary[:150]}",
+                "HIGH",
+            )
         return response
 
     except Exception as e:
@@ -3547,7 +3588,7 @@ def run_nudge(dry_run: bool = False):
     from memory import read_coach_state, upsert_coach_state
 
     today = date.today()
-    week_num = compute_current_week(resolve_program_start_date())
+    week_num = _get_authoritative_week_num()
     print(f"[{today}] Running session nudge check (Week {week_num})...")
 
     try:
@@ -3626,7 +3667,7 @@ def run_weekly_schedule_discovery(dry_run: bool = False):
     from memory import read_coach_state, upsert_coach_state
 
     today = date.today()
-    week_num = compute_current_week(resolve_program_start_date())
+    week_num = _get_authoritative_week_num()
     print(f"[{today}] Checking weekly schedule discovery (Week {week_num})...")
 
     # Dedup: only send once per rolling 6-day window
@@ -3936,7 +3977,7 @@ def run_evening_protocol(dry_run: bool = False):
 
     today = date.today()
     tomorrow = today + timedelta(days=1)
-    week_num = compute_current_week(resolve_program_start_date())
+    week_num = _get_authoritative_week_num()
     print(f"[{today}] Running evening protocol (Week {week_num})...")
 
     # Dedup: only send once per day
@@ -4132,13 +4173,6 @@ You are his mentor and father figure in training. You hold him accountable throu
 
 {cascade}
 
-=== CATCH-UP RESOLUTION RULE ===
-If Layer 3 shows any CONFLICT (pending catch-ups vs. planned session):
-- You MUST address it explicitly in your message.
-- Either: confirm tomorrow's plan is correct and explain why the catch-up will be done another day.
-- Or: override with the catch-up session and explain why it takes priority.
-- Do NOT silently ignore pending catch-ups and write about a different session as if the conflict doesn't exist.
-
 === TOMORROW'S SESSION ===
 Session: {label} ({total_ex_count} exercises total)
 Key lifts: {lift_summary or 'see program'}
@@ -4151,18 +4185,31 @@ Recent health (last 3 days):
 Active concerns (elbow, injury, follow-ups): {concerns_text}
 {challenge_suggestion}
 
-=== OUTPUT RULES ===
-Write a Telegram message (3-6 sentences) that:
-1. REASONING: Explains WHY tomorrow matters — from Layer 1 goal trajectory + Layer 2 intent.
-   Be transparent: "Here's what I'm thinking..." / "We're doing this because..."
-2. SESSION SPECIFICS: Names session + key lifts + exact weights/sets. ONE cue if relevant.
-3. RECOVERY TIP: One specific, actionable recommendation based on health data above.
-4. ONE QUESTION: Specific, data-referenced. Not generic.
-5. OPTIONAL CHALLENGE: Only if challenge section is filled. Frame as transparent reasoning + athlete's choice.
+=== HOW TO WRITE THIS MESSAGE ===
+Write this as if you're texting your athlete — warm, direct, personal. NOT a schedule notification.
 
-Persona: warm but direct. Motivate through goals and reasoning, not empty energy.
-Reference personal details when relevant (golfer's elbow, insulin resistance, travel schedule).
-Max 250 words. No greeting, no sign-off.
+1. Open with ONE real insight that connects tomorrow to something that actually matters right now.
+   Pick whichever is truest from the cascade:
+   - A goal he's closing in on ("estás a 2.5kg del objetivo en sentadilla")
+   - A pattern you're seeing ("llevas dos semanas fuerte — este bloque está funcionando")
+   - A readiness note ("dormiste menos de 7h dos días seguidos — arranca con el primer set más conservador")
+   - A strategic context point ("esta semana eleva el volumen — hoy es el pico")
+
+2. Then 1-2 sentences on the actual session: name the key lift + weight. ONE cue if it adds value.
+
+3. End with ONE specific question. Not "¿cómo te sientes?" — something real:
+   e.g. "¿Cómo quedó el codo hoy?", "¿Puedes entrenar mañana a la mañana o más tarde?"
+
+4. If Layer 3 shows a CONFLICT (pending catch-ups vs. tomorrow's plan), address it conversationally —
+   don't list it as a bug report. Just: "Oye, sigo con el catch-up de [X] o vamos con [Y] mañana?"
+
+NARRACIÓN OBLIGATORIA: La respuesta debe incluir al menos UNA frase que muestre tu razonamiento.
+Plantilla: "Veo que [dato] — esto [qué significa] — [recomendación]."
+Ejemplo: "Veo que las últimas 3 sentadillas fueron RPE 9 — el peso está cerca del límite — si el primer
+set mañana se siente cargado, baja 2.5kg sin pensarlo."
+
+No bullet lists. No numbered points. No headers. Conversational Spanish.
+Max 200 words. This is a text message, not a report.
 TODAY'S TELEGRAM (do not repeat): {today_tg_text}
 
 Write the message now:"""
@@ -4183,8 +4230,8 @@ Write the message now:"""
     try:
         client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
         result = client.messages.create(
-            model=CLAUDE_HAIKU,
-            max_tokens=300,
+            model=CLAUDE_SONNET,
+            max_tokens=600,
             messages=[{"role": "user", "content": prompt}],
         )
         msg = result.content[0].text.strip()
