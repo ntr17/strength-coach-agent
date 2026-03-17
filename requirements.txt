@@ -20,5 +20,8 @@ pypdf>=4.0.0
 # Voice transcription (optional — needed for Whisper voice message support)
 openai>=1.0.0
 
+# Garmin Connect integration
+garminconnect>=0.2.22
+
 # Development (optional)
 pytest>=7.4.0

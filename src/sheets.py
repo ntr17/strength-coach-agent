@@ -110,6 +110,7 @@ def _detect_exercise_columns(header_row: list) -> dict:
         "actual": 4,
         "program_note": None,
         "session_note": None,
+        "rpe": None,
     }
 
     for i, cell in enumerate(header_row):
@@ -130,6 +131,8 @@ def _detect_exercise_columns(header_row: list) -> dict:
             col_map["program_note"] = i
         elif any(kw in label for kw in ("session note", "athlete note", "my note", "user note")):
             col_map["session_note"] = i
+        elif any(kw in label for kw in ("rpe", "effort", "exertion", "rpe/rir")):
+            col_map["rpe"] = i
         elif label in ("notes", "note") and col_map["program_note"] is None and col_map["session_note"] is None:
             # Single notes column — treat as program note; agent context will explain the distinction
             col_map["program_note"] = i
@@ -263,7 +266,7 @@ def _parse_week_tab(rows: list[list]) -> dict:
 
             # Use detected col_map if available, else fall back to positional defaults
             cm = col_map or {"weight": 1, "sets_reps": 2, "done": 3, "actual": 4,
-                             "program_note": 5, "session_note": None}
+                             "program_note": 5, "session_note": None, "rpe": None}
 
             exercise = {
                 "name": col0,
@@ -273,6 +276,7 @@ def _parse_week_tab(rows: list[list]) -> dict:
                 "actual": _cell(cm["actual"]),
                 "program_note": _cell(cm.get("program_note")),
                 "session_note": _cell(cm.get("session_note")),
+                "rpe": _cell(cm.get("rpe")),
             }
             current_day["exercises"].append(exercise)
 
@@ -681,7 +685,6 @@ def append_daily_log_entry(entry: dict) -> bool:
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    import json as _json
     import sys
 
     sys.stdout.reconfigure(encoding="utf-8")

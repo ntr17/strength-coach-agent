@@ -259,6 +259,8 @@ def _dispatch_events(events: list[dict], dry_run: bool = False) -> int:
                         f"{parsed.get('actual', '')} on {parsed['date']}",
                         last_mentioned=today,
                     )
+                    # Write RPE to program sheet if present (non-fatal)
+                    _try_write_rpe_to_sheet(parsed)
                 else:
                     append_coach_focus("LANDMARK", f"[Lift update via Telegram] {fact}", last_mentioned=today)
                 dispatched += 1
@@ -433,6 +435,53 @@ def _normalize_date(date_str: str, reference_date: str = None) -> str:
                     pass
 
     return str(today)  # fallback
+
+
+def _try_write_rpe_to_sheet(parsed: dict, week_num: int = None) -> None:
+    """
+    If a parsed LIFT_UPDATE contains RPE/RIR data, write it to the program sheet's RPE column.
+    Called after a LIFT_UPDATE is logged to memory — best-effort, non-fatal.
+    No LLM parse needed: op dict is built directly from already-parsed data.
+    """
+    import re as _rpe_re
+    actual = parsed.get("actual", "")
+    notes = parsed.get("notes", "")
+
+    rpe_match = _rpe_re.search(r"@?RPE\s*(\d+(?:\.\d+)?)", actual + " " + notes, _rpe_re.I)
+    rir_match = _rpe_re.search(r"RIR\s*(\d+(?:\.\d+)?)", actual + " " + notes, _rpe_re.I)
+
+    if not rpe_match and not rir_match:
+        return  # No RPE/RIR data — nothing to write
+
+    rpe_val = rpe_match.group(1) if rpe_match else None
+    rir_val = rir_match.group(1) if rir_match else None
+
+    cell_value = rpe_val or ""
+    if rir_val:
+        cell_value += f" / RIR {rir_val}" if cell_value else f"RIR {rir_val}"
+
+    try:
+        if week_num is None:
+            from config import compute_current_week, resolve_program_start_date
+            week_num = compute_current_week(resolve_program_start_date())
+
+        from config import PROGRAM_SHEET_ID
+        from sheets import get_client
+        from writeback import _apply_rpe_log, _get_week_tab
+
+        client = get_client()
+        sheet = client.open_by_key(PROGRAM_SHEET_ID)
+
+        op = {
+            "week": week_num,
+            "exercise": parsed.get("exercise_name", ""),
+            "rpe": cell_value,
+        }
+        success, msg = _apply_rpe_log(sheet, op)
+        if success:
+            print(f"  [RPE Write-back] {msg}")
+    except Exception as e:
+        print(f"  [RPE Write-back] Non-fatal: {e}")
 
 
 def _parse_lift_update_fact(fact: str, today: str) -> dict | None:

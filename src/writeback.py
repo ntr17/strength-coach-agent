@@ -147,6 +147,8 @@ def _build_col_map_from_header(header_row: list) -> dict:
             col_map.setdefault("done", col)
         elif "actual" in label or "performed" in label or "realizado" in label:
             col_map.setdefault("actual", col)
+        elif any(kw in label for kw in ("rpe", "effort", "exertion", "rpe/rir")):
+            col_map.setdefault("rpe", col)
         elif any(kw in label for kw in _NOTE_KEYWORDS):
             # Prefer "session note" / "athlete note" variants as session_note
             if any(kw in label for kw in ("session", "athlete", "my note", "anotaci")):
@@ -429,6 +431,62 @@ def _apply_weight_scale(sheet, op: dict) -> tuple:
     return total_updated > 0, msg
 
 
+def _apply_rpe_log(sheet, op: dict) -> tuple:
+    """
+    Write RPE (and optionally RIR) to the RPE column cell for a specific exercise.
+    Low-stakes write — no confirmation needed.
+
+    op fields:
+      week:     int
+      exercise: str
+      rpe:      str | float   (the value to write, e.g. "8" or "8 / RIR 2")
+      day:      int | None    (optional — narrows search to a specific day section)
+
+    Fallback strategy when no RPE column exists:
+      - Appends "RPE X" to the session_note / notes cell so the existing
+        has_rpe regex (@?RPE \\s*\\d) still fires on the next read pass.
+      - If no notes column exists either, returns (False, ...) — silent skip.
+    """
+    week = op.get("week")
+    exercise = op.get("exercise")
+    rpe_value = op.get("rpe")
+
+    if not all([week, exercise, rpe_value is not None]):
+        return False, "Missing week, exercise, or rpe for RPE_LOG"
+
+    ws = _get_week_tab(sheet, week)
+    if not ws:
+        return False, f"Week {week} tab not found"
+
+    all_values = ws.get_all_values()
+    row_idx, col_map = _find_exercise_row(all_values, exercise, op.get("day"))
+    if not row_idx:
+        return False, f"Exercise '{exercise}' not found in Week {week}"
+
+    rpe_col = col_map.get("rpe")
+
+    if rpe_col:
+        # Dedicated RPE column found — write directly
+        ws.update_cell(row_idx, rpe_col, str(rpe_value))
+        return True, f"Logged RPE {rpe_value} for '{exercise}' in Week {week}"
+
+    # No RPE column — fall back to appending to session_note / notes cell
+    notes_col = col_map.get("session_note") or col_map.get("notes")
+    if not notes_col:
+        return False, f"No RPE or notes column found in Week {week} — RPE not written to sheet"
+
+    row_data = all_values[row_idx - 1]
+    existing = str(row_data[notes_col - 1]).strip() if len(row_data) >= notes_col else ""
+
+    # Avoid duplicate RPE entries
+    if re.search(r"@?RPE\s*\d", existing, re.IGNORECASE):
+        return True, f"RPE already recorded for '{exercise}' in Week {week} (skipped duplicate)"
+
+    combined = f"{existing} | RPE {rpe_value}".lstrip(" |") if existing else f"RPE {rpe_value}"
+    ws.update_cell(row_idx, notes_col, combined)
+    return True, f"Logged RPE {rpe_value} for '{exercise}' in Week {week} (appended to notes)"
+
+
 # ---------------------------------------------------------------------------
 # Main entry point
 # ---------------------------------------------------------------------------
@@ -481,6 +539,8 @@ def apply_writeback(proposal_text: str, current_week: int = None,
             return _apply_note_add(sheet, operation)
         elif op_type == "WEIGHT_SCALE":
             return _apply_weight_scale(sheet, operation)
+        elif op_type == "RPE_LOG":
+            return _apply_rpe_log(sheet, operation)
         else:
             return False, f"Unsupported operation type: {op_type}"
     except Exception as e:

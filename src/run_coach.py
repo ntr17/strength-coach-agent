@@ -59,6 +59,8 @@ def parse_args():
                         help="Synthesize steer co conversation + send comprehensive email.")
     parser.add_argument("--meta", action="store_true",
                         help="Coach self-critique: analyse coaching quality + surface improvements via Telegram.")
+    parser.add_argument("--sync-garmin", action="store_true",
+                        help="Fetch Garmin recovery data for last 14 days → Health Log. No email, no Telegram.")
     return parser.parse_args()
 
 
@@ -2203,6 +2205,120 @@ def _select_lift_cue(lift_name: str, coach_state: dict,
     return result[:3]
 
 
+def _build_garmin_summary(metrics_list: list) -> str:
+    """
+    Produce a compact Coach State GARMIN_SUMMARY from a list of daily metric dicts.
+    Called after sync_garmin() to persist a human-readable summary for every prompt.
+    """
+    if not metrics_list:
+        return ""
+
+    hrv_vals = [m["hrv_ms"] for m in metrics_list if m.get("hrv_ms")]
+    sleep_vals = [m["sleep_hrs"] for m in metrics_list if m.get("sleep_hrs")]
+    rhr_vals = [m["resting_hr"] for m in metrics_list if m.get("resting_hr")]
+    bb_vals = [m["body_battery_end"] for m in metrics_list if m.get("body_battery_end") is not None]
+
+    parts = []
+
+    if hrv_vals:
+        avg = round(sum(hrv_vals) / len(hrv_vals))
+        parts.append(f"HRV {len(hrv_vals)}d avg: {avg}ms (range {min(hrv_vals)}–{max(hrv_vals)})")
+        # Trend: compare first half vs second half (newest first in list)
+        if len(hrv_vals) >= 4:
+            newer = hrv_vals[:len(hrv_vals) // 2]
+            older = hrv_vals[len(hrv_vals) // 2:]
+            diff = round(sum(newer) / len(newer) - sum(older) / len(older), 1)
+            if diff > 3:
+                parts.append("HRV trending up (recovering)")
+            elif diff < -3:
+                parts.append("HRV trending down (accumulating fatigue)")
+
+    if sleep_vals:
+        avg = round(sum(sleep_vals) / len(sleep_vals), 1)
+        parts.append(f"Sleep {avg}h avg")
+
+    if rhr_vals:
+        avg = round(sum(rhr_vals) / len(rhr_vals))
+        parts.append(f"RHR {avg}bpm")
+
+    if bb_vals:
+        # Show trend: first entry is most recent (yesterday), last is oldest
+        recent = bb_vals[0] if bb_vals else None
+        oldest = bb_vals[-1] if len(bb_vals) > 1 else None
+        if recent is not None:
+            trend_str = ""
+            if oldest is not None and len(bb_vals) >= 3:
+                if recent > oldest + 10:
+                    trend_str = " (recovering)"
+                elif recent < oldest - 10:
+                    trend_str = " (declining)"
+            parts.append(f"Body battery end-of-day: {recent}{trend_str}")
+
+    return ". ".join(parts) + "." if parts else ""
+
+
+def sync_garmin(days: int = 7, dry_run: bool = False) -> list:
+    """
+    Fetch Garmin data for last N days and upsert into Health Log.
+    Generates + stores GARMIN_SUMMARY in Coach State.
+    Called from run_proactive() and --sync-garmin flag.
+
+    Returns list of synced metric dicts (empty on failure or missing credentials).
+    Non-fatal: any error is caught and printed, coach continues normally.
+    """
+    try:
+        from garmin import GarminClient
+    except ImportError:
+        print("  [Garmin] garminconnect not installed — skipping. Run: pip install garminconnect")
+        return []
+
+    client = GarminClient()
+    if not client.is_available():
+        print("  [Garmin] No credentials or login failed — skipping.")
+        return []
+
+    print(f"  [Garmin] Fetching last {days} days of recovery data...")
+    metrics_list = client.fetch_range(days=days)
+
+    if not metrics_list:
+        print("  [Garmin] No data returned.")
+        return []
+
+    if dry_run:
+        print(f"  [DRY RUN] Would sync {len(metrics_list)} Garmin day(s):")
+        for m in metrics_list:
+            print(f"    {m['date']}: HRV={m.get('hrv_ms')}ms sleep={m.get('sleep_hrs')}h "
+                  f"RHR={m.get('resting_hr')}bpm BB_end={m.get('body_battery_end')}")
+        summary = _build_garmin_summary(metrics_list)
+        print(f"  [DRY RUN] GARMIN_SUMMARY would be: {summary}")
+        return metrics_list
+
+    from memory import upsert_health_log_row, upsert_coach_state
+
+    synced = 0
+    for m in metrics_list:
+        updates = {}
+        if m.get("steps") is not None:
+            updates["Steps"] = str(m["steps"])
+        if m.get("sleep_hrs") is not None:
+            updates["Sleep (hrs)"] = str(m["sleep_hrs"])
+        if m.get("hrv_ms") is not None:
+            updates["HRV (ms)"] = str(m["hrv_ms"])
+        if m.get("body_battery_end") is not None:
+            updates["Body Battery"] = str(m["body_battery_end"])
+        if updates:
+            result = upsert_health_log_row(m["date"], updates)
+            if result in ("inserted", "updated"):
+                synced += 1
+
+    summary = _build_garmin_summary(metrics_list)
+    if summary:
+        upsert_coach_state("GARMIN_SUMMARY", summary, "HIGH")
+
+    print(f"  [Garmin] Synced {synced}/{len(metrics_list)} day(s). Summary: {summary[:100]}")
+    return metrics_list
+
+
 def run_proactive(dry_run: bool = False):
     """
     Lightweight proactive check-in. No email, no program sheet, no Tier 0 archives.
@@ -2219,6 +2335,12 @@ def run_proactive(dry_run: bool = False):
 
     today = date.today()
     print(f"[{today}] Running proactive check-in pass...")
+
+    # Sync Garmin recovery data before reading health_log so the pass sees fresh data
+    try:
+        sync_garmin(days=7, dry_run=dry_run)
+    except Exception as _garmin_err:
+        print(f"  Garmin sync failed (non-fatal): {_garmin_err}")
 
     coach_state = read_coach_state()
     health_log = read_health_log(limit=14)
@@ -4518,6 +4640,8 @@ if __name__ == "__main__":
             run_steer_co_finalize(dry_run=args.dry_run)
         elif getattr(args, "meta", False):
             run_meta_improvement(dry_run=args.dry_run)
+        elif getattr(args, "sync_garmin", False):
+            sync_garmin(days=14, dry_run=args.dry_run)
         elif args.export:
             from datetime import datetime as _dt
             fname = f"coach_export_{_dt.today().strftime('%Y%m%d')}.json"

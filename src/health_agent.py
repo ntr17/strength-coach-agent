@@ -165,6 +165,14 @@ def respond(user_message: str, base_context: str,
             health_log = health_log or []
             coach_state = coach_state or {}
 
+    # Auto-inject GARMIN_SUMMARY into extra_data["hrv_data"] if available and not already set
+    if coach_state and not (extra_data or {}).get("hrv_data"):
+        garmin = coach_state.get("GARMIN_SUMMARY", {})
+        garmin_text = garmin.get("Summary", "") if isinstance(garmin, dict) else str(garmin)
+        if garmin_text and garmin_text != "(no HEALTH domain in coach state)":
+            extra_data = extra_data or {}
+            extra_data["hrv_data"] = garmin_text
+
     full_context = _build_health_context(base_context, health_log, coach_state, extra_data)
 
     client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
@@ -198,12 +206,20 @@ def run_health_proactive(health_log: list, coach_state: dict,
     health_state = _format_health_coach_state(coach_state)
     log_text = _format_health_log(health_log, limit=10)
 
+    # Pull GARMIN_SUMMARY from coach_state for richer recovery context
+    garmin_summary = ""
+    if coach_state:
+        garmin = coach_state.get("GARMIN_SUMMARY", {})
+        garmin_text = garmin.get("Summary", "") if isinstance(garmin, dict) else str(garmin)
+        if garmin_text and garmin_text not in ("(no HEALTH domain in coach state)", "(no health coach state)"):
+            garmin_summary = f"\nGARMIN RECOVERY DATA:\n{garmin_text}"
+
     prompt = f"""You are {ATHLETE_NAME}'s coach doing a brief health check-in.
 
 HEALTH STATE: {health_state}
 
 RECENT HEALTH LOG:
-{log_text}
+{log_text}{garmin_summary}
 
 ATHLETE PROFILE (brief): {athlete_profile[:300] if athlete_profile else '(not loaded)'}
 
@@ -215,6 +231,8 @@ Criteria for YES:
 - A known health issue (golfer's elbow, insulin response) needs a check-in
 - Bodyweight has drifted significantly without comment
 - More than 5 days since any health data — worth asking if he's tracking
+- HRV trending down >10ms over the week — recovery stress signal (if Garmin data available)
+- Body battery consistently ending day below 30 — chronic fatigue signal (if Garmin data available)
 
 If YES, write a short Telegram message (1-3 sentences, direct, no emoji).
 If NO, respond with just: NO_OUTREACH

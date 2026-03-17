@@ -2340,5 +2340,321 @@ class TestGetAuthoritativeWeekNum:
         assert result == 9
 
 
+# ===========================================================================
+# Garmin: GarminClient unit tests
+# ===========================================================================
+
+class TestGarminClient:
+
+    def test_is_available_false_when_no_env(self):
+        """is_available() returns False when GARMIN_EMAIL/PASSWORD are not set."""
+        import os
+        from unittest.mock import patch
+        with patch.dict(os.environ, {"GARMIN_EMAIL": "", "GARMIN_PASSWORD": "", "GARMIN_MOCK": ""}):
+            from garmin import GarminClient
+            client = GarminClient()
+            assert client.is_available() is False
+
+    def test_mock_mode_is_available(self):
+        """is_available() returns True in mock mode regardless of credentials."""
+        import os
+        from unittest.mock import patch
+        with patch.dict(os.environ, {"GARMIN_EMAIL": "", "GARMIN_PASSWORD": "", "GARMIN_MOCK": "1"}):
+            from garmin import GarminClient
+            client = GarminClient()
+            assert client.is_available() is True
+
+    def test_mock_fetch_returns_expected_shape(self):
+        """fetch_daily_metrics returns a dict with all expected keys in mock mode."""
+        import os
+        from unittest.mock import patch
+        from datetime import date as _date
+        with patch.dict(os.environ, {"GARMIN_MOCK": "1"}):
+            from garmin import GarminClient
+            client = GarminClient()
+            result = client.fetch_daily_metrics(_date(2026, 3, 16))
+        assert result is not None
+        assert "hrv_ms" in result
+        assert "sleep_hrs" in result
+        assert "resting_hr" in result
+        assert "body_battery_end" in result
+        assert "steps" in result
+        assert result["date"] == "2026-03-16"
+
+    def test_build_garmin_summary_text(self):
+        """_build_garmin_summary produces a non-empty string from sample metrics."""
+        from run_coach import _build_garmin_summary
+        metrics = [
+            {"date": "2026-03-16", "hrv_ms": 55, "sleep_hrs": 6.5, "resting_hr": 52,
+             "body_battery_end": 38, "steps": 7200},
+            {"date": "2026-03-15", "hrv_ms": 48, "sleep_hrs": 7.0, "resting_hr": 54,
+             "body_battery_end": 44, "steps": 6800},
+        ]
+        summary = _build_garmin_summary(metrics)
+        assert "HRV" in summary
+        assert len(summary) > 20
+
+    def test_build_garmin_summary_empty_on_no_data(self):
+        """_build_garmin_summary returns empty string for empty input."""
+        from run_coach import _build_garmin_summary
+        assert _build_garmin_summary([]) == ""
+
+
+# ===========================================================================
+# RPE: _detect_exercise_columns — RPE column detection
+# ===========================================================================
+
+class TestDetectExerciseColumnsRPE:
+
+    def _detect(self, header):
+        from sheets import _detect_exercise_columns
+        return _detect_exercise_columns(header)
+
+    def test_rpe_column_detected_by_keyword(self):
+        header = ["Exercise", "Weight", "Sets x Reps", "Done", "Actual", "Session Notes", "RPE"]
+        cm = self._detect(header)
+        assert cm["rpe"] == 6
+
+    def test_effort_column_detected(self):
+        header = ["Exercise", "Weight", "Sets x Reps", "Done", "Actual", "Effort"]
+        cm = self._detect(header)
+        assert cm["rpe"] == 5
+
+    def test_rpe_rir_combined_header(self):
+        header = ["Exercise", "Weight", "Sets x Reps", "Done", "Actual", "RPE/RIR"]
+        cm = self._detect(header)
+        assert cm["rpe"] == 5
+
+    def test_no_rpe_column_returns_none(self):
+        header = ["Exercise", "Weight", "Sets x Reps", "Done", "Actual", "Notes"]
+        cm = self._detect(header)
+        assert cm["rpe"] is None
+
+
+# ===========================================================================
+# RPE: _parse_week_tab — RPE field in exercise dict
+# ===========================================================================
+
+class TestParseWeekTabRPE:
+
+    def _make_rows(self, rpe_header=True, rpe_cell=""):
+        header = ["Exercise", "Weight", "Sets x Reps", "Done", "Actual", "Session Notes"]
+        if rpe_header:
+            header.append("RPE")
+        rows = [
+            ["WEEK 9"],
+            ["DAY 1: Squat"],
+            header,
+            ["Squat", "100kg", "4x4", "Yes", "100kg 4x4", "good", rpe_cell] if rpe_header
+            else ["Squat", "100kg", "4x4", "Yes", "100kg 4x4", "good"],
+        ]
+        return rows
+
+    def test_rpe_extracted_from_column(self):
+        from sheets import _parse_week_tab
+        rows = self._make_rows(rpe_header=True, rpe_cell="8")
+        result = _parse_week_tab(rows)
+        ex = result["days"][0]["exercises"][0]
+        assert ex["rpe"] == "8"
+
+    def test_rpe_none_when_column_absent(self):
+        from sheets import _parse_week_tab
+        rows = self._make_rows(rpe_header=False)
+        result = _parse_week_tab(rows)
+        ex = result["days"][0]["exercises"][0]
+        assert ex["rpe"] is None
+
+    def test_rpe_none_when_cell_empty(self):
+        from sheets import _parse_week_tab
+        rows = self._make_rows(rpe_header=True, rpe_cell="")
+        result = _parse_week_tab(rows)
+        ex = result["days"][0]["exercises"][0]
+        assert ex["rpe"] is None
+
+
+# ===========================================================================
+# RPE: _apply_rpe_log — writeback operation
+# ===========================================================================
+
+class TestApplyRpeLog:
+
+    def test_writes_to_rpe_column_when_present(self):
+        from unittest.mock import MagicMock, patch
+        from writeback import _apply_rpe_log
+
+        ws = MagicMock()
+        ws.get_all_values.return_value = [
+            ["Exercise", "Weight", "Sets x Reps", "Done", "Actual", "RPE"],
+            ["DAY 1"],
+            ["Exercise", "Weight", "Sets x Reps", "Done", "Actual", "RPE"],
+            ["Squat", "100", "4x4", "Yes", "100 4x4", ""],
+        ]
+        sheet = MagicMock()
+
+        op = {"week": 9, "exercise": "Squat", "rpe": "8"}
+        with patch("writeback._get_week_tab", return_value=ws):
+            success, msg = _apply_rpe_log(sheet, op)
+
+        assert success is True
+        assert "8" in msg
+
+    def test_falls_back_to_notes_when_no_rpe_column(self):
+        from unittest.mock import MagicMock, patch
+        from writeback import _apply_rpe_log
+
+        ws = MagicMock()
+        ws.get_all_values.return_value = [
+            ["Exercise", "Weight", "Sets x Reps", "Done", "Actual", "Session Notes"],
+            ["DAY 1"],
+            ["Exercise", "Weight", "Sets x Reps", "Done", "Actual", "Session Notes"],
+            ["Squat", "100", "4x4", "Yes", "100 4x4", "felt good"],
+        ]
+        sheet = MagicMock()
+
+        op = {"week": 9, "exercise": "Squat", "rpe": "8"}
+        with patch("writeback._get_week_tab", return_value=ws):
+            success, msg = _apply_rpe_log(sheet, op)
+
+        assert success is True
+        assert "logged" in msg.lower() or "appended" in msg.lower()
+
+    def test_skips_if_rpe_already_in_notes(self):
+        from unittest.mock import MagicMock, patch
+        from writeback import _apply_rpe_log
+
+        ws = MagicMock()
+        ws.get_all_values.return_value = [
+            ["Exercise", "Weight", "Sets x Reps", "Done", "Actual", "Session Notes"],
+            ["DAY 1"],
+            ["Exercise", "Weight", "Sets x Reps", "Done", "Actual", "Session Notes"],
+            ["Squat", "100", "4x4", "Yes", "100 4x4", "felt good RPE 8"],
+        ]
+        sheet = MagicMock()
+
+        op = {"week": 9, "exercise": "Squat", "rpe": "8"}
+        with patch("writeback._get_week_tab", return_value=ws):
+            success, msg = _apply_rpe_log(sheet, op)
+
+        assert success is True
+        ws.update_cell.assert_not_called()
+
+    def test_exercise_not_found_returns_false(self):
+        from unittest.mock import MagicMock, patch
+        from writeback import _apply_rpe_log
+
+        ws = MagicMock()
+        ws.get_all_values.return_value = [
+            ["Exercise", "Weight", "Sets x Reps", "Done", "Actual", "RPE"],
+            ["Bench", "80", "4x5", "Yes", "80 4x5", ""],
+        ]
+        sheet = MagicMock()
+
+        op = {"week": 9, "exercise": "Squat", "rpe": "8"}
+        with patch("writeback._get_week_tab", return_value=ws):
+            success, msg = _apply_rpe_log(sheet, op)
+
+        assert success is False
+        assert "not found" in msg.lower()
+
+    def test_week_not_found_returns_false(self):
+        from unittest.mock import patch
+        from writeback import _apply_rpe_log
+
+        op = {"week": 99, "exercise": "Squat", "rpe": "8"}
+        with patch("writeback._get_week_tab", return_value=None):
+            success, msg = _apply_rpe_log(None, op)
+
+        assert success is False
+        assert "not found" in msg.lower()
+
+
+# ===========================================================================
+# RPE: _parse_rpe_reply — Telegram reply parsing
+# ===========================================================================
+
+class TestParseRpeReply:
+
+    def _parse(self, text, exercises):
+        import sys
+        from unittest.mock import MagicMock, patch
+        telegram_mock = MagicMock()
+        telegram_ext_mock = MagicMock()
+        # Stub all telegram submodules that telegram_bot imports
+        mods = {
+            "telegram": telegram_mock,
+            "telegram.ext": telegram_ext_mock,
+            "telegram.ext._application": MagicMock(),
+        }
+        with patch.dict(sys.modules, mods):
+            if "telegram_bot" in sys.modules:
+                del sys.modules["telegram_bot"]
+            from telegram_bot import _parse_rpe_reply
+        return _parse_rpe_reply(text, exercises)
+
+    def test_named_parse(self):
+        result = self._parse("squat 8, bench 7.5", ["Squat", "Bench"])
+        assert result == {"Squat": "8", "Bench": "7.5"}
+
+    def test_positional_parse(self):
+        result = self._parse("8, 7", ["Squat", "Bench"])
+        assert result == {"Squat": "8", "Bench": "7"}
+
+    def test_partial_named_match(self):
+        result = self._parse("squat 8", ["Squat", "Bench"])
+        assert result.get("Squat") == "8"
+
+    def test_out_of_range_number_not_used_positionally(self):
+        result = self._parse("25, 7", ["Squat", "Bench"])
+        assert result.get("Squat") != "25"
+
+    def test_empty_reply_returns_empty(self):
+        result = self._parse("", ["Squat", "Bench"])
+        assert result == {}
+
+
+# ===========================================================================
+# RPE: _format_current_week — RPE display in prompt
+# ===========================================================================
+
+class TestFormatCurrentWeekRPE:
+
+    def _fmt(self, exercises):
+        from prompt import _format_current_week
+        week_data = {
+            "title": "WEEK 9",
+            "days": [{"label": "DAY 1", "date": None, "exercises": exercises}],
+            "weekly_notes": {},
+        }
+        return _format_current_week(week_data)
+
+    def test_explicit_rpe_shown(self):
+        exercises = [{"name": "Squat", "weight": "100", "sets_reps": "4x4",
+                      "done": True, "actual": "100 4x4", "rpe": "8",
+                      "session_note": None, "program_note": None}]
+        out = self._fmt(exercises)
+        assert "@RPE 8" in out
+
+    def test_inferred_rpe_shown(self):
+        exercises = [{"name": "Squat", "weight": "100", "sets_reps": "4x4",
+                      "done": True, "actual": "100 4x4", "rpe": None,
+                      "session_note": "felt heavy RPE 8", "program_note": None}]
+        out = self._fmt(exercises)
+        assert "@RPE 8 [inferred]" in out
+
+    def test_not_logged_shown_for_done_exercise(self):
+        exercises = [{"name": "Squat", "weight": "100", "sets_reps": "4x4",
+                      "done": True, "actual": "100 4x4", "rpe": None,
+                      "session_note": None, "program_note": None}]
+        out = self._fmt(exercises)
+        assert "[RPE not logged]" in out
+
+    def test_rpe_not_shown_for_undone_exercise(self):
+        exercises = [{"name": "Squat", "weight": "100", "sets_reps": "4x4",
+                      "done": None, "actual": None, "rpe": None,
+                      "session_note": None, "program_note": None}]
+        out = self._fmt(exercises)
+        assert "[RPE not logged]" not in out
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

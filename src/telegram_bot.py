@@ -1439,6 +1439,91 @@ def _classify_intent(message: str) -> str:
         return "GENERAL"
 
 
+def _parse_rpe_reply(text: str, exercises: list) -> dict:
+    """
+    Parse an athlete's RPE reply into {exercise_name: rpe_value_str} pairs.
+
+    Handles:
+      - Named:      "squat 8, bench 7.5"  → {Squat: "8", Bench: "7.5"}
+      - Positional: "8, 7" (same count as exercises) → {Squat: "8", Bench: "7"}
+      - Mixed:      partial named match, positional fills the rest
+
+    Only accepts values 1–10 as valid RPE numbers.
+    Returns empty dict if nothing parseable.
+    """
+    import re as _re
+    result = {}
+    text_lower = text.lower()
+
+    # Try named pattern first
+    for ex in exercises:
+        ex_lower = ex.lower()
+        m = _re.search(
+            r"\b" + _re.escape(ex_lower) + r"[\s:=→\-]*(\d+(?:\.\d+)?)\b",
+            text_lower
+        )
+        if m:
+            val = float(m.group(1))
+            if 1 <= val <= 10:
+                result[ex] = m.group(1)
+
+    # If named matched all exercises → done
+    if len(result) == len(exercises):
+        return result
+
+    # Positional fallback — only if nothing named matched yet
+    if not result:
+        nums = _re.findall(r"\b(\d+(?:\.\d+)?)\b", text)
+        valid_nums = [n for n in nums if 1 <= float(n) <= 10]
+        if len(valid_nums) == len(exercises):
+            for ex, num in zip(exercises, valid_nums):
+                result[ex] = num
+
+    return result
+
+
+def _maybe_write_rpe_from_reply(user_text: str, current_flow: str) -> None:
+    """
+    If the athlete's reply contains RPE data matching exercises from the active
+    endsession thread, write those values to the program sheet.
+
+    current_flow format: "endsession | DATE | SESSION_LABEL | asked: RPE for Ex1, Ex2"
+    Silent on any failure — this is best-effort.
+    """
+    import re as _re
+    try:
+        # Extract "asked: RPE for Ex1, Ex2" part from current_flow
+        asked_match = _re.search(r"asked:\s*RPE for\s*(.+)$", current_flow, _re.I)
+        if not asked_match:
+            return
+
+        exercises_raw = asked_match.group(1).strip()
+        # Split by comma or semicolon
+        exercises = [e.strip() for e in _re.split(r"[,;]", exercises_raw) if e.strip()]
+        if not exercises:
+            return
+
+        rpe_map = _parse_rpe_reply(user_text, exercises)
+        if not rpe_map:
+            return
+
+        from config import compute_current_week, resolve_program_start_date, PROGRAM_SHEET_ID
+        from sheets import get_client
+        from writeback import _apply_rpe_log
+
+        week_num = compute_current_week(resolve_program_start_date())
+        client = get_client()
+        sheet = client.open_by_key(PROGRAM_SHEET_ID)
+
+        for exercise_name, rpe_value in rpe_map.items():
+            op = {"week": week_num, "exercise": exercise_name, "rpe": rpe_value}
+            success, msg = _apply_rpe_log(sheet, op)
+            print(f"  [RPE Reply Write-back] {msg}")
+
+    except Exception as e:
+        print(f"  [RPE Reply Write-back] Non-fatal: {e}")
+
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not _is_authorized(update):
         await update.message.reply_text("Sorry, I only talk to my athlete.")
@@ -1552,6 +1637,21 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         except Exception as e:
             print(f"[Meta] Failed (falling back): {e}")
             # Fall through to GENERAL handler
+
+    # If we're in an active endsession RPE thread, try to parse and write RPE values
+    # from the reply before passing to the GENERAL tool-use loop for coach acknowledgment
+    try:
+        from datetime import date as _date
+        _today_str = str(_date.today())
+        from memory import read_coach_state as _rcs
+        _cs = _rcs()
+        _flow = _cs.get("CURRENT_FLOW", {}).get("Summary", "") or _cs.get("CURRENT_FLOW", {}).get("summary", "")
+        if _flow and _flow.startswith(f"endsession | {_today_str}") and "asked: RPE" in _flow:
+            import asyncio as _aio2
+            loop2 = _aio2.get_event_loop()
+            await loop2.run_in_executor(None, lambda: _maybe_write_rpe_from_reply(user_text, _flow))
+    except Exception as _rpe_err:
+        print(f"  [RPE intercept] Non-fatal: {_rpe_err}")
 
     # GENERAL intent (or fallback from failed specialized agent/workout/meta) — tool use
     try:

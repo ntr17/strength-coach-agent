@@ -1309,6 +1309,87 @@ def append_health_log(entries: list[dict]) -> None:
     ws.append_rows(rows)
 
 
+def upsert_health_log_row(date_str: str, updates: dict) -> str:
+    """
+    Upsert a Health Log row by date. Reads live headers dynamically so that
+    new columns (e.g. "HRV (ms)", "Body Battery") are handled transparently.
+
+    - If the date already exists: updates only columns where updates[key] is not None.
+    - If the date is new: appends a row with all provided values.
+    - If a column in `updates` doesn't exist in the header row: appends the column header first.
+
+    updates keys should match Health Log column headers exactly, e.g.:
+      "Bodyweight (kg)", "Steps", "Sleep (hrs)", "HRV (ms)", "Body Battery"
+
+    Returns: "inserted" | "updated" | "skipped"
+    """
+    if not updates:
+        return "skipped"
+
+    sheet = _get_memory_sheet()
+    ws = _get_tab(sheet, TAB_HEALTH_LOG)
+    all_rows = ws.get_all_values()
+
+    if not all_rows:
+        # Sheet is empty — write header then insert
+        headers = list(HEALTH_LOG_HEADERS)
+        for key in updates:
+            if key not in headers:
+                headers.append(key)
+        ws.append_row(headers)
+        row = [date_str] + [""] * (len(headers) - 1)
+        for key, val in updates.items():
+            if val is not None and key in headers:
+                row[headers.index(key)] = str(val)
+        ws.append_row(row)
+        return "inserted"
+
+    headers = all_rows[0]
+
+    # Extend header row if new columns needed
+    for key in updates:
+        if key not in headers and key != "Date":
+            headers.append(key)
+            ws.update_cell(1, len(headers), key)
+
+    # Build col index map: column name -> 0-based index
+    col_idx = {h: i for i, h in enumerate(headers)}
+
+    # Find existing row for this date
+    existing_row_num = None  # 1-based gspread row
+    for i, row in enumerate(all_rows[1:], start=2):
+        row_date = str(row[0]).strip()[:10] if row else ""
+        if row_date == str(date_str)[:10]:
+            existing_row_num = i
+            break
+
+    if existing_row_num is not None:
+        # Update only the columns provided (non-None values)
+        changed = False
+        existing_row = all_rows[existing_row_num - 1]
+        for key, val in updates.items():
+            if val is None or key == "Date":
+                continue
+            col = col_idx.get(key)
+            if col is None:
+                continue
+            # Only overwrite if the cell is currently empty
+            current = str(existing_row[col]).strip() if col < len(existing_row) else ""
+            if not current:
+                ws.update_cell(existing_row_num, col + 1, str(val))  # gspread 1-indexed
+                changed = True
+        return "updated" if changed else "skipped"
+    else:
+        # New date — build and append a full row
+        row = [""] * len(headers)
+        row[0] = str(date_str)
+        for key, val in updates.items():
+            if val is not None and key in col_idx:
+                row[col_idx[key]] = str(val)
+        ws.append_row(row)
+        return "inserted"
+
+
 def register_sheet(name: str, sheet_id: str, sheet_type: str,
                    status: str = "active", start_date: str = "",
                    total_weeks: str = "", notes: str = "") -> None:

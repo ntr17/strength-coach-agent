@@ -256,6 +256,18 @@ def _format_current_week(week_data: dict, catchup_map: dict = None,
             line = f"    [{done_sym}] {e['name']} {e.get('weight', '')} {e.get('sets_reps', '')}"
             if e.get("actual"):
                 line += f" → actual: {e['actual']}"
+            # RPE: explicit column value first, then inferred from notes, then flag as missing
+            rpe_val = e.get("rpe")
+            if rpe_val:
+                line += f" @RPE {rpe_val}"
+            elif e.get("done") is True:
+                import re as _re_rpe
+                note_text = e.get("session_note") or e.get("notes") or ""
+                inferred = _re_rpe.search(r"@?RPE\s*(\d+(?:\.\d+)?)", note_text, _re_rpe.I)
+                if inferred:
+                    line += f" @RPE {inferred.group(1)} [inferred]"
+                else:
+                    line += " [RPE not logged]"
             session_note = e.get("session_note") or e.get("notes")
             if session_note:
                 line += f" | your note: {session_note}"
@@ -343,6 +355,31 @@ def _format_health_trends(health_log: list[dict], daily_log: list[dict]) -> str:
 
     if food_avg:
         lines.append(f"  Food quality avg: {food_avg}/10")
+
+    # HRV — from Garmin sync (HRV (ms) column in Health Log)
+    hrv_vals = []
+    for e in recent:
+        try:
+            v = float(e.get("HRV (ms)", "") or "")
+            hrv_vals.append(v)
+        except (ValueError, TypeError):
+            pass
+    if hrv_vals:
+        hrv_avg = round(sum(hrv_vals) / len(hrv_vals))
+        hrv_trend = ""
+        if len(hrv_vals) >= 4:
+            newer = hrv_vals[:len(hrv_vals) // 2]   # newest entries first (list is newest-first)
+            older = hrv_vals[len(hrv_vals) // 2:]
+            diff = round(sum(newer) / len(newer) - sum(older) / len(older), 1)
+            hrv_trend = " (↑ trending up)" if diff > 3 else (" (↓ trending down)" if diff < -3 else "")
+        lines.append(f"  HRV avg: {hrv_avg}ms (range {int(min(hrv_vals))}–{int(max(hrv_vals))}ms){hrv_trend}")
+
+    # Body Battery — most recent end-of-day value from Garmin
+    bb_vals = [(e.get("Date", ""), e.get("Body Battery", "")) for e in recent
+               if str(e.get("Body Battery", "")).strip()]
+    if bb_vals:
+        latest_date, latest_bb = bb_vals[0]
+        lines.append(f"  Body Battery (end of day): {latest_bb} [{latest_date}]")
 
     # Recent notes / questions from daily log
     notes_found = []
@@ -540,6 +577,13 @@ def _compute_rolling_trends(health_log: list[dict], recent_weeks: list[dict]) ->
         diff = round(energy_2 - energy_4, 1)
         arrow = "↑" if diff > 0.3 else ("↓" if diff < -0.3 else "→")
         lines.append(f"  Food quality: {energy_2}/10 (2wk avg) vs {energy_4}/10 (4wk avg) {arrow}")
+
+    hrv_2 = avg_health(health_log, "HRV (ms)", 14)
+    hrv_4 = avg_health(health_log, "HRV (ms)", 28)
+    if hrv_2 and hrv_4:
+        diff = round(hrv_2 - hrv_4, 1)
+        arrow = "↑" if diff > 3 else ("↓" if diff < -3 else "→")
+        lines.append(f"  HRV: {int(hrv_2)}ms (2wk avg) vs {int(hrv_4)}ms (4wk avg) {arrow}")
 
     # Session completion rate: all_weeks from recent_weeks
     all_weeks = recent_weeks[-4:] if recent_weeks else []
