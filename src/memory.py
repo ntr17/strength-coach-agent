@@ -1432,16 +1432,50 @@ def create_and_register_sheet(name: str, sheet_type: str,
     return sheet_id
 
 
+def _life_context_is_duplicate(new_note: str, existing_rows: list) -> bool:
+    """
+    Return True if new_note is semantically close to any existing row.
+    Two notes are duplicates if they share >= 60% of their numbers AND >= 40% of
+    their meaningful words (length > 3). No LLM needed.
+    """
+    import re as _re
+
+    def _numbers(s):
+        return set(_re.findall(r'\d+(?:[.,]\d+)?', s))
+
+    def _keywords(s):
+        return {w for w in _re.findall(r'\b\w+\b', s.lower()) if len(w) > 3}
+
+    new_nums = _numbers(new_note)
+    new_words = _keywords(new_note)
+
+    for row in existing_rows[1:]:
+        if len(row) < 2 or not row[1].strip():
+            continue
+        ex_nums = _numbers(row[1])
+        ex_words = _keywords(row[1])
+
+        # If both have numbers, they must overlap >= 60% to be considered the same fact
+        if new_nums and ex_nums:
+            if len(new_nums & ex_nums) / max(len(new_nums), len(ex_nums)) < 0.6:
+                continue
+
+        # Word overlap >= 40% → semantic duplicate
+        if new_words and ex_words:
+            if len(new_words & ex_words) / max(len(new_words), len(ex_words)) >= 0.4:
+                return True
+
+    return False
+
+
 def append_life_context(context_note: str, context_date: Optional[date] = None) -> None:
-    """Append a life context change detected from notes. Skips exact duplicates."""
+    """Append a life context change. Skips exact and semantic duplicates."""
     sheet = _get_memory_sheet()
     ws = _get_tab(sheet, TAB_LIFE_CONTEXT)
     d = str(context_date or date.today())
-    # Dedup: skip if same date+note already exists
     existing = ws.get_all_values()
-    for row in existing[1:]:
-        if len(row) >= 2 and row[0] == d and row[1].strip() == context_note.strip():
-            return
+    if _life_context_is_duplicate(context_note, existing):
+        return
     ws.append_row([d, context_note])
 
 
