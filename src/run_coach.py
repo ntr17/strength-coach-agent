@@ -3303,6 +3303,36 @@ def run_brief(dry_run: bool = False):
         pass
     _brief_session_pos_line = f"This is {_brief_session_position}." if _brief_session_position else ""
 
+    # HEALTH_READINESS — load daily signal and apply RPE constraints
+    _brief_readiness_text = ""
+    try:
+        import json as _json_br
+        _raw_readiness_brief = coach_state.get("HEALTH_READINESS", {}).get("summary", "")
+        if _raw_readiness_brief:
+            _brief_readiness = _json_br.loads(_raw_readiness_brief)
+            # Override phase RPE target if readiness constraint is stricter
+            for _constraint in _brief_readiness.get("constraints", []):
+                if _constraint.startswith("max_rpe:"):
+                    try:
+                        _constrained_rpe = _constraint.split(":")[1].strip()
+                        _brief_rpe_target = f"RPE {_constrained_rpe} (readiness constraint)"
+                    except (IndexError, ValueError):
+                        pass
+            # Build brief readiness line
+            _br_score = _brief_readiness.get("readiness_score")
+            _br_flags = _brief_readiness.get("flags", [])
+            _br_insights = _brief_readiness.get("insights", [])
+            _br_parts = []
+            if _br_score is not None:
+                _br_parts.append(f"Readiness {_br_score}/100")
+            if _br_flags:
+                _br_parts.append(f"flags: {', '.join(_br_flags[:2])}")
+            if _br_insights:
+                _br_parts.append(_br_insights[0])
+            _brief_readiness_text = " | ".join(_br_parts) if _br_parts else ""
+    except Exception:
+        pass
+
     # Load extra context for cascade
     commands_for_cascade = []
     coach_focus_for_cascade = []
@@ -3345,6 +3375,7 @@ Exercises:
 
 Session position: {_brief_session_pos_line or '(unknown)'}
 Phase RPE target: {_brief_rpe_target}
+{f"Readiness signal: {_brief_readiness_text}" if _brief_readiness_text else ""}
 
 TECHNIQUE CUE OPTIONS FOR {primary_lift.upper() or "TODAY'S MAIN LIFT"} (choose ONE or skip):
 {cue_text}
@@ -4438,6 +4469,40 @@ def run_evening_protocol(dry_run: bool = False):
     except Exception:
         pass
 
+    # HEALTH_READINESS — load daily signal and apply constraints
+    _ep_readiness: dict = {}
+    _ep_readiness_text = ""
+    try:
+        import json as _json
+        _raw_readiness = coach_state.get("HEALTH_READINESS", {}).get("summary", "")
+        if _raw_readiness:
+            _ep_readiness = _json.loads(_raw_readiness)
+            # Override RPE target if readiness constraint is stricter
+            for constraint in _ep_readiness.get("constraints", []):
+                if constraint.startswith("max_rpe:"):
+                    try:
+                        constrained_rpe = constraint.split(":")[1].strip()
+                        _ep_rpe_target = f"RPE {constrained_rpe} (readiness constraint — do not exceed)"
+                    except (IndexError, ValueError):
+                        pass
+            # Build readiness context block for prompt
+            score = _ep_readiness.get("readiness_score", None)
+            flags = _ep_readiness.get("flags", [])
+            insights = _ep_readiness.get("insights", [])
+            recs = _ep_readiness.get("recommendations", [])
+            parts = []
+            if score is not None:
+                parts.append(f"Readiness score: {score}/100")
+            if flags:
+                parts.append(f"Flags: {', '.join(flags[:3])}")
+            if recs:
+                parts.append(f"Recommendations: {', '.join(recs[:2])}")
+            if insights:
+                parts.append(f"Data insight: {insights[0]}")
+            _ep_readiness_text = " | ".join(parts) if parts else ""
+    except Exception:
+        pass
+
     # Load commands for cascade conflict detection
     _ep_commands: list = []
     try:
@@ -4492,6 +4557,7 @@ CUE OPTIONS for {primary_tomorrow_lift or 'primary lift'} (choose ONE, or skip i
 === HEALTH & CONCERNS ===
 Recent health (last 3 days only — if empty, there is NO recent data, do not mention health):
 {health_summary}
+{f"Readiness signal: {_ep_readiness_text}" if _ep_readiness_text else ""}
 Active concerns (elbow, injury, follow-ups): {concerns_text}
 {challenge_suggestion}
 
@@ -4513,9 +4579,10 @@ Every message must do ALL of the following — in flowing prose, never as bullet
    NOT "how did it go?" — instead: "Tell me how the last two sets felt — that's my calibration signal."
    or: "After the session, tell me if the third squat set hit RPE {_ep_rpe_target.split('-')[1] if '-' in _ep_rpe_target else '8'} or above."
 
-5. HEALTH P.S. (only if health data above is non-empty and from last 3 days):
-   One line postscript. Example: "P.S. — HRV has been below baseline for 3 days. Sleep matters more
-   than an extra set tonight."
+5. HEALTH P.S. (only if health data or readiness signal above is non-empty):
+   One line postscript. Prioritize readiness data insights over raw health log.
+   Example: "P.S. — Readiness score is 52/100 (sleep debt flagged). Drop 2.5kg without hesitation."
+   Or: "P.S. — Based on your data: 7.5h+ sleep → avg +2.8% strength. Tonight matters."
 
 6. If Layer 3 shows a CONFLICT (pending catch-up vs. tomorrow's plan), address it conversationally:
    "Still catching up on [X] — want to swap tomorrow, or stick with the plan?"

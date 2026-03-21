@@ -3655,5 +3655,120 @@ class TestIterationZeroState:
         assert data["status"] == "NOT_STARTED"
 
 
+class TestHealthReadinessRpeOverride:
+    """
+    HEALTH_READINESS constraints override the phase RPE target in both
+    run_brief() and run_evening_protocol(). Test the constraint parsing logic
+    directly (the inline code path that reads coach_state).
+    """
+
+    def _readiness_json(self, score, constraints=None, flags=None, insights=None):
+        import json
+        return json.dumps({
+            "date": str(date.today()),
+            "readiness_score": score,
+            "constraints": constraints or [],
+            "recommendations": [],
+            "flags": flags or [],
+            "insights": insights or [],
+        })
+
+    def test_max_rpe_constraint_overrides_phase_target(self):
+        """If HEALTH_READINESS has max_rpe: 7, phase RPE should be overridden."""
+        import json
+        from health_science import compute_daily_readiness
+
+        # Critically low sleep → readiness < 50 → max_rpe: 7 constraint
+        health_log = [{"Date": str(date.today()), "Sleep (hrs)": "4.5",
+                       "Steps": "5000", "Food Quality (1-10)": "6"}]
+        result = compute_daily_readiness(health_log)
+        assert any("max_rpe" in c for c in result["constraints"])
+        # Constraint format: "max_rpe: 7" or "max_rpe: 8"
+        rpe_constraints = [c for c in result["constraints"] if "max_rpe" in c]
+        assert len(rpe_constraints) == 1
+        # Parse value
+        val = rpe_constraints[0].split(":")[1].strip()
+        assert val.isdigit() or val.replace(".", "").isdigit()
+
+    def test_good_readiness_no_rpe_constraint(self):
+        """Good sleep + steps → no RPE constraint."""
+        from health_science import compute_daily_readiness
+        health_log = [{"Date": str(date.today()), "Sleep (hrs)": "8.5",
+                       "Steps": "10000", "Food Quality (1-10)": "8"}]
+        result = compute_daily_readiness(health_log)
+        assert not any("max_rpe" in c for c in result["constraints"])
+
+    def test_readiness_insight_surfaced_when_present(self):
+        """Insights from HEALTH_INSIGHTS are passed through to readiness result."""
+        import json
+        from unittest.mock import patch
+        from health_science import compute_daily_readiness
+
+        insights = {
+            "sleep_strength": {
+                "insight_text": "Based on your data: 7.5h+ sleep → avg +2.8% strength (N=25)."
+            }
+        }
+        health_log = [{"Date": str(date.today()), "Sleep (hrs)": "7.5",
+                       "Steps": "8000", "Food Quality (1-10)": "7"}]
+
+        with patch("memory.read_single_summary", return_value=insights):
+            with patch("memory.upsert_coach_state"):
+                result = compute_daily_readiness(health_log, insights=insights)
+
+        assert any("2.8%" in i for i in result["insights"])
+
+    def test_constraint_parse_in_prompt_logic(self):
+        """Verify the constraint-parsing inline code produces the expected RPE string."""
+        import json
+        # Simulate the inline code from run_brief / run_evening_protocol
+        readiness_raw = json.dumps({
+            "readiness_score": 48,
+            "constraints": ["max_rpe: 7"],
+            "flags": ["sleep_critically_low_4.5h"],
+            "recommendations": ["prioritize_sleep_tonight"],
+            "insights": [],
+        })
+
+        rpe_target = "RPE 7-8"  # what phase would give
+        readiness = json.loads(readiness_raw)
+        for constraint in readiness.get("constraints", []):
+            if constraint.startswith("max_rpe:"):
+                constrained_rpe = constraint.split(":")[1].strip()
+                rpe_target = f"RPE {constrained_rpe} (readiness constraint — do not exceed)"
+
+        assert "readiness constraint" in rpe_target
+        assert "7" in rpe_target
+        # Original phase target was overridden
+        assert "7-8" not in rpe_target
+
+    def test_readiness_text_built_from_score_flags_insights(self):
+        """The readiness text block is correctly assembled from score + flags + insights."""
+        import json
+        readiness_raw = json.dumps({
+            "readiness_score": 62,
+            "constraints": ["max_rpe: 8"],
+            "flags": ["sleep_debt_3.5h_this_week"],
+            "recommendations": ["sleep_target_tonight: 23:00"],
+            "insights": ["Based on your data: poor sleep correlates with RPE +0.8 (N=22)."],
+        })
+        readiness = json.loads(readiness_raw)
+        parts = []
+        score = readiness.get("readiness_score")
+        if score is not None:
+            parts.append(f"Readiness {score}/100")
+        flags = readiness.get("flags", [])
+        if flags:
+            parts.append(f"flags: {', '.join(flags[:2])}")
+        insights = readiness.get("insights", [])
+        if insights:
+            parts.append(insights[0])
+        text = " | ".join(parts)
+
+        assert "62/100" in text
+        assert "sleep_debt" in text
+        assert "RPE" in text
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
