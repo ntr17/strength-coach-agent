@@ -1714,6 +1714,76 @@ def setup_memory_sheet() -> None:
 
 
 # ---------------------------------------------------------------------------
+# V17 Cascade list-domain helpers (WEEKLY_SUMMARIES, MONTHLY_SUMMARIES, etc.)
+# ---------------------------------------------------------------------------
+
+def read_summary_list(domain: str, limit: int = 8) -> list[dict]:
+    """
+    Read a list-valued Coach State domain (JSON array stored in Summary column).
+    Used for WEEKLY_SUMMARIES, MONTHLY_SUMMARIES, ANNUAL_SUMMARY, LONGTERM_PLAN.
+    Returns list of dicts, most recent last.
+    """
+    import json as _json
+    try:
+        cs = read_coach_state()
+        raw = cs.get(domain.upper(), {}).get("summary", "")
+        if not raw:
+            return []
+        data = _json.loads(raw)
+        if isinstance(data, list):
+            return data[-limit:]
+        if isinstance(data, dict):
+            return [data]
+        return []
+    except Exception:
+        return []
+
+
+def append_summary(domain: str, summary: dict, max_keep: int = 8) -> None:
+    """
+    Append a typed JSON summary to a list-valued Coach State domain.
+    Trims to max_keep most recent entries.
+    Used by close_day(), weekly_eval(), monthly_eval(), etc.
+    """
+    import json as _json
+    existing = read_summary_list(domain, limit=max_keep)
+    existing.append(summary)
+    if len(existing) > max_keep:
+        existing = existing[-max_keep:]
+    upsert_coach_state(domain.upper(), _json.dumps(existing, ensure_ascii=False), "HIGH")
+
+
+def write_single_summary(domain: str, summary: dict) -> None:
+    """
+    Write a single JSON object to a Coach State domain (for ANNUAL_SUMMARY, LONGTERM_PLAN).
+    Overwrites any existing value.
+    """
+    import json as _json
+    upsert_coach_state(domain.upper(), _json.dumps(summary, ensure_ascii=False), "HIGH")
+
+
+def read_single_summary(domain: str) -> Optional[dict]:
+    """
+    Read a single JSON object from a Coach State domain.
+    Returns None if empty or unparseable.
+    """
+    import json as _json
+    try:
+        cs = read_coach_state()
+        raw = cs.get(domain.upper(), {}).get("summary", "")
+        if not raw:
+            return None
+        data = _json.loads(raw)
+        if isinstance(data, dict):
+            return data
+        if isinstance(data, list) and data:
+            return data[-1]
+        return None
+    except Exception:
+        return None
+
+
+# ---------------------------------------------------------------------------
 # Dev entry point
 # ---------------------------------------------------------------------------
 

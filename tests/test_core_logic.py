@@ -2840,5 +2840,494 @@ class TestSheetSyncDispatch:
         assert "105kg 4x4" in upserted["SQUAT"]
 
 
+# ===========================================================================
+# V17 cascade_state.py — state machine, snapshots, thread queue
+# All tests mock memory reads/writes to avoid Google Sheets calls.
+# ===========================================================================
+
+class TestCascadeStateDefaults:
+    """read_cascade_state() returns correct defaults when no data exists."""
+
+    def test_default_state_all_idle(self):
+        from unittest.mock import patch
+        from cascade_state import read_cascade_state, LEVELS
+        empty_cs = {}
+        with patch("memory.read_coach_state", return_value=empty_cs):
+            state = read_cascade_state()
+        assert set(state.keys()) == set(LEVELS)
+        for level in LEVELS:
+            assert state[level]["state"] == "IDLE"
+            assert state[level]["locked_by"] is None
+
+    def test_missing_level_filled_with_defaults(self):
+        """If CASCADE_STATE JSON is missing a level, it gets filled in."""
+        import json
+        from unittest.mock import patch
+        from cascade_state import read_cascade_state
+        # Only DAILY present in stored data
+        partial = json.dumps({"DAILY": {"state": "AWAITING_USER", "locked_by": None,
+                                         "awaiting_message_id": 42, "last_updated": None, "context": {}}})
+        cs = {"CASCADE_STATE": {"summary": partial}}
+        with patch("memory.read_coach_state", return_value=cs):
+            state = read_cascade_state()
+        assert state["DAILY"]["state"] == "AWAITING_USER"
+        assert state["LONGTERM"]["state"] == "IDLE"  # filled in
+
+
+class TestCascadeSetLevelState:
+    """set_level_state() updates state and propagates LOCKED correctly."""
+
+    def _run_set(self, level, new_state):
+        """Helper: call set_level_state and capture the written cascade."""
+        import json
+        from unittest.mock import patch, MagicMock
+        from cascade_state import set_level_state, _default_cascade_state
+
+        written = {}
+
+        def fake_read_cs():
+            return {"CASCADE_STATE": {"summary": json.dumps(_default_cascade_state())}}
+
+        def fake_upsert(domain, summary, confidence="MEDIUM"):
+            written[domain] = summary
+
+        with patch("memory.read_coach_state", side_effect=fake_read_cs), \
+             patch("memory.upsert_coach_state", side_effect=fake_upsert):
+            set_level_state(level, new_state)
+
+        cascade = json.loads(written["CASCADE_STATE"])
+        return cascade
+
+    def test_set_idle_no_propagation(self):
+        cascade = self._run_set("DAILY", "IDLE")
+        assert cascade["DAILY"]["state"] == "IDLE"
+
+    def test_awaiting_user_locks_lower_levels(self):
+        cascade = self._run_set("MONTHLY", "AWAITING_USER")
+        assert cascade["MONTHLY"]["state"] == "AWAITING_USER"
+        assert cascade["WEEKLY"]["state"] == "LOCKED"
+        assert cascade["WEEKLY"]["locked_by"] == "MONTHLY"
+        assert cascade["DAILY"]["state"] == "LOCKED"
+        assert cascade["DAILY"]["locked_by"] == "MONTHLY"
+        # Higher levels should stay IDLE
+        assert cascade["LONGTERM"]["state"] == "IDLE"
+        assert cascade["ANNUAL"]["state"] == "IDLE"
+
+    def test_longterm_awaiting_locks_all_below(self):
+        cascade = self._run_set("LONGTERM", "AWAITING_USER")
+        for level in ["ANNUAL", "MONTHLY", "WEEKLY", "DAILY"]:
+            assert cascade[level]["state"] == "LOCKED"
+            assert cascade[level]["locked_by"] == "LONGTERM"
+
+    def test_daily_awaiting_locks_nothing(self):
+        cascade = self._run_set("DAILY", "AWAITING_USER")
+        assert cascade["DAILY"]["state"] == "AWAITING_USER"
+        # All other levels unchanged (still IDLE)
+        for level in ["LONGTERM", "ANNUAL", "MONTHLY", "WEEKLY"]:
+            assert cascade[level]["state"] == "IDLE"
+
+    def test_invalid_state_raises(self):
+        import json
+        from unittest.mock import patch
+        from cascade_state import set_level_state, _default_cascade_state
+        with patch("memory.read_coach_state", return_value={
+            "CASCADE_STATE": {"summary": json.dumps(_default_cascade_state())}
+        }), patch("memory.upsert_coach_state"):
+            with pytest.raises(ValueError, match="Unknown state"):
+                set_level_state("DAILY", "FLYING")
+
+    def test_invalid_level_raises(self):
+        from unittest.mock import patch
+        from cascade_state import set_level_state
+        with patch("memory.read_coach_state", return_value={}), \
+             patch("memory.upsert_coach_state"):
+            with pytest.raises(ValueError, match="Unknown cascade level"):
+                set_level_state("GALACTIC", "IDLE")
+
+
+class TestCascadeSnapshot:
+    """Snapshot create, retrieve, and debounce logic."""
+
+    def _make_mocks(self, existing_snapshots=None):
+        """Return a set of mocks for snapshot tests."""
+        import json
+        from unittest.mock import patch, MagicMock
+        existing = existing_snapshots or []
+        cs = {
+            "CASCADE_STATE": {"summary": "{}"},
+            "SNAPSHOT_LOG": {"summary": json.dumps(existing) if existing else ""},
+        }
+        return cs
+
+    def test_create_snapshot_returns_id(self):
+        import json
+        from unittest.mock import patch
+        from cascade_state import create_snapshot
+
+        stored = {}
+        cs = {"CASCADE_STATE": {"summary": "{}"}, "SNAPSHOT_LOG": {"summary": ""}}
+
+        with patch("memory.read_coach_state", return_value=cs), \
+             patch("memory.upsert_coach_state", side_effect=lambda d, s, c="MEDIUM": stored.update({d: s})):
+            sid = create_snapshot(["WEEKLY", "DAILY"], "test reason")
+
+        assert isinstance(sid, str)
+        assert len(sid) == 8
+        log = json.loads(stored["SNAPSHOT_LOG"])
+        assert len(log) == 1
+        assert log[0]["snapshot_id"] == sid
+        assert log[0]["reason"] == "test reason"
+        assert "WEEKLY" in log[0]["affected_levels"]
+
+    def test_restore_within_debounce_applies(self):
+        import json
+        from datetime import datetime, timezone
+        from unittest.mock import patch
+        from cascade_state import restore_snapshot
+
+        now = datetime.now(timezone.utc)
+        snap = {
+            "snapshot_id": "abc12345",
+            "created_at": now.isoformat(),
+            "reason": "test",
+            "affected_levels": ["DAILY"],
+            "cascade_state": {"DAILY": {"state": "IDLE", "locked_by": None,
+                                         "awaiting_message_id": None, "last_updated": None, "context": {}}},
+            "coach_state": {},
+        }
+        cs = {"SNAPSHOT_LOG": {"summary": json.dumps([snap])},
+              "CASCADE_STATE": {"summary": "{}"}}
+        upserted = {}
+        with patch("memory.read_coach_state", return_value=cs), \
+             patch("memory.upsert_coach_state", side_effect=lambda d, s, c="MEDIUM": upserted.update({d: s})):
+            result = restore_snapshot("abc12345")
+        assert result is True
+
+    def test_restore_after_debounce_returns_false(self):
+        import json
+        from datetime import datetime, timezone, timedelta
+        from unittest.mock import patch
+        from cascade_state import restore_snapshot
+
+        old_time = (datetime.now(timezone.utc) - timedelta(minutes=20)).isoformat()
+        snap = {
+            "snapshot_id": "old12345",
+            "created_at": old_time,
+            "reason": "old",
+            "affected_levels": ["DAILY"],
+            "cascade_state": {},
+            "coach_state": {},
+        }
+        cs = {"SNAPSHOT_LOG": {"summary": json.dumps([snap])},
+              "CASCADE_STATE": {"summary": "{}"}}
+        with patch("memory.read_coach_state", return_value=cs), \
+             patch("memory.upsert_coach_state"):
+            result = restore_snapshot("old12345")
+        assert result is False
+
+    def test_restore_unknown_id_returns_false(self):
+        import json
+        from unittest.mock import patch
+        from cascade_state import restore_snapshot
+        cs = {"SNAPSHOT_LOG": {"summary": "[]"}, "CASCADE_STATE": {"summary": "{}"}}
+        with patch("memory.read_coach_state", return_value=cs), \
+             patch("memory.upsert_coach_state"):
+            result = restore_snapshot("nonexistent")
+        assert result is False
+
+    def test_max_snapshots_trimmed(self):
+        import json
+        from unittest.mock import patch
+        from cascade_state import create_snapshot, MAX_SNAPSHOTS
+
+        # Create MAX_SNAPSHOTS + 1 snapshots, verify only MAX_SNAPSHOTS kept
+        from datetime import datetime, timezone
+        existing = [
+            {"snapshot_id": f"snap{i:04d}", "created_at": datetime.now(timezone.utc).isoformat(),
+             "reason": f"r{i}", "affected_levels": [], "cascade_state": {}, "coach_state": {}}
+            for i in range(MAX_SNAPSHOTS)
+        ]
+        cs = {"CASCADE_STATE": {"summary": "{}"}, "SNAPSHOT_LOG": {"summary": json.dumps(existing)}}
+        stored = {}
+        with patch("memory.read_coach_state", return_value=cs), \
+             patch("memory.upsert_coach_state", side_effect=lambda d, s, c="MEDIUM": stored.update({d: s})):
+            create_snapshot([], "one more")
+        log = json.loads(stored["SNAPSHOT_LOG"])
+        assert len(log) == MAX_SNAPSHOTS
+
+
+class TestThreadQueue:
+    """Thread priority queue: push, resolve, priority ordering."""
+
+    def _mock_cs(self, threads=None):
+        import json
+        threads = threads or []
+        return {"ACTIVE_THREADS": {"summary": json.dumps(threads) if threads else ""}}
+
+    def test_push_thread_adds_entry(self):
+        import json
+        from unittest.mock import patch
+        from cascade_state import push_thread
+
+        stored = {}
+        with patch("memory.read_coach_state", return_value=self._mock_cs()), \
+             patch("memory.upsert_coach_state", side_effect=lambda d, s, c="MEDIUM": stored.update({d: s})):
+            push_thread("WEEKLY_CONFIRM", message_id=1001, context={"week": 9})
+
+        threads = json.loads(stored["ACTIVE_THREADS"])
+        assert len(threads) == 1
+        assert threads[0]["thread_type"] == "WEEKLY_CONFIRM"
+        assert threads[0]["message_id"] == 1001
+        assert threads[0]["priority"] == 2
+        assert not threads[0]["resolved"]
+
+    def test_resolve_thread_marks_resolved(self):
+        import json
+        from unittest.mock import patch
+        from cascade_state import resolve_thread
+
+        existing = [{"thread_type": "WEEKLY_CONFIRM", "message_id": 42,
+                     "priority": 2, "created_at": "2026-03-21", "resolved": False, "context": {}}]
+        stored = {}
+        with patch("memory.read_coach_state", return_value=self._mock_cs(existing)), \
+             patch("memory.upsert_coach_state", side_effect=lambda d, s, c="MEDIUM": stored.update({d: s})):
+            resolve_thread(42)
+
+        threads = json.loads(stored["ACTIVE_THREADS"])
+        assert threads[0]["resolved"] is True
+
+    def test_get_active_threads_excludes_resolved(self):
+        import json
+        from unittest.mock import patch
+        from cascade_state import get_active_threads
+
+        threads = [
+            {"thread_type": "WEEKLY_CONFIRM", "message_id": 1, "priority": 2,
+             "created_at": "2026-03-21T10:00:00Z", "resolved": False, "context": {}},
+            {"thread_type": "DAILY_MORNING", "message_id": 2, "priority": 3,
+             "created_at": "2026-03-21T10:00:00Z", "resolved": True, "context": {}},
+        ]
+        with patch("memory.read_coach_state", return_value=self._mock_cs(threads)):
+            active = get_active_threads()
+        assert len(active) == 1
+        assert active[0]["message_id"] == 1
+
+    def test_priority_ordering(self):
+        """GOAL_CHANGE (priority 1) should come before DAILY_MORNING (priority 3)."""
+        import json
+        from unittest.mock import patch
+        from cascade_state import get_active_threads, get_highest_priority_thread
+
+        threads = [
+            {"thread_type": "DAILY_MORNING", "message_id": 10, "priority": 3,
+             "created_at": "2026-03-21T09:00:00Z", "resolved": False, "context": {}},
+            {"thread_type": "GOAL_CHANGE", "message_id": 20, "priority": 1,
+             "created_at": "2026-03-21T10:00:00Z", "resolved": False, "context": {}},
+            {"thread_type": "WEEKLY_CONFIRM", "message_id": 30, "priority": 2,
+             "created_at": "2026-03-21T10:00:00Z", "resolved": False, "context": {}},
+        ]
+        with patch("memory.read_coach_state", return_value=self._mock_cs(threads)):
+            active = get_active_threads()
+            top = get_highest_priority_thread()
+        assert active[0]["thread_type"] == "GOAL_CHANGE"
+        assert active[1]["thread_type"] == "WEEKLY_CONFIRM"
+        assert active[2]["thread_type"] == "DAILY_MORNING"
+        assert top["thread_type"] == "GOAL_CHANGE"
+
+    def test_close_session_never_blocked(self):
+        """CLOSE_SESSION / ENDSESSION should have priority 4 — never blocked by others."""
+        from cascade_state import THREAD_PRIORITIES
+        assert THREAD_PRIORITIES["CLOSE_SESSION"] > THREAD_PRIORITIES["GOAL_CHANGE"]
+        assert THREAD_PRIORITIES["ENDSESSION"] > THREAD_PRIORITIES["MONTHLY_CONFIRM"]
+
+    def test_has_active_thread_of_type(self):
+        from unittest.mock import patch
+        from cascade_state import has_active_thread_of_type
+
+        threads = [{"thread_type": "INJURY", "message_id": 99, "priority": 1,
+                    "created_at": "2026-03-21", "resolved": False, "context": {}}]
+        with patch("memory.read_coach_state", return_value=self._mock_cs(threads)):
+            assert has_active_thread_of_type("INJURY") is True
+            assert has_active_thread_of_type("GOAL_CHANGE") is False
+
+    def test_get_thread_by_message_id(self):
+        from unittest.mock import patch
+        from cascade_state import get_thread_by_message_id
+
+        threads_active = [{"thread_type": "WEEKLY_CONFIRM", "message_id": 55, "priority": 2,
+                            "created_at": "2026-03-21", "resolved": False, "context": {"data": "x"}}]
+        threads_resolved = [{"thread_type": "WEEKLY_CONFIRM", "message_id": 55, "priority": 2,
+                              "created_at": "2026-03-21", "resolved": True, "context": {"data": "x"}}]
+
+        with patch("memory.read_coach_state", return_value=self._mock_cs(threads_active)):
+            t = get_thread_by_message_id(55)
+        assert t is not None
+        assert t["context"]["data"] == "x"
+
+        with patch("memory.read_coach_state", return_value=self._mock_cs(threads_resolved)):
+            t2 = get_thread_by_message_id(55)
+        assert t2 is None
+
+
+class TestClassifyDisruption:
+    """classify_disruption() maps disruption types to correct escalation levels."""
+
+    def test_single_session_escalates_to_weekly(self):
+        from cascade_state import classify_disruption
+        assert classify_disruption("single_session_skipped") == "WEEKLY"
+
+    def test_injury_escalates_to_annual(self):
+        from cascade_state import classify_disruption
+        assert classify_disruption("injury") == "ANNUAL"
+
+    def test_goal_change_escalates_to_longterm(self):
+        from cascade_state import classify_disruption
+        assert classify_disruption("goal_change") == "LONGTERM"
+
+    def test_extended_vacation_escalates_to_annual(self):
+        from cascade_state import classify_disruption
+        assert classify_disruption("extended_vacation") == "ANNUAL"
+
+    def test_unknown_disruption_defaults_to_weekly(self):
+        from cascade_state import classify_disruption
+        assert classify_disruption("random_unknown_thing") == "WEEKLY"
+
+
+class TestMemoryV17Helpers:
+    """V17 memory helpers: read_summary_list, append_summary, write/read_single_summary."""
+
+    def test_read_summary_list_empty(self):
+        from unittest.mock import patch
+        from memory import read_summary_list
+        with patch("memory.read_coach_state", return_value={}):
+            result = read_summary_list("WEEKLY_SUMMARIES")
+        assert result == []
+
+    def test_read_summary_list_returns_list(self):
+        import json
+        from unittest.mock import patch
+        from memory import read_summary_list
+        data = [{"week": 8, "note": "good"}, {"week": 9, "note": "great"}]
+        cs = {"WEEKLY_SUMMARIES": {"summary": json.dumps(data)}}
+        with patch("memory.read_coach_state", return_value=cs):
+            result = read_summary_list("WEEKLY_SUMMARIES")
+        assert len(result) == 2
+        assert result[1]["week"] == 9
+
+    def test_read_summary_list_respects_limit(self):
+        import json
+        from unittest.mock import patch
+        from memory import read_summary_list
+        data = [{"week": i} for i in range(10)]
+        cs = {"WEEKLY_SUMMARIES": {"summary": json.dumps(data)}}
+        with patch("memory.read_coach_state", return_value=cs):
+            result = read_summary_list("WEEKLY_SUMMARIES", limit=3)
+        assert len(result) == 3
+        assert result[-1]["week"] == 9  # most recent
+
+    def test_append_summary_adds_and_trims(self):
+        import json
+        from unittest.mock import patch
+        from memory import append_summary
+
+        existing = [{"week": i} for i in range(8)]
+        cs = {"WEEKLY_SUMMARIES": {"summary": json.dumps(existing)}}
+        stored = {}
+        with patch("memory.read_coach_state", return_value=cs), \
+             patch("memory.upsert_coach_state", side_effect=lambda d, s, c="MEDIUM": stored.update({d: s})):
+            append_summary("WEEKLY_SUMMARIES", {"week": 9, "note": "new"}, max_keep=8)
+
+        result = json.loads(stored["WEEKLY_SUMMARIES"])
+        assert len(result) == 8  # trimmed to max_keep
+        assert result[-1]["week"] == 9
+
+    def test_write_and_read_single_summary(self):
+        import json
+        from unittest.mock import patch
+        from memory import write_single_summary, read_single_summary
+
+        summary = {"year": 2026, "phase": "strength block"}
+        stored = {}
+        with patch("memory.upsert_coach_state", side_effect=lambda d, s, c="MEDIUM": stored.update({d: s})):
+            write_single_summary("ANNUAL_SUMMARY", summary)
+
+        cs = {"ANNUAL_SUMMARY": {"summary": stored["ANNUAL_SUMMARY"]}}
+        with patch("memory.read_coach_state", return_value=cs):
+            result = read_single_summary("ANNUAL_SUMMARY")
+        assert result["year"] == 2026
+        assert result["phase"] == "strength block"
+
+    def test_read_single_summary_none_when_empty(self):
+        from unittest.mock import patch
+        from memory import read_single_summary
+        with patch("memory.read_coach_state", return_value={}):
+            assert read_single_summary("ANNUAL_SUMMARY") is None
+
+
+class TestSessionPositionHelper:
+    """_get_session_position() counts lift sessions from history."""
+
+    def _make_history(self, lift_name, dates):
+        return [{"Exercise": lift_name, "Date": d} for d in dates]
+
+    def test_counts_unique_dates(self):
+        from run_coach import _get_session_position
+        history = self._make_history("Squat", ["2026-01-10", "2026-01-13", "2026-01-17"])
+        result = _get_session_position("Squat", history, week_num=3, total_weeks=30)
+        assert "3" in result
+        assert "Squat" in result
+
+    def test_deduplicates_same_date(self):
+        """Multiple sets on the same date = one session."""
+        from run_coach import _get_session_position
+        history = self._make_history("Squat", ["2026-01-10", "2026-01-10", "2026-01-13"])
+        result = _get_session_position("Squat", history, week_num=2, total_weeks=30)
+        assert "#2" in result
+
+    def test_includes_week_of_total(self):
+        from run_coach import _get_session_position
+        history = self._make_history("Bench Press", ["2026-01-10"])
+        result = _get_session_position("Bench Press", history, week_num=5, total_weeks=30)
+        assert "Week 5 of 30" in result
+
+    def test_empty_history_returns_empty(self):
+        from run_coach import _get_session_position
+        result = _get_session_position("Squat", [], week_num=5, total_weeks=30)
+        assert result == ""
+
+    def test_empty_lift_name_returns_empty(self):
+        from run_coach import _get_session_position
+        result = _get_session_position("", [{"Exercise": "Squat", "Date": "2026-01-10"}], 1, 30)
+        assert result == ""
+
+    def test_partial_name_match(self):
+        """Short prefix match works (e.g., 'Squat' matches 'Squat 4x5')."""
+        from run_coach import _get_session_position
+        history = [{"Exercise": "Squat 4x5", "Date": "2026-01-10"},
+                   {"Exercise": "Squat 4x5", "Date": "2026-01-13"}]
+        result = _get_session_position("Squat", history, week_num=2, total_weeks=30)
+        assert "#2" in result
+
+
+class TestPhaseRpeTarget:
+    """_get_phase_rpe_target() maps program phase to RPE range."""
+
+    def test_early_phase_is_lower_rpe(self):
+        from run_coach import _get_phase_rpe_target
+        result = _get_phase_rpe_target(week_num=2, total_weeks=30)
+        assert "6" in result or "7" in result
+
+    def test_intensification_is_higher_rpe(self):
+        from run_coach import _get_phase_rpe_target
+        result = _get_phase_rpe_target(week_num=22, total_weeks=30)
+        assert "8" in result
+
+    def test_returns_string(self):
+        from run_coach import _get_phase_rpe_target
+        result = _get_phase_rpe_target(week_num=10, total_weeks=30)
+        assert isinstance(result, str)
+        assert "RPE" in result
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
