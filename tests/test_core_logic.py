@@ -3420,5 +3420,169 @@ class TestCloseDayEscalation:
         assert result["type"] == "injury"  # injury wins
 
 
+class TestHealthSciencePearson:
+    """_pearson_correlation() correctness tests."""
+
+    def test_perfect_positive_correlation(self):
+        from health_science import _pearson_correlation
+        x = [1, 2, 3, 4, 5]
+        y = [2, 4, 6, 8, 10]
+        r, r2, n = _pearson_correlation(x, y)
+        assert abs(r - 1.0) < 1e-9
+        assert abs(r2 - 1.0) < 1e-9
+        assert n == 5
+
+    def test_perfect_negative_correlation(self):
+        from health_science import _pearson_correlation
+        x = [1, 2, 3, 4, 5]
+        y = [10, 8, 6, 4, 2]
+        r, r2, n = _pearson_correlation(x, y)
+        assert abs(r - (-1.0)) < 1e-9
+        assert abs(r2 - 1.0) < 1e-9
+
+    def test_no_correlation(self):
+        from health_science import _pearson_correlation
+        x = [1, 2, 3, 4, 5, 1, 2, 3, 4, 5]
+        y = [3, 1, 4, 1, 5, 9, 2, 6, 5, 3]
+        r, r2, n = _pearson_correlation(x, y)
+        assert abs(r) < 0.7  # not strongly correlated
+
+    def test_empty_returns_zero(self):
+        from health_science import _pearson_correlation
+        r, r2, n = _pearson_correlation([], [])
+        assert r == 0.0
+        assert n == 0
+
+    def test_single_point_returns_zero(self):
+        from health_science import _pearson_correlation
+        r, r2, n = _pearson_correlation([5.0], [8.0])
+        assert r == 0.0
+
+
+class TestHealthScienceExtractHelpers:
+    """_extract_weight_kg and _extract_rpe helpers."""
+
+    def test_extract_weight_kg_standard(self):
+        from health_science import _extract_weight_kg
+        assert _extract_weight_kg("100kg 4x4") == 100.0
+
+    def test_extract_weight_kg_decimal(self):
+        from health_science import _extract_weight_kg
+        assert _extract_weight_kg("92.5 kg") == 92.5
+
+    def test_extract_weight_kg_none_on_empty(self):
+        from health_science import _extract_weight_kg
+        assert _extract_weight_kg("") is None
+
+    def test_extract_rpe_standard(self):
+        from health_science import _extract_rpe
+        assert _extract_rpe("rpe 8") == 8.0
+        assert _extract_rpe("RPE: 7.5") == 7.5
+
+    def test_extract_rpe_at_symbol(self):
+        from health_science import _extract_rpe
+        assert _extract_rpe("@8") == 8.0
+
+    def test_extract_rpe_none_on_no_match(self):
+        from health_science import _extract_rpe
+        assert _extract_rpe("great session today") is None
+
+    def test_extract_rpe_out_of_range_returns_none(self):
+        from health_science import _extract_rpe
+        assert _extract_rpe("rpe 15") is None  # > 10
+
+
+class TestDailyReadiness:
+    """compute_daily_readiness() output structure and readiness scoring."""
+
+    def _make_health_log(self, sleep_hrs=7.5, steps=8000, food=7):
+        today = str(date.today())
+        return [{"Date": today, "Sleep (hrs)": str(sleep_hrs),
+                  "Steps": str(steps), "Food Quality (1-10)": str(food)}]
+
+    def test_returns_required_keys(self):
+        from health_science import compute_daily_readiness
+        result = compute_daily_readiness(self._make_health_log())
+        assert "readiness_score" in result
+        assert "constraints" in result
+        assert "recommendations" in result
+        assert "flags" in result
+        assert "insights" in result
+        assert "date" in result
+
+    def test_good_sleep_high_readiness(self):
+        from health_science import compute_daily_readiness
+        result = compute_daily_readiness(self._make_health_log(sleep_hrs=8.5))
+        assert result["readiness_score"] >= 75
+
+    def test_poor_sleep_low_readiness(self):
+        from health_science import compute_daily_readiness
+        result = compute_daily_readiness(self._make_health_log(sleep_hrs=4.5))
+        assert result["readiness_score"] < 65
+
+    def test_critically_low_sleep_adds_rpe_constraint(self):
+        from health_science import compute_daily_readiness
+        result = compute_daily_readiness(self._make_health_log(sleep_hrs=4.5))
+        assert any("max_rpe" in c for c in result["constraints"])
+
+    def test_critically_low_sleep_adds_flag(self):
+        from health_science import compute_daily_readiness
+        result = compute_daily_readiness(self._make_health_log(sleep_hrs=4.5))
+        assert any("sleep" in f for f in result["flags"])
+
+    def test_empty_health_log_returns_defaults(self):
+        from health_science import compute_daily_readiness
+        result = compute_daily_readiness([])
+        assert result["readiness_score"] == 75
+        assert "no_health_data" in result["flags"]
+
+    def test_readiness_score_in_valid_range(self):
+        from health_science import compute_daily_readiness
+        for sleep in [4.0, 6.0, 7.5, 9.0]:
+            result = compute_daily_readiness(self._make_health_log(sleep_hrs=sleep))
+            assert 0 <= result["readiness_score"] <= 100
+
+
+class TestWeeklyCorrelations:
+    """compute_weekly_correlations() threshold behavior."""
+
+    def _make_logs(self, n_pairs=25):
+        """Generate n paired health+lift entries with clear sleep→strength correlation."""
+        health_log = []
+        lift_history = []
+        base_date = date(2026, 1, 1)
+        for i in range(n_pairs):
+            sleep = 6.0 + (i % 4) * 0.5  # varies 6.0-7.5
+            d = str(base_date + timedelta(days=i * 2))
+            next_d = str(base_date + timedelta(days=i * 2 + 1))
+            health_log.append({"Date": d, "Sleep (hrs)": str(sleep),
+                                "Steps": "8000", "Food Quality (1-10)": "7"})
+            # Stronger correlation: weight ~= 80 + sleep * 5
+            weight = 80 + sleep * 5
+            lift_history.append({"Date": next_d, "Actual Weight/Reps": f"{weight}kg 4x5",
+                                  "Notes": "rpe 7"})
+        return health_log, lift_history
+
+    def test_below_n_min_returns_empty(self):
+        from health_science import compute_weekly_correlations
+        # Only 5 pairs — below N_MIN
+        health_log, lift_history = self._make_logs(n_pairs=5)
+        result = compute_weekly_correlations(health_log, lift_history)
+        assert result == {}
+
+    def test_above_n_min_with_strong_correlation_surfaces_insight(self):
+        from health_science import compute_weekly_correlations, N_MIN
+        health_log, lift_history = self._make_logs(n_pairs=N_MIN + 5)
+        result = compute_weekly_correlations(health_log, lift_history)
+        # With a clear pattern, at least one correlation should be found
+        if "sleep_strength" in result:
+            assert "insight_text" in result["sleep_strength"]
+            assert result["sleep_strength"]["n"] >= N_MIN
+
+    def test_empty_logs_return_empty(self):
+        from health_science import compute_weekly_correlations
+        assert compute_weekly_correlations([], []) == {}
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

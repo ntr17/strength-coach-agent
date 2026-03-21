@@ -846,6 +846,19 @@ def run_think(week_num: int = None, dry_run: bool = False):
     memory_data = read_all()  # re-read for fresh Coach State
     _initiate_steer_co(memory_data, dry_run=dry_run)
 
+    # 8. V17 weekly health science pass — correlate sleep/HRV with training (pure Python)
+    try:
+        from health_science import run_weekly_health_science
+        from memory import read_lift_history, read_health_log
+        print("  Running weekly health science correlations...")
+        run_weekly_health_science(
+            health_log=read_health_log(limit=200),
+            lift_history=read_lift_history(limit=500),
+            dry_run=dry_run,
+        )
+    except Exception as e:
+        print(f"  Weekly health science failed (non-fatal): {e}")
+
 
 def _write_program_terminal_summary(memory_data: dict, dry_run: bool = False) -> None:
     """

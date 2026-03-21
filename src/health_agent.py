@@ -202,7 +202,15 @@ def run_health_proactive(health_log: list, coach_state: dict,
     a Telegram message if outreach is warranted, or empty string if not.
 
     Called from run_proactive() — no extra API cost beyond the main proactive pass.
+    Also updates HEALTH_READINESS Coach State domain (V17).
     """
+    # V17: Update HEALTH_READINESS daily readiness signal (pure Python, no LLM)
+    try:
+        from health_science import update_health_readiness
+        update_health_readiness(health_log)
+    except Exception as _e:
+        pass  # non-fatal — readiness signal is best-effort
+
     health_state = _format_health_coach_state(coach_state)
     log_text = _format_health_log(health_log, limit=10)
 
