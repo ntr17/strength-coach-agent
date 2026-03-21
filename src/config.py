@@ -36,8 +36,23 @@ def compute_current_week(start_date_str: str, today: date = None) -> int:
 
 
 ANTHROPIC_API_KEY = os.environ["ANTHROPIC_API_KEY"]
-# PROGRAM_SHEET_ID is optional — agent falls back to Coach Memory registry if absent.
-PROGRAM_SHEET_ID = _extract_sheet_id(os.environ.get("PROGRAM_SHEET_ID", ""))
+# PROGRAM_SHEET_ID: env var is the initial default. After the program agent creates a new
+# program it writes ACTIVE_PROGRAM_SHEET_ID to Coach State, which takes priority here so
+# Railway secrets never need manual updating when programs change.
+def _resolve_program_sheet_id() -> str:
+    env_id = _extract_sheet_id(os.environ.get("PROGRAM_SHEET_ID", ""))
+    try:
+        from memory import read_coach_state
+        cs = read_coach_state()
+        active = cs.get("ACTIVE_PROGRAM_SHEET_ID", {})
+        stored = active.get("summary", "") or active.get("Summary", "")
+        if stored and len(stored) > 10:
+            return stored.strip()
+    except Exception:
+        pass
+    return env_id
+
+PROGRAM_SHEET_ID = _resolve_program_sheet_id()
 MEMORY_SHEET_ID = _extract_sheet_id(os.environ["MEMORY_SHEET_ID"])
 GMAIL_FROM = os.environ["GMAIL_FROM"]
 GMAIL_TO = os.environ["GMAIL_TO"]

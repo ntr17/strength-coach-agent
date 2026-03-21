@@ -624,6 +624,14 @@ def respond(user_message: str, base_context: str, memory_data: dict = None,
 
         if sheet_id:
             _register_program(sheet_id, program)
+            # Persist new sheet ID to Coach State so the bot picks it up without
+            # requiring a manual Railway/GitHub Secrets update
+            try:
+                from memory import upsert_coach_state
+                upsert_coach_state("ACTIVE_PROGRAM_SHEET_ID", sheet_id, "HIGH")
+                print(f"  [ProgramAgent] ACTIVE_PROGRAM_SHEET_ID updated in Coach State")
+            except Exception as _e:
+                print(f"  [ProgramAgent] Could not persist sheet ID to Coach State: {_e}")
 
         _log_decision(
             "CREATE_NEW",
