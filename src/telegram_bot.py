@@ -1655,6 +1655,23 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             print(f"[Meta] Failed (falling back): {e}")
             # Fall through to GENERAL handler
 
+    # V17: If Iteration Zero is IN_PROGRESS, intercept and route to interview handler
+    try:
+        from iteration_zero import read_iteration_zero_state, handle_iteration_zero_reply
+        _iz_state = read_iteration_zero_state()
+        if _iz_state.get("status") in ("IN_PROGRESS", "COVERAGE_TESTING"):
+            import asyncio as _aio_iz
+            _loop_iz = _aio_iz.get_event_loop()
+            _iz_response = await _loop_iz.run_in_executor(
+                None, lambda: handle_iteration_zero_reply(user_text)
+            )
+            if _iz_response:
+                await update.message.reply_text(_iz_response)
+                _log_message("OUT", _iz_response)
+                return
+    except Exception as _iz_err:
+        print(f"  [IterationZero] Non-fatal: {_iz_err}")
+
     # If we're in an active endsession RPE thread, try to parse and write RPE values
     # from the reply before passing to the GENERAL tool-use loop for coach acknowledgment
     try:

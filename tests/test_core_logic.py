@@ -3584,5 +3584,76 @@ class TestWeeklyCorrelations:
         assert compute_weekly_correlations([], []) == {}
 
 
+class TestIterationZeroState:
+    """iteration_zero.py — state machine and helpers."""
+
+    def test_default_state(self):
+        from iteration_zero import _default_state
+        s = _default_state()
+        assert s["status"] == "NOT_STARTED"
+        assert s["areas_complete"] == []
+        assert s["coverage_test_passed"] is False
+
+    def test_read_state_returns_defaults_when_empty(self):
+        from unittest.mock import patch
+        from iteration_zero import read_iteration_zero_state
+        with patch("memory.read_coach_state", return_value={}):
+            state = read_iteration_zero_state()
+        assert state["status"] == "NOT_STARTED"
+
+    def test_read_state_parses_stored_json(self):
+        import json
+        from unittest.mock import patch
+        from iteration_zero import read_iteration_zero_state
+        stored = {"status": "IN_PROGRESS", "current_area": "golden_rules",
+                  "areas_complete": [], "areas_data": {}, "conversation_log": [],
+                  "coverage_test_passed": False, "started_at": "2026-03-21",
+                  "completed_at": None, "awaiting_message_id": None}
+        cs = {"ITERATION_ZERO": {"summary": json.dumps(stored)}}
+        with patch("memory.read_coach_state", return_value=cs):
+            state = read_iteration_zero_state()
+        assert state["status"] == "IN_PROGRESS"
+        assert state["current_area"] == "golden_rules"
+
+    def test_coverage_areas_all_defined(self):
+        from iteration_zero import COVERAGE_AREAS, COVERAGE_PROMPTS
+        for area in COVERAGE_AREAS:
+            assert area in COVERAGE_PROMPTS, f"No prompt for area: {area}"
+
+    def test_map_gap_to_area_injury(self):
+        from iteration_zero import _map_gap_to_area
+        result = _map_gap_to_area("Unknown medical condition or injury history")
+        assert result == "health_snapshot"
+
+    def test_map_gap_to_area_gym(self):
+        from iteration_zero import _map_gap_to_area
+        result = _map_gap_to_area("gym equipment and availability unclear")
+        assert result == "availability"
+
+    def test_map_gap_to_area_goal(self):
+        from iteration_zero import _map_gap_to_area
+        result = _map_gap_to_area("squat and bench target not specified")
+        assert result == "medium_goals"
+
+    def test_map_gap_to_area_defaults_to_golden_rules(self):
+        from iteration_zero import _map_gap_to_area
+        result = _map_gap_to_area("some random gap description")
+        assert result == "golden_rules"
+
+    def test_write_state_calls_upsert(self):
+        import json
+        from unittest.mock import patch
+        from iteration_zero import write_iteration_zero_state, _default_state
+
+        stored = {}
+        with patch("memory.upsert_coach_state",
+                   side_effect=lambda d, s, c="MEDIUM": stored.update({d: s})):
+            write_iteration_zero_state(_default_state())
+
+        assert "ITERATION_ZERO" in stored
+        data = json.loads(stored["ITERATION_ZERO"])
+        assert data["status"] == "NOT_STARTED"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

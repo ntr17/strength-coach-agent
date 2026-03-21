@@ -59,6 +59,8 @@ def parse_args():
                         help="Synthesize steer co conversation + send comprehensive email.")
     parser.add_argument("--meta", action="store_true",
                         help="Coach self-critique: analyse coaching quality + surface improvements via Telegram.")
+    parser.add_argument("--init", action="store_true",
+                        help="V17: Start or resume the Iteration 0 initialization interview via Telegram.")
     parser.add_argument("--close-day", action="store_true",
                         help="V17: Daily closing pass — classify day, produce DAILY_SUMMARY, check escalation thresholds.")
     parser.add_argument("--weekly-eval", action="store_true",
@@ -4815,6 +4817,9 @@ if __name__ == "__main__":
             run_steer_co_finalize(dry_run=args.dry_run)
         elif getattr(args, "meta", False):
             run_meta_improvement(dry_run=args.dry_run)
+        elif getattr(args, "init", False):
+            from iteration_zero import run_iteration_zero
+            run_iteration_zero(dry_run=args.dry_run)
         elif getattr(args, "close_day", False):
             from cascade_levels import close_day
             close_day(dry_run=args.dry_run)
