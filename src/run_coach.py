@@ -67,6 +67,10 @@ def parse_args():
                         help="V17: Weekly evaluation — produce WEEKLY_SUMMARY from daily summaries.")
     parser.add_argument("--monthly-eval", action="store_true",
                         help="V17: Monthly evaluation — produce MONTHLY_SUMMARY from weekly summaries.")
+    parser.add_argument("--annual-eval", action="store_true",
+                        help="V17: Annual evaluation — produce ANNUAL_SUMMARY from monthly summaries.")
+    parser.add_argument("--longterm-eval", action="store_true",
+                        help="V17: Long-term evaluation (quarterly) — produce LONGTERM_PLAN from annual summary.")
     parser.add_argument("--sync-garmin", action="store_true",
                         help="Fetch Garmin recovery data for last 14 days → Health Log. No email, no Telegram.")
     parser.add_argument("--sync-sheet", action="store_true",
@@ -860,6 +864,15 @@ def run_think(week_num: int = None, dry_run: bool = False):
         )
     except Exception as e:
         print(f"  Weekly health science failed (non-fatal): {e}")
+
+    # 9. V17 annual eval — runs on first Sunday of each month (monthly gate)
+    try:
+        if today.day <= 7:  # first week of month = run annual eval
+            print("  First week of month — running annual_eval()...")
+            from cascade_levels import annual_eval
+            annual_eval(dry_run=dry_run)
+    except Exception as e:
+        print(f"  Annual eval failed (non-fatal): {e}")
 
 
 def _write_program_terminal_summary(memory_data: dict, dry_run: bool = False) -> None:
@@ -4829,6 +4842,12 @@ if __name__ == "__main__":
         elif getattr(args, "monthly_eval", False):
             from cascade_levels import monthly_eval
             monthly_eval(dry_run=args.dry_run)
+        elif getattr(args, "annual_eval", False):
+            from cascade_levels import annual_eval
+            annual_eval(dry_run=args.dry_run)
+        elif getattr(args, "longterm_eval", False):
+            from cascade_levels import longterm_eval
+            longterm_eval(dry_run=args.dry_run)
         elif getattr(args, "sync_garmin", False):
             sync_garmin(days=14, dry_run=args.dry_run)
         elif getattr(args, "sync_sheet", False):

@@ -492,15 +492,228 @@ Return ONLY the JSON object."""
 # ---------------------------------------------------------------------------
 
 def annual_eval(dry_run: bool = False) -> Optional[dict]:
-    """Annual evaluation — Phase 7. Stub."""
-    print(f"[{date.today()}] annual_eval() — Phase 7 (not yet implemented).")
-    return None
+    """
+    Annual evaluation — runs monthly (re-evaluates year plan each month).
+    Reads last 6 MONTHLY_SUMMARIES + GOLDEN_RULES + athlete long-term goals.
+    Uses Sonnet (strategic, rare). Writes ANNUAL_SUMMARY.
+    """
+    import anthropic
+    from config import ANTHROPIC_API_KEY, CLAUDE_MODEL
+    from memory import read_summary_list, read_single_summary, write_single_summary, read_coach_state
+    from cascade_state import set_level_state
+
+    today = date.today()
+    print(f"[{today}] annual_eval() starting...")
+    set_level_state("ANNUAL", "GATHERING")
+
+    monthly_summaries = read_summary_list("MONTHLY_SUMMARIES", limit=6)
+    if not monthly_summaries:
+        print("  annual_eval(): No monthly summaries — skipping.")
+        set_level_state("ANNUAL", "IDLE")
+        return None
+
+    golden_rules = None
+    coach_state = read_coach_state()
+    try:
+        import json as _json
+        raw_rules = coach_state.get("GOLDEN_RULES", {}).get("summary", "")
+        if raw_rules:
+            golden_rules = _json.loads(raw_rules)
+    except Exception:
+        pass
+
+    athlete_goals = coach_state.get("ANNUAL_ARC", {}).get("summary", "")
+    monthly_json = json.dumps(monthly_summaries, indent=2, ensure_ascii=False)
+    rules_text = json.dumps(golden_rules, indent=2, ensure_ascii=False) if golden_rules else "(not yet set)"
+
+    set_level_state("ANNUAL", "REASONING")
+
+    prompt = f"""You are a strength coaching AI. Produce an annual evaluation from the monthly summaries.
+
+GOLDEN RULES (constitutional constraints — must be respected):
+{rules_text}
+
+LONG-TERM GOALS:
+{athlete_goals or "(not yet set)"}
+
+MONTHLY SUMMARIES (last 6 months):
+{monthly_json}
+
+Produce a JSON annual summary:
+{{
+  "year": <integer>,
+  "evaluated_at": "{today}",
+  "training": {{
+    "months_evaluated": <integer>,
+    "trend": "<ascending|stable|declining|mixed>",
+    "primary_achievements": ["<list>"],
+    "primary_gaps": ["<list>"]
+  }},
+  "health": {{
+    "sleep_trend": "<improving|stable|declining>",
+    "recovery_baseline": "<good|moderate|compromised>",
+    "health_risks": ["<list any ongoing risks>"]
+  }},
+  "goal_alignment": {{
+    "on_track": <true|false>,
+    "gap_to_medium_goals": "<description>",
+    "program_adjustments_needed": "<description or null>"
+  }},
+  "golden_rules_compliance": {{
+    "violations": ["<any detected violations>"],
+    "notes": "<observation>"
+  }},
+  "next_12_months": {{
+    "primary_focus": "<one clear sentence>",
+    "monthly_objectives": ["<up to 3 key objectives>"],
+    "risks_to_watch": ["<list>"]
+  }},
+  "markov_note": "<what the next quarterly review should know about this year so far>"
+}}
+
+Return ONLY the JSON object."""
+
+    if dry_run:
+        print(f"  [DRY RUN] annual_eval() would evaluate {len(monthly_summaries)} monthly summaries")
+        set_level_state("ANNUAL", "IDLE")
+        return None
+
+    try:
+        client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+        result = client.messages.create(
+            model=CLAUDE_MODEL,
+            max_tokens=1200,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        raw = result.content[0].text.strip()
+        if raw.startswith("```"):
+            raw = raw.split("```")[1]
+            if raw.startswith("json"):
+                raw = raw[4:]
+        summary = json.loads(raw.strip())
+    except Exception as e:
+        print(f"  annual_eval(): Error — {e}")
+        set_level_state("ANNUAL", "IDLE")
+        return None
+
+    set_level_state("ANNUAL", "COMMITTING")
+    write_single_summary("ANNUAL_SUMMARY", summary)
+    print(f"  annual_eval(): Annual summary committed — on_track={summary.get('goal_alignment', {}).get('on_track', '?')}")
+
+    set_level_state("ANNUAL", "IDLE")
+    return summary
 
 
 def longterm_eval(dry_run: bool = False) -> Optional[dict]:
-    """Long-term evaluation (quarterly) — Phase 7. Stub."""
-    print(f"[{date.today()}] longterm_eval() — Phase 7 (not yet implemented).")
-    return None
+    """
+    Long-term evaluation — runs quarterly.
+    Reads ANNUAL_SUMMARY + GOLDEN_RULES + Golden Rules override log.
+    Uses Sonnet. Updates LONGTERM_PLAN.
+    Checks if Golden Rules have been violated 3+ times → re-runs constitutional check.
+    """
+    import anthropic
+    from config import ANTHROPIC_API_KEY, CLAUDE_MODEL
+    from memory import read_single_summary, write_single_summary, read_coach_state
+    from cascade_state import set_level_state
+
+    today = date.today()
+    print(f"[{today}] longterm_eval() starting...")
+    set_level_state("LONGTERM", "GATHERING")
+
+    annual = read_single_summary("ANNUAL_SUMMARY")
+    if not annual:
+        print("  longterm_eval(): No annual summary — skipping.")
+        set_level_state("LONGTERM", "IDLE")
+        return None
+
+    coach_state = read_coach_state()
+    golden_rules_raw = coach_state.get("GOLDEN_RULES", {}).get("summary", "")
+    existing_longterm = read_single_summary("LONGTERM_PLAN")
+    athlete_goals = coach_state.get("ANNUAL_ARC", {}).get("summary", "")
+
+    # Check for constitutional violations
+    constitutional_issue = False
+    try:
+        rules_data = json.loads(golden_rules_raw) if golden_rules_raw else {}
+        override_log = rules_data.get("override_log", [])
+        # Count overrides per rule
+        override_counts: dict = {}
+        for override in override_log:
+            rule_id = override.get("rule_id", "unknown")
+            override_counts[rule_id] = override_counts.get(rule_id, 0) + 1
+        if any(count >= 3 for count in override_counts.values()):
+            constitutional_issue = True
+            print(f"  longterm_eval(): Constitutional issue — rule overridden 3+ times.")
+    except Exception:
+        pass
+
+    set_level_state("LONGTERM", "REASONING")
+
+    prompt = f"""You are a strength coaching AI doing a quarterly long-term review.
+
+GOLDEN RULES (the constitution):
+{golden_rules_raw or "(not yet set)"}
+
+LONG-TERM GOALS:
+{athlete_goals or "(not yet set)"}
+
+ANNUAL SUMMARY (most recent):
+{json.dumps(annual, indent=2, ensure_ascii=False)}
+
+EXISTING LONGTERM PLAN (for continuity):
+{json.dumps(existing_longterm, indent=2, ensure_ascii=False) if existing_longterm else "(first evaluation)"}
+
+{"CONSTITUTIONAL ALERT: A Golden Rule has been overridden 3+ times. This review must address whether the rule should be updated or whether behavior must change." if constitutional_issue else ""}
+
+Produce a JSON long-term plan:
+{{
+  "evaluated_at": "{today}",
+  "phase_map": [
+    {{"phase": "<name>", "timeframe": "<e.g., Now - Month 6>", "focus": "<primary objective>",
+     "milestones": ["<list>"]}}
+  ],
+  "3yr_vision": "<1-2 sentences: what does success look like in 3 years?>",
+  "annual_objectives": ["<up to 3 concrete annual objectives>"],
+  "constitutional_status": {{
+    "rules_stable": <true|false>,
+    "issues": ["<any violations or tensions>"],
+    "recommendation": "<update rules | change behavior | no action needed>"
+  }},
+  "markov_note": "<what next quarter's review should know about the trajectory>",
+  "updated_at": "{today}"
+}}
+
+Return ONLY the JSON object."""
+
+    if dry_run:
+        print(f"  [DRY RUN] longterm_eval() would produce 3-year arc update")
+        set_level_state("LONGTERM", "IDLE")
+        return None
+
+    try:
+        client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+        result = client.messages.create(
+            model=CLAUDE_MODEL,
+            max_tokens=1500,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        raw = result.content[0].text.strip()
+        if raw.startswith("```"):
+            raw = raw.split("```")[1]
+            if raw.startswith("json"):
+                raw = raw[4:]
+        plan = json.loads(raw.strip())
+    except Exception as e:
+        print(f"  longterm_eval(): Error — {e}")
+        set_level_state("LONGTERM", "IDLE")
+        return None
+
+    set_level_state("LONGTERM", "COMMITTING")
+    write_single_summary("LONGTERM_PLAN", plan)
+    print(f"  longterm_eval(): Long-term plan committed — 3yr vision set, {len(plan.get('phase_map', []))} phases")
+
+    set_level_state("LONGTERM", "IDLE")
+    return plan
 
 
 # ---------------------------------------------------------------------------
