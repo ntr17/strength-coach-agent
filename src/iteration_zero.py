@@ -165,18 +165,23 @@ VERDICT: PASS (score >= 8 and no critical gaps) or FAIL"""
         )
         text = result.content[0].text.strip()
 
-        # Parse verdict
-        passed = "VERDICT: PASS" in text
-        score = 0
         import re
-        m = re.search(r"COVERAGE SCORE:\s*(\d+)/10", text)
+        # Parse verdict — accept both "VERDICT: PASS" and "PASS" near end of text
+        passed = bool(re.search(r"VERDICT:\s*PASS", text, re.IGNORECASE))
+
+        # Parse score — accept "COVERAGE SCORE: X/10" or just "X/10" near score label
+        score = 0
+        m = re.search(r"(?:COVERAGE SCORE|SCORE)[:\s]+(\d+)\s*/\s*10", text, re.IGNORECASE)
         if m:
             score = int(m.group(1))
 
-        # Extract gaps
-        gaps = []
+        # Extract gaps — [GAP: ...] blocks; filter trivial
         gap_section = re.findall(r"\[GAP:\s*([^\]]+)\]", text)
-        gaps = [g.strip() for g in gap_section if g.strip().lower() not in ("none", "no gap", "")]
+        gaps = [g.strip() for g in gap_section if g.strip().lower() not in ("none", "no gap", "n/a", "")]
+
+        # If score >= 8 and no critical gaps, treat as pass even if VERDICT line is missing
+        if score >= 8 and not gaps:
+            passed = True
 
         return {
             "passed": passed,
@@ -300,20 +305,17 @@ def handle_iteration_zero_reply(message: str) -> Optional[str]:
                     f"I'll start with your Monthly plan and work down from there."
                 )
             else:
-                # Coverage failed — re-open gaps
-                gaps_text = "\n".join(f"- {g}" for g in coverage["gaps"][:5])
+                # Coverage failed — re-open gaps and immediately ask the next question
                 state["status"] = "IN_PROGRESS"
-                # Re-open the area most relevant to first gap
                 gap_area = _map_gap_to_area(coverage["gaps"][0] if coverage["gaps"] else "")
                 state["current_area"] = gap_area
-                state["conversation_log"] = []  # fresh thread for this area
+                state["conversation_log"] = []
                 write_iteration_zero_state(state)
 
-                return (
-                    f"Almost there — coverage score {coverage['score']}/10. "
-                    f"I still have gaps that would prevent confident coaching:\n{gaps_text}\n\n"
-                    f"Let me ask a few more questions to fill these in."
-                )
+                from config import ATHLETE_NAME as _aname
+                next_q = _build_question(gap_area, state, _aname)
+                score_line = f"Coverage score {coverage['score']}/10 — " if coverage["score"] else ""
+                return f"{score_line}need a bit more before I'm ready.\n\n{next_q}"
         else:
             # Move to next area
             state["current_area"] = remaining[0]
