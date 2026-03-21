@@ -1433,10 +1433,15 @@ def create_and_register_sheet(name: str, sheet_type: str,
 
 
 def append_life_context(context_note: str, context_date: Optional[date] = None) -> None:
-    """Append a life context change detected from notes."""
+    """Append a life context change detected from notes. Skips exact duplicates."""
     sheet = _get_memory_sheet()
     ws = _get_tab(sheet, TAB_LIFE_CONTEXT)
     d = str(context_date or date.today())
+    # Dedup: skip if same date+note already exists
+    existing = ws.get_all_values()
+    for row in existing[1:]:
+        if len(row) >= 2 and row[0] == d and row[1].strip() == context_note.strip():
+            return
     ws.append_row([d, context_note])
 
 
