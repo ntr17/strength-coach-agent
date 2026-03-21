@@ -1586,6 +1586,42 @@ def _detect_program_phase(week_num: int, total_weeks: int) -> str:
         return "taper / program end"
 
 
+def _get_session_position(lift_name: str, lift_history: list, week_num: int, total_weeks: int) -> str:
+    """
+    Return a session position string like 'Squat session #22 (Week 9 of 30)'.
+    Counts unique training dates where this lift was performed in lift_history.
+    """
+    if not lift_name or not lift_history:
+        return ""
+    lift_lower = lift_name.lower()
+    session_dates: set = set()
+    for entry in lift_history:
+        ex = (entry.get("Exercise") or entry.get("exercise_name") or "").lower()
+        if lift_lower in ex or (len(lift_lower) >= 4 and ex and lift_lower[:4] in ex):
+            d = entry.get("Date") or entry.get("date") or ""
+            if d:
+                session_dates.add(str(d))
+    count = len(session_dates)
+    if count == 0:
+        return ""
+    pos = f"{lift_name} session #{count}"
+    if total_weeks and week_num:
+        pos += f" (Week {week_num} of {total_weeks})"
+    return pos
+
+
+def _get_phase_rpe_target(week_num: int, total_weeks: int) -> str:
+    """Return RPE target range string based on program phase."""
+    phase = _detect_program_phase(week_num, total_weeks)
+    return {
+        "early accumulation": "RPE 6-7",
+        "mid-block accumulation": "RPE 7-8",
+        "intensification": "RPE 8-8.5",
+        "peak / realization": "RPE 9+",
+        "taper / program end": "RPE 7-8",
+    }.get(phase, "RPE 7-8")
+
+
 def _detect_session_conflicts(coach_state: dict, commands: list) -> str:
     """
     Detect conflicts between TOMORROW_PLAN and unresolved pending catch-ups.
@@ -3219,6 +3255,20 @@ def run_brief(dry_run: bool = False):
     cues = _select_lift_cue(primary_lift, coach_state, primary_lift_notes) if primary_lift else []
     cue_text = "\n".join(f"  - {c}" for c in cues) if cues else "(use general principles)"
 
+    # Session position (e.g. "Squat session #22 (Week 9 of 30)") and phase RPE target
+    _brief_session_position = ""
+    _brief_rpe_target = _get_phase_rpe_target(week_num, program_data.get("total_weeks", 30))
+    try:
+        from memory import read_lift_history as _rlh_brief_pos
+        _brief_lh = _rlh_brief_pos(limit=200)
+        if primary_lift:
+            _brief_session_position = _get_session_position(
+                primary_lift, _brief_lh, week_num, program_data.get("total_weeks", 30)
+            )
+    except Exception:
+        pass
+    _brief_session_pos_line = f"This is {_brief_session_position}." if _brief_session_position else ""
+
     # Load extra context for cascade
     commands_for_cascade = []
     coach_focus_for_cascade = []
@@ -3250,33 +3300,44 @@ def run_brief(dry_run: bool = False):
 
     session_text = "\n".join(session_lines) or "session details unavailable"
 
-    prompt = f"""You are {ATHLETE_NAME}'s strength coach. Write a pre-session Telegram message.
+    prompt = f"""You are {ATHLETE_NAME}'s strength coach. Write a pre-session brief for today's training.
 
-=== COACHING CONTEXT — REASON THROUGH THIS BEFORE WRITING ===
-
+=== COACHING CONTEXT — WORK THROUGH ALL 4 LAYERS BEFORE WRITING ===
 {cascade}
 
-=== SESSION DETAILS ===
-TODAY'S EXERCISES:
+=== TODAY'S SESSION ===
+Exercises:
 {session_text}
 
-TECHNIQUE CUE OPTIONS FOR {primary_lift.upper() or "TODAY'S MAIN LIFT"}:
-{cue_text}
+Session position: {_brief_session_pos_line or '(unknown)'}
+Phase RPE target: {_brief_rpe_target}
 
+TECHNIQUE CUE OPTIONS FOR {primary_lift.upper() or "TODAY'S MAIN LIFT"} (choose ONE or skip):
+{cue_text}
 {f"RECENT ATHLETE TECHNIQUE MENTIONS: {recent_tech_notes}" if recent_tech_notes else ""}
 {f"OPEN COMMITMENT: {commitment_note}" if commitment_note else ""}
 
-=== OUTPUT RULES ===
-1. Work through the cascade above (all 4 layers) before writing — do not skip to the session details.
-2. If Layer 3 shows a CONFLICT, name it explicitly in your message instead of silently picking a side.
-3. If Layer 3 COMMITMENT (last night) matches today's session, build on it — do not re-derive independently.
-4. Lead with the single most important thing across all 4 layers (cue, goal connection, concern, readiness).
-5. Reference actual numbers, actual lift names, actual context. Never generic.
-6. 2–4 sentences MAX. No greeting, no sign-off. Every brief must feel different from the last.
+=== COACHING TONE DIRECTIVE ===
+Write this as a pre-session coaching brief — warm, direct, personal. English. No greeting, no sign-off.
 
-NARRACIÓN OBLIGATORIA: Incluye al menos UNA frase que conecte observación, significado y acción.
-Plantilla: Veo que [dato] — esto [qué significa] — [recomendación concreta].
-Ejemplo: Veo que las últimas 3 sentadillas fueron RPE 9 — el peso está cerca del límite — si el primer set se siente cargado hoy, baja 2.5kg sin pensarlo."""
+The message MUST include ALL of the following in flowing prose (no bullet points, no headers):
+
+1. WHY TODAY: One sentence connecting today's session to the program arc. Draw from Layer 2
+   (WEEKLY_INTENT, COACHING_REASON). Example: "This is the intensity peak of your accumulation block —
+   today's sets build the foundation for the heavier loads coming in weeks 12-14."
+
+2. SESSION POSITION + TARGET: State {_brief_session_pos_line or "the session position"}.
+   Name the key lift, weight, and sets. State RPE target: {_brief_rpe_target}.
+   If it might hit RPE 9+ on set 3, name the drop weight explicitly.
+
+3. ONE CUE: The single most important cue from the options above. One thing only.
+
+4. SPECIFIC FEEDBACK ASK: A precise question that gives coaching data — not "how did it go?"
+   Example: "Tell me how the last two sets felt — that's my calibration signal."
+
+REASONING RULE: At least one sentence must follow: "I see [data] — this means [X] — [action]."
+If Layer 3 shows a CONFLICT, address it directly. If last night's commitment matches today, build on it.
+English. 3–5 sentences MAX. Every brief must feel different from the last."""
 
     # Enforce athlete output preferences as hard constraints
     try:
@@ -3294,7 +3355,7 @@ Ejemplo: Veo que las últimas 3 sentadillas fueron RPE 9 — el peso está cerca
         client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
         result = client.messages.create(
             model=CLAUDE_HAIKU,
-            max_tokens=220,
+            max_tokens=320,
             messages=[{"role": "user", "content": prompt}],
         )
         brief_msg = result.content[0].text.strip()
@@ -4331,6 +4392,18 @@ def run_evening_protocol(dry_run: bool = False):
 
     tomorrow_plan_summary = f"{label} | {lift_summary}" if lift_summary else label
 
+    # Session position (e.g. "Squat session #22 (Week 9 of 30)") and phase RPE target
+    _ep_session_position = ""
+    _ep_rpe_target = _get_phase_rpe_target(week_num, program_data.get("total_weeks", 30))
+    try:
+        _ep_lh = read_lift_history(limit=200)
+        if primary_tomorrow_lift:
+            _ep_session_position = _get_session_position(
+                primary_tomorrow_lift, _ep_lh, week_num, program_data.get("total_weeks", 30)
+            )
+    except Exception:
+        pass
+
     # Load commands for cascade conflict detection
     _ep_commands: list = []
     try:
@@ -4364,53 +4437,58 @@ def run_evening_protocol(dry_run: bool = False):
         orientation="tomorrow",
     )
 
-    prompt = f"""You are {ATHLETE_NAME}'s strength coach — not just a programming tool, but a real coach who cares.
-You are his mentor and father figure in training. You hold him accountable through goals, not guilt.
+    _ep_session_pos_line = f"This is {_ep_session_position}." if _ep_session_position else ""
 
-=== WHAT WAS ALREADY DISCUSSED TODAY (read this FIRST) ===
+    prompt = f"""You are {ATHLETE_NAME}'s strength coach. Write him a coaching message for tomorrow's session.
+
+=== WHAT WAS ALREADY DISCUSSED TODAY (read FIRST — do NOT repeat or ask about these) ===
 {today_tg_text}
-CRITICAL: Do NOT ask about anything the athlete already reported or confirmed above.
-Do NOT present health data older than 3 days as if it happened recently — always check the date.
 
 === COACHING CONTEXT — WORK THROUGH ALL 4 LAYERS BEFORE WRITING ===
-
 {cascade}
 
 === TOMORROW'S SESSION ===
 Session: {label} ({total_ex_count} exercises total)
 Key lifts: {lift_summary or 'see program'}
-CUE OPTIONS for {primary_tomorrow_lift or 'primary lift'} (choose ONE if relevant, skip if not):
+Session position: {_ep_session_pos_line or '(unknown)'}
+Phase RPE target: {_ep_rpe_target}
+CUE OPTIONS for {primary_tomorrow_lift or 'primary lift'} (choose ONE, or skip if none apply):
 {tomorrow_cue_text or "  (no specific cues — use your judgment)"}
 
 === HEALTH & CONCERNS ===
-Recent health (entries from last 3 days only — if empty, there is no recent data):
+Recent health (last 3 days only — if empty, there is NO recent data, do not mention health):
 {health_summary}
 Active concerns (elbow, injury, follow-ups): {concerns_text}
 {challenge_suggestion}
 
-=== HOW TO WRITE THIS MESSAGE ===
-Write this as if you're texting your athlete — warm, direct, personal. NOT a schedule notification.
+=== COACHING TONE DIRECTIVE ===
+Every message must do ALL of the following — in flowing prose, never as bullet points or headers:
 
-1. Open with ONE real insight that connects tomorrow to something that actually matters right now.
-   Pick whichever is truest from the cascade:
-   - A goal he's closing in on ("estás a 2.5kg del objetivo en sentadilla")
-   - A pattern you're seeing ("llevas dos semanas fuerte — este bloque está funcionando")
-   - A readiness note (only if health data above is from the last 3 days — never invent it)
-   - A strategic context point ("esta semana eleva el volumen — hoy es el pico")
+1. WHY THIS SESSION: In 1-2 sentences, connect today's session to the program arc.
+   Draw from Layer 2 (WEEKLY_INTENT, COACHING_REASON) in the cascade above.
+   Example: "This week is the volume peak of your accumulation block — the sets today trigger
+   the hypertrophic stimulus that converts to heavier loads in weeks 12-14."
 
-2. Then 1-2 sentences on the actual session: name the key lift + weight. ONE cue if it adds value.
+2. SESSION POSITION + TARGET: State the session position (use "{_ep_session_pos_line}") and the
+   target weight/sets from the program. Then state the RPE target: {_ep_rpe_target}.
+   If RPE would be exceeded on set 3, drop 2.5kg — state this explicitly.
 
-3. End with ONE specific question — but NOT about something the athlete already told you today.
-   e.g. "¿Cómo quedó el codo hoy?", "¿Puedes entrenar mañana a la mañana o más tarde?"
+3. ONE CUE: Pick exactly ONE cue from the options above if relevant. One thing to focus on. Not a list.
 
-4. If Layer 3 shows a CONFLICT (pending catch-ups vs. tomorrow's plan), address it conversationally —
-   don't list it as a bug report. Just: "Oye, sigo con el catch-up de [X] o vamos con [Y] mañana?"
+4. SPECIFIC FEEDBACK ASK: End with a precise question that gives you calibration data.
+   NOT "how did it go?" — instead: "Tell me how the last two sets felt — that's my calibration signal."
+   or: "After the session, tell me if the third squat set hit RPE {_ep_rpe_target.split('-')[1] if '-' in _ep_rpe_target else '8'} or above."
 
-REASONING RULE: Include at least ONE sentence showing your reasoning.
-Pattern: "I see [data] — this means [what] — [concrete recommendation]."
+5. HEALTH P.S. (only if health data above is non-empty and from last 3 days):
+   One line postscript. Example: "P.S. — HRV has been below baseline for 3 days. Sleep matters more
+   than an extra set tonight."
 
-No bullet lists. No numbered points. No headers.
-Write in Spanish (Spain — tuteo, not voseo, not Argentine). Max 200 words. This is a text message, not a report.
+6. If Layer 3 shows a CONFLICT (pending catch-up vs. tomorrow's plan), address it conversationally:
+   "Still catching up on [X] — want to swap tomorrow, or stick with the plan?"
+
+LANGUAGE: English. Warm, direct, personal. Text message tone — not a report.
+No bullet lists. No numbered points. No headers. Max 250 words.
+REASONING RULE: At least one sentence must show your reasoning: "I see [data] — this means [X]."
 
 Write the message now:"""
 
