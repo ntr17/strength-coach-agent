@@ -3329,5 +3329,96 @@ class TestPhaseRpeTarget:
         assert "RPE" in result
 
 
+class TestCloseDayEscalation:
+    """_check_escalation() deterministic checks — no LLM needed."""
+
+    def _daily_summary(self, completed=True, effort="strong"):
+        return {
+            "date": str(date.today()),
+            "week": 9,
+            "session": {"completed": completed, "label": "Day 1", "rpe_avg": 7.5,
+                        "effort_quality": effort, "notable": "Good."},
+            "health": {},
+            "events": [],
+            "escalation_check": "none",
+            "markov_note": "Fine.",
+        }
+
+    def test_injury_keyword_triggers_escalation(self):
+        from cascade_levels import _check_escalation
+        today_tg = [{"Message": "My shoulder is really injured, can't lift overhead", "Direction": "IN"}]
+        result = _check_escalation(self._daily_summary(), today_tg, [])
+        assert result is not None
+        assert result["type"] == "injury"
+        assert result["disruption"] == "injury"
+
+    def test_goal_change_keyword_triggers_escalation(self):
+        from cascade_levels import _check_escalation
+        today_tg = [{"Message": "I want to change my goal completely", "Direction": "IN"}]
+        result = _check_escalation(self._daily_summary(), today_tg, [])
+        assert result is not None
+        assert result["type"] == "goal_change"
+
+    def test_no_keyword_returns_none(self):
+        from cascade_levels import _check_escalation
+        today_tg = [{"Message": "Good session today, felt strong", "Direction": "IN"}]
+        result = _check_escalation(self._daily_summary(), today_tg, [])
+        assert result is None
+
+    def test_three_skipped_sessions_this_week_triggers_monthly_escalation(self):
+        from cascade_levels import _check_escalation, SKIP_COUNT_FOR_MONTHLY_ESCALATION
+        today = date.today()
+        week_start = today - timedelta(days=today.weekday())  # Monday
+
+        # 2 missed sessions already in history this week
+        recent = [
+            {
+                "date": str(week_start + timedelta(days=i)),
+                "session": {"completed": False, "effort_quality": "poor"},
+            }
+            for i in range(SKIP_COUNT_FOR_MONTHLY_ESCALATION - 1)
+        ]
+        # Today also missed (daily_summary)
+        today_summary = self._daily_summary(completed=False, effort="poor")
+        result = _check_escalation(today_summary, [], recent)
+        assert result is not None
+        assert result["type"] == "sessions_skipped"
+        assert result["disruption"] == "multiple_sessions_skipped"
+
+    def test_rest_day_not_counted_as_skip(self):
+        from cascade_levels import _check_escalation, SKIP_COUNT_FOR_MONTHLY_ESCALATION
+        today = date.today()
+        week_start = today - timedelta(days=today.weekday())
+        # All are rest days — should NOT trigger
+        recent = [
+            {
+                "date": str(week_start + timedelta(days=i)),
+                "session": {"completed": False, "effort_quality": "rest_day"},
+            }
+            for i in range(SKIP_COUNT_FOR_MONTHLY_ESCALATION)
+        ]
+        today_summary = self._daily_summary(completed=False, effort="rest_day")
+        result = _check_escalation(today_summary, [], recent)
+        assert result is None
+
+    def test_injury_has_higher_priority_than_sessions_skipped(self):
+        """Injury should be detected before checking skip count."""
+        from cascade_levels import _check_escalation, SKIP_COUNT_FOR_MONTHLY_ESCALATION
+        today = date.today()
+        week_start = today - timedelta(days=today.weekday())
+        # Multiple skips this week
+        recent = [
+            {"date": str(week_start + timedelta(days=i)),
+             "session": {"completed": False, "effort_quality": "poor"}}
+            for i in range(SKIP_COUNT_FOR_MONTHLY_ESCALATION)
+        ]
+        # But also injury keyword
+        today_tg = [{"Message": "knee is really hurt", "Direction": "IN"}]
+        today_summary = self._daily_summary(completed=False, effort="poor")
+        result = _check_escalation(today_summary, today_tg, recent)
+        assert result is not None
+        assert result["type"] == "injury"  # injury wins
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

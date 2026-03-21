@@ -8,10 +8,12 @@ on:
     - cron: '0 19 * * *'
     # 21:00 UTC — Sunday strategic pass + export (after weekly email is sent)
     - cron: '0 21 * * 0'
+    # 22:00 UTC — daily close (V17: close_day + weekly_eval on Sundays)
+    - cron: '0 22 * * *'
   workflow_dispatch:
     inputs:
       mode:
-        description: 'Override mode (evening-protocol, weekly, think). Leave blank for time-based routing.'
+        description: 'Override mode (evening-protocol, weekly, think, close-day, weekly-eval, monthly-eval). Leave blank for time-based routing.'
         required: false
         default: 'evening-protocol'
 
@@ -70,6 +72,31 @@ jobs:
             python src/run_coach.py --evening-protocol
           else
             echo "${HOUR}:00 UTC — Sunday strategic pass trigger (handled in next step)."
+          fi
+
+      - name: V17 Daily close + weekly eval (22:00 UTC daily)
+        if: github.event_name == 'schedule'
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          PROGRAM_SHEET_ID: ${{ secrets.PROGRAM_SHEET_ID }}
+          MEMORY_SHEET_ID: ${{ secrets.MEMORY_SHEET_ID }}
+          GMAIL_FROM: ${{ secrets.GMAIL_FROM }}
+          GMAIL_TO: ${{ secrets.GMAIL_TO }}
+          ATHLETE_NAME: ${{ secrets.ATHLETE_NAME }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          HOUR=$(date -u +%H)
+          DAY=$(date +%u)
+          if [ "$HOUR" = "22" ]; then
+            echo "22:00 UTC — running close_day()..."
+            python src/run_coach.py --close-day
+            if [ "$DAY" = "7" ]; then
+              echo "Sunday 22:00 UTC — also running weekly_eval()..."
+              python src/run_coach.py --weekly-eval
+            fi
+          else
+            echo "${HOUR}:00 UTC — skipping daily close."
           fi
 
       - name: Sunday strategic planning pass + export (21:00 UTC)
