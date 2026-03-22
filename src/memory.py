@@ -1778,17 +1778,28 @@ def read_summary_list(domain: str, limit: int = 8) -> list[dict]:
         return []
 
 
-def append_summary(domain: str, summary: dict, max_keep: int = 8) -> None:
+_SUMMARY_MAX_KEEP: dict[str, int] = {
+    "WEEKLY_SUMMARIES": 52,   # full year — never trim bootstrap entries
+    "DAILY_SUMMARIES": 14,    # two weeks of daily context
+    "MONTHLY_SUMMARIES": 24,  # two years of monthly context
+}
+_SENTINEL = object()
+
+
+def append_summary(domain: str, summary: dict, max_keep: int = _SENTINEL) -> None:  # type: ignore[assignment]
     """
     Append a typed JSON summary to a list-valued Coach State domain.
-    Trims to max_keep most recent entries.
-    Used by close_day(), weekly_eval(), monthly_eval(), etc.
+    max_keep uses domain-specific defaults from _SUMMARY_MAX_KEEP unless explicitly overridden.
     """
     import json as _json
-    existing = read_summary_list(domain, limit=max_keep)
+    if max_keep is _SENTINEL:
+        effective_max = _SUMMARY_MAX_KEEP.get(domain.upper(), 8)
+    else:
+        effective_max = max_keep
+    existing = read_summary_list(domain, limit=effective_max)
     existing.append(summary)
-    if len(existing) > max_keep:
-        existing = existing[-max_keep:]
+    if len(existing) > effective_max:
+        existing = existing[-effective_max:]
     upsert_coach_state(domain.upper(), _json.dumps(existing, ensure_ascii=False), "HIGH")
 
 

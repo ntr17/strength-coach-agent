@@ -513,8 +513,26 @@ Return ONLY the JSON object."""
         return None
 
     set_level_state("MONTHLY", "COMMITTING")
-    append_summary("MONTHLY_SUMMARIES", summary, max_keep=6)
+    append_summary("MONTHLY_SUMMARIES", summary)
     print(f"  monthly_eval(): Month summary committed — {summary.get('training', {}).get('overall_quality', '?')}")
+
+    # Always notify athlete when monthly plan is updated (structural change)
+    if not dry_run:
+        try:
+            from telegram_utils import send_telegram_message
+            training = summary.get("training", {})
+            focus = summary.get("monthly_focus", training.get("focus", ""))
+            weekly_targets = summary.get("weekly_targets", [])
+            target_text = "\n".join(f"  - {t}" for t in weekly_targets[:3]) if weekly_targets else ""
+            notif = (
+                f"Monthly plan updated ({today}).\n\n"
+                f"Focus: {focus}"
+                + (f"\n\nWeekly targets:\n{target_text}" if target_text else "")
+                + "\n\nReply 'show month' to see the full plan."
+            )
+            send_telegram_message(notif)
+        except Exception as _notify_err:
+            print(f"  monthly_eval(): Structural notification failed (non-fatal): {_notify_err}")
 
     # If escalation-triggered: send message to athlete + set AWAITING_USER
     if is_escalation and summary.get("escalation_recommendation"):
@@ -687,6 +705,26 @@ Return ONLY the JSON object."""
     write_single_summary("ANNUAL_SUMMARY", summary)
     print(f"  annual_eval(): Annual summary committed — on_track={summary.get('goal_alignment', {}).get('on_track', '?')}")
 
+    # Always notify athlete when annual plan is updated (structural change)
+    if not dry_run:
+        try:
+            from telegram_utils import send_telegram_message
+            goal_align = summary.get("goal_alignment", {})
+            on_track = goal_align.get("on_track", "unknown")
+            key_risks = summary.get("key_risks", [])
+            monthly_focus = summary.get("monthly_focus", "")
+            risk_text = "\n".join(f"  - {r}" for r in key_risks[:3]) if key_risks else "  None identified."
+            notif = (
+                f"Annual plan updated ({today}).\n\n"
+                f"Goal alignment: {'on track' if on_track is True else 'needs attention' if on_track is False else on_track}\n"
+                f"This month's focus: {monthly_focus}\n"
+                f"Key risks:\n{risk_text}\n\n"
+                f"Reply 'show annual' to see the full plan."
+            )
+            send_telegram_message(notif)
+        except Exception as _notify_err:
+            print(f"  annual_eval(): Structural notification failed (non-fatal): {_notify_err}")
+
     # If escalation-triggered: send message to athlete + set AWAITING_USER
     if is_escalation and summary.get("escalation_recommendation"):
         try:
@@ -824,6 +862,29 @@ Return ONLY the JSON object."""
     set_level_state("LONGTERM", "COMMITTING")
     write_single_summary("LONGTERM_PLAN", plan)
     print(f"  longterm_eval(): Long-term plan committed — 3yr vision set, {len(plan.get('phase_map', []))} phases")
+
+    # Always notify athlete when long-term arc is updated (structural change)
+    if not dry_run:
+        try:
+            from telegram_utils import send_telegram_message
+            phases = plan.get("phase_map", [])
+            vision = plan.get("three_year_vision", "")
+            annual_objectives = plan.get("annual_objectives", [])
+            phase_summary = "\n".join(
+                f"  Phase {i+1}: {p.get('label', '?')} ({p.get('start', '?')} - {p.get('end', '?')})"
+                for i, p in enumerate(phases[:4])
+            ) if phases else "  (no phases defined)"
+            obj_text = "\n".join(f"  - {o}" for o in annual_objectives[:3]) if annual_objectives else "  (none)"
+            notif = (
+                f"Long-term arc updated ({today}).\n\n"
+                f"3-year vision: {vision}\n\n"
+                f"Phase map:\n{phase_summary}\n\n"
+                f"This year's objectives:\n{obj_text}\n\n"
+                f"Reply 'show arc' to see the full plan."
+            )
+            send_telegram_message(notif)
+        except Exception as _notify_err:
+            print(f"  longterm_eval(): Structural notification failed (non-fatal): {_notify_err}")
 
     set_level_state("LONGTERM", "IDLE")
     return plan

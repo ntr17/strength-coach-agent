@@ -1609,6 +1609,45 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     except Exception as _iz_err:
         print(f"  [IterationZero] Non-fatal: {_iz_err}")
 
+    # Keyword intercepts for structural plan review commands (before LLM routing)
+    _lower = user_text.strip().lower()
+    if _lower in ("show annual", "show year", "show annual plan"):
+        from memory import read_single_summary
+        _ann = read_single_summary("ANNUAL_SUMMARY")
+        if _ann:
+            import json as _json
+            await update.message.reply_text(
+                "Annual Plan:\n\n" + _json.dumps(_ann, indent=2, ensure_ascii=False)[:3800]
+            )
+        else:
+            await update.message.reply_text("No annual summary yet. Run --annual-eval to generate one.")
+        _log_message("OUT", "annual summary shown")
+        return
+    if _lower in ("show arc", "show longterm", "show 3yr", "show long term"):
+        from memory import read_single_summary
+        _lt = read_single_summary("LONGTERM_PLAN")
+        if _lt:
+            import json as _json
+            await update.message.reply_text(
+                "Long-term Arc:\n\n" + _json.dumps(_lt, indent=2, ensure_ascii=False)[:3800]
+            )
+        else:
+            await update.message.reply_text("No long-term plan yet. Run --longterm-eval to generate one.")
+        _log_message("OUT", "longterm plan shown")
+        return
+    if _lower in ("show month", "show monthly", "show monthly plan"):
+        from memory import read_summary_list
+        _months = read_summary_list("MONTHLY_SUMMARIES", limit=1)
+        if _months:
+            import json as _json
+            await update.message.reply_text(
+                "Latest Monthly Plan:\n\n" + _json.dumps(_months[-1], indent=2, ensure_ascii=False)[:3800]
+            )
+        else:
+            await update.message.reply_text("No monthly summary yet.")
+        _log_message("OUT", "monthly summary shown")
+        return
+
     # Classify intent with Haiku — single fast call instead of cascading keyword checks
     intent = _classify_intent(user_text)
     print(f"[Router] Intent: {intent} | Message: {user_text[:60]}")
