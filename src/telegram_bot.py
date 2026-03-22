@@ -1637,15 +1637,29 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 for s in _next_sess_wp
             ) or "  (session data not available)"
 
+            # Read MONTHLY_INTENT for cascade context
+            _monthly_intent_raw_wp = coach_state.get("MONTHLY_INTENT", {}).get("summary", "") or \
+                                     coach_state.get("MONTHLY_INTENT", {}).get("Summary", "")
+            _monthly_focus_wp = ""
+            if _monthly_intent_raw_wp:
+                try:
+                    import json as _json_mi
+                    _mi = _json_mi.loads(_monthly_intent_raw_wp)
+                    _monthly_focus_wp = _mi.get("focus", "")
+                except Exception:
+                    _monthly_focus_wp = _monthly_intent_raw_wp[:120]
+
             _sys_wp = (
                 f"You are a strength coach in a weekly planning conversation with {ATHLETE_NAME}.\n\n"
                 f"WEEK {_week_n_wp} SESSIONS:\n{_sess_summary_wp}\n\n"
+                f"MONTHLY FOCUS (from agreed monthly plan): {_monthly_focus_wp or '(not set)'}\n\n"
                 "Your role: make concrete proposals, reason about load and recovery, "
-                "ask about schedule and constraints, iterate until you have an agreed plan.\n\n"
+                "ask about schedule and constraints. Keep the weekly plan aligned with the monthly focus.\n\n"
                 "When the athlete explicitly confirms the plan (says 'ok', 'confirmed', 'looks good', "
                 "'let's do it', 'perfect', etc.), output:\n"
                 "[CONFIRMED]\n"
-                '{"week": <N>, "schedule": {"Mon": "rest", "Tue": {"session": "Day 1", "time": "07:00"}, ...}}\n\n'
+                '{"week": <N>, "intent": "<one sentence: what this week is FOR>", '
+                '"schedule": {"Mon": "rest", "Tue": {"session": "Day 1", "time": "07:00"}, ...}}\n\n'
                 "All non-rest days must have session + time. "
                 "Keep each reply under 120 words. No emojis. No motivational filler."
             )
@@ -1667,6 +1681,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                     _plan_wp = _json_wp.loads(_m_wp.group())
                     _ucs_wp("NEXT_WEEK_PLAN", _json_wp.dumps(_plan_wp), "MEDIUM")
                     _ucs_wp("WEEKLY_SCHEDULE", _json_wp.dumps(_plan_wp.get("schedule", {})), "HIGH")
+                    # Store WEEKLY_INTENT so daily_planning and brief read it
+                    _intent_wp = _plan_wp.get("intent", "")
+                    if _intent_wp:
+                        _ucs_wp("WEEKLY_INTENT", _intent_wp, "HIGH")
                 _ucs_wp("CURRENT_FLOW", "", "LOW")
                 _ucs_wp("WEEKLY_PLAN_THREAD", "", "LOW")
                 await update.message.reply_text(_visible_wp or "Plan locked in. See you on the first session.")
@@ -1687,6 +1705,210 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             from memory import upsert_coach_state as _ucs_wp_err
             _ucs_wp_err("CURRENT_FLOW", "", "LOW")
             # Fall through to normal routing
+
+    # ---------------------------------------------------------------------------
+    # daily_planning — multi-turn conversation about tomorrow's session
+    # Opened by run_evening_protocol() after sending the evening message.
+    # Athlete can adjust session, swap exercises, flag fatigue, add volume, etc.
+    # On confirm → DAILY_FOCUS stored; morning brief reads it.
+    # ---------------------------------------------------------------------------
+    if _cf_raw.startswith("daily_planning"):
+        try:
+            import json as _json_dp
+            import re as _re_dp
+            from config import ANTHROPIC_API_KEY as _ak_dp, CLAUDE_MODEL as _model_dp
+            from memory import upsert_coach_state as _ucs_dp
+
+            _dp_raw = coach_state.get("DAILY_PLAN_THREAD", {}).get("summary", "") or \
+                      coach_state.get("DAILY_PLAN_THREAD", {}).get("Summary", "")
+            _dp_data = _json_dp.loads(_dp_raw) if _dp_raw and _dp_raw.strip().startswith("{") else {}
+            _dp_date = _dp_data.get("date", "tomorrow")
+            _dp_session = _dp_data.get("session", "session")
+            _dp_weekly_intent = _dp_data.get("weekly_intent", "")
+            _dp_thread = _dp_data.get("thread", [])
+
+            _dp_thread.append({"role": "user", "content": user_text})
+
+            _dp_sys = (
+                f"You are a strength coach in a daily planning conversation with {ATHLETE_NAME}.\n\n"
+                f"TOMORROW ({_dp_date}): {_dp_session}\n"
+                f"WEEKLY INTENT: {_dp_weekly_intent or '(not set)'}\n\n"
+                "Handle whatever the athlete raises: fatigue, time constraints, wanting more/less volume, "
+                "swapping exercises, life happened. Reason concretely. Propose specific adjustments.\n\n"
+                "When athlete confirms (says ok/confirmed/looks good/let's do it/perfect), output:\n"
+                "[CONFIRMED]\n"
+                '{"date": "<YYYY-MM-DD>", "session": "<session label>", '
+                '"focus": "<one key thing to focus on>", "adjustments": "<any changes vs original plan or none>"}\n\n'
+                "Keep replies under 80 words. No emojis. No filler."
+            )
+            _dp_resp = anthropic.Anthropic(api_key=_ak_dp).messages.create(
+                model=_model_dp, max_tokens=300,
+                system=_dp_sys,
+                messages=_dp_thread,
+            )
+            _dp_reply = _dp_resp.content[0].text.strip()
+
+            if "[CONFIRMED]" in _dp_reply:
+                _dp_visible = _dp_reply.split("[CONFIRMED]")[0].strip()
+                _dp_json_str = _dp_reply.split("[CONFIRMED]")[1].strip()
+                _dp_m = _re_dp.search(r"\{.*\}", _dp_json_str, _re_dp.DOTALL)
+                if _dp_m:
+                    _dp_plan = _json_dp.loads(_dp_m.group())
+                    _ucs_dp("DAILY_FOCUS", _json_dp.dumps(_dp_plan), "HIGH")
+                _ucs_dp("CURRENT_FLOW", "", "LOW")
+                _ucs_dp("DAILY_PLAN_THREAD", "", "LOW")
+                await update.message.reply_text(_dp_visible or "Plan locked. Good session tomorrow.")
+                _log_message("OUT", f"daily_planning confirmed ({_dp_date})")
+            else:
+                _dp_thread.append({"role": "assistant", "content": _dp_reply})
+                _dp_data["thread"] = _dp_thread
+                _ucs_dp("DAILY_PLAN_THREAD", _json_dp.dumps(_dp_data), "HIGH")
+                _ucs_dp("CURRENT_FLOW", _cf_raw, "MEDIUM")
+                await update.message.reply_text(_dp_reply)
+                _log_message("OUT", "daily_planning reply")
+            return
+        except Exception as _dp_err:
+            print(f"  [Bot] daily_planning error: {_dp_err}")
+            from memory import upsert_coach_state as _ucs_dp_err
+            _ucs_dp_err("CURRENT_FLOW", "", "LOW")
+
+    # ---------------------------------------------------------------------------
+    # monthly_planning — multi-turn conversation about next month's focus
+    # Opened by cascade_levels.monthly_eval() after committing monthly summary.
+    # On confirm → MONTHLY_INTENT stored; weekly_planning reads it for context.
+    # ---------------------------------------------------------------------------
+    if _cf_raw.startswith("monthly_planning"):
+        try:
+            import json as _json_mp
+            import re as _re_mp
+            from config import ANTHROPIC_API_KEY as _ak_mp, CLAUDE_MODEL as _model_mp
+            from memory import upsert_coach_state as _ucs_mp, read_single_summary as _rss_mp
+
+            _mp_raw = coach_state.get("MONTHLY_PLAN_THREAD", {}).get("summary", "") or \
+                      coach_state.get("MONTHLY_PLAN_THREAD", {}).get("Summary", "")
+            _mp_data = _json_mp.loads(_mp_raw) if _mp_raw and _mp_raw.strip().startswith("{") else {}
+            _mp_month = _mp_data.get("month", "next month")
+            _mp_thread = _mp_data.get("thread", [])
+
+            _mp_thread.append({"role": "user", "content": user_text})
+
+            _annual = _rss_mp("ANNUAL_SUMMARY") or {}
+            _annual_focus = _annual.get("next_12_months", {}).get("primary_focus", "")
+
+            _mp_sys = (
+                f"You are a strength coach in a monthly planning conversation with {ATHLETE_NAME}.\n\n"
+                f"PLANNING MONTH: {_mp_month}\n"
+                f"ANNUAL FOCUS: {_annual_focus or '(not set)'}\n\n"
+                "Discuss next month's training focus, volume targets, key priorities. "
+                "Handle schedule constraints, life context, shifting priorities. "
+                "Keep the monthly plan aligned with the annual arc.\n\n"
+                "When athlete confirms, output:\n"
+                "[CONFIRMED]\n"
+                '{"month": "<YYYY-MM>", "focus": "<primary focus>", '
+                '"volume_direction": "<increase|maintain|reduce>", '
+                '"key_targets": ["<up to 3 specific targets>"], '
+                '"constraints": "<any known constraints for the month>"}\n\n'
+                "Keep replies under 100 words. No emojis. No filler."
+            )
+            _mp_resp = anthropic.Anthropic(api_key=_ak_mp).messages.create(
+                model=_model_mp, max_tokens=350,
+                system=_mp_sys,
+                messages=_mp_thread,
+            )
+            _mp_reply = _mp_resp.content[0].text.strip()
+
+            if "[CONFIRMED]" in _mp_reply:
+                _mp_visible = _mp_reply.split("[CONFIRMED]")[0].strip()
+                _mp_json_str = _mp_reply.split("[CONFIRMED]")[1].strip()
+                _mp_m = _re_mp.search(r"\{.*\}", _mp_json_str, _re_mp.DOTALL)
+                if _mp_m:
+                    _mp_intent = _json_mp.loads(_mp_m.group())
+                    _ucs_mp("MONTHLY_INTENT", _json_mp.dumps(_mp_intent), "HIGH")
+                _ucs_mp("CURRENT_FLOW", "", "LOW")
+                _ucs_mp("MONTHLY_PLAN_THREAD", "", "LOW")
+                await update.message.reply_text(_mp_visible or "Monthly focus confirmed.")
+                _log_message("OUT", f"monthly_planning confirmed ({_mp_month})")
+            else:
+                _mp_thread.append({"role": "assistant", "content": _mp_reply})
+                _mp_data["thread"] = _mp_thread
+                _ucs_mp("MONTHLY_PLAN_THREAD", _json_mp.dumps(_mp_data), "HIGH")
+                _ucs_mp("CURRENT_FLOW", _cf_raw, "MEDIUM")
+                await update.message.reply_text(_mp_reply)
+                _log_message("OUT", "monthly_planning reply")
+            return
+        except Exception as _mp_err:
+            print(f"  [Bot] monthly_planning error: {_mp_err}")
+            from memory import upsert_coach_state as _ucs_mp_err
+            _ucs_mp_err("CURRENT_FLOW", "", "LOW")
+
+    # ---------------------------------------------------------------------------
+    # annual_planning — multi-turn conversation about the annual arc
+    # Opened by cascade_levels.annual_eval() after committing annual summary.
+    # On confirm → ANNUAL_ARC updated; monthly_planning reads it for context.
+    # ---------------------------------------------------------------------------
+    if _cf_raw.startswith("annual_planning"):
+        try:
+            import json as _json_ap
+            import re as _re_ap
+            from config import ANTHROPIC_API_KEY as _ak_ap, CLAUDE_MODEL as _model_ap
+            from memory import upsert_coach_state as _ucs_ap, read_single_summary as _rss_ap2
+
+            _ap_raw = coach_state.get("ANNUAL_PLAN_THREAD", {}).get("summary", "") or \
+                      coach_state.get("ANNUAL_PLAN_THREAD", {}).get("Summary", "")
+            _ap_data = _json_ap.loads(_ap_raw) if _ap_raw and _ap_raw.strip().startswith("{") else {}
+            _ap_year = _ap_data.get("year", "this year")
+            _ap_thread = _ap_data.get("thread", [])
+
+            _ap_thread.append({"role": "user", "content": user_text})
+
+            _lt = _rss_ap2("LONGTERM_PLAN") or {}
+            _lt_focus = _lt.get("primary_focus", "") or _lt.get("focus", "")
+
+            _ap_sys = (
+                f"You are a strength coach in an annual arc review with {ATHLETE_NAME}.\n\n"
+                f"YEAR: {_ap_year}\n"
+                f"LONGTERM FOCUS: {_lt_focus or '(not set)'}\n\n"
+                "Discuss annual goals, milestones, life changes that affect the plan. "
+                "Be willing to revise goals up or down based on what the athlete tells you. "
+                "Annual planning should feel meaningful — this is the strategic layer.\n\n"
+                "When athlete confirms, output:\n"
+                "[CONFIRMED]\n"
+                '{"year": <year>, "primary_focus": "<one sentence>", '
+                '"annual_goals": ["<up to 4 specific goals with numbers>"], '
+                '"monthly_themes": ["<rough theme per quarter>"], '
+                '"life_constraints": "<known constraints for the year>"}\n\n'
+                "Keep replies under 120 words. No emojis. No filler."
+            )
+            _ap_resp = anthropic.Anthropic(api_key=_ak_ap).messages.create(
+                model=_model_ap, max_tokens=400,
+                system=_ap_sys,
+                messages=_ap_thread,
+            )
+            _ap_reply = _ap_resp.content[0].text.strip()
+
+            if "[CONFIRMED]" in _ap_reply:
+                _ap_visible = _ap_reply.split("[CONFIRMED]")[0].strip()
+                _ap_json_str = _ap_reply.split("[CONFIRMED]")[1].strip()
+                _ap_m = _re_ap.search(r"\{.*\}", _ap_json_str, _re_ap.DOTALL)
+                if _ap_m:
+                    _ap_arc = _json_ap.loads(_ap_m.group())
+                    _ucs_ap("ANNUAL_ARC", _json_ap.dumps(_ap_arc), "HIGH")
+                _ucs_ap("CURRENT_FLOW", "", "LOW")
+                _ucs_ap("ANNUAL_PLAN_THREAD", "", "LOW")
+                await update.message.reply_text(_ap_visible or "Annual arc confirmed.")
+                _log_message("OUT", f"annual_planning confirmed ({_ap_year})")
+            else:
+                _ap_thread.append({"role": "assistant", "content": _ap_reply})
+                _ap_data["thread"] = _ap_thread
+                _ucs_ap("ANNUAL_PLAN_THREAD", _json_ap.dumps(_ap_data), "HIGH")
+                _ucs_ap("CURRENT_FLOW", _cf_raw, "MEDIUM")
+                await update.message.reply_text(_ap_reply)
+                _log_message("OUT", "annual_planning reply")
+            return
+        except Exception as _ap_err:
+            print(f"  [Bot] annual_planning error: {_ap_err}")
+            from memory import upsert_coach_state as _ucs_ap_err
+            _ucs_ap_err("CURRENT_FLOW", "", "LOW")
 
     # weekly_confirm CURRENT_FLOW intercept — athlete confirming or changing next week's plan
     _cf_raw = coach_state.get("CURRENT_FLOW", {}).get("Summary", "") or coach_state.get("CURRENT_FLOW", {}).get("summary", "")

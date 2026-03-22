@@ -3446,6 +3446,20 @@ def run_brief(dry_run: bool = False):
         print("  Brief: already sent today — skipping.")
         return
 
+    # Check if there's an agreed daily plan from last night's conversation
+    _daily_focus_raw = coach_state.get("DAILY_FOCUS", {}).get("summary", "") or \
+                       coach_state.get("DAILY_FOCUS", {}).get("Summary", "")
+    _daily_focus = None
+    if _daily_focus_raw:
+        try:
+            import json as _json_df
+            _df = _json_df.loads(_daily_focus_raw)
+            if _df.get("date") == str(today):
+                _daily_focus = _df
+                print(f"  Brief: DAILY_FOCUS found for today — {_df.get('session', '?')}")
+        except Exception:
+            pass
+
     try:
         program_data = read_program_data(week_num=week_num, lookback=0)
     except Exception as e:
@@ -3636,11 +3650,21 @@ def run_brief(dry_run: bool = False):
 
     session_text = "\n".join(session_lines) or "session details unavailable"
 
+    _agreed_plan_block = ""
+    if _daily_focus:
+        _agreed_plan_block = (
+            f"\n=== AGREED PLAN FROM LAST NIGHT (athlete confirmed this) ===\n"
+            f"Session: {_daily_focus.get('session', '?')}\n"
+            f"Focus: {_daily_focus.get('focus', '')}\n"
+            f"Adjustments: {_daily_focus.get('adjustments', 'none')}\n"
+            f"Build on this — do NOT reopen scheduling or propose alternatives.\n"
+        )
+
     prompt = f"""You are {ATHLETE_NAME}'s strength coach. Write a pre-session brief for today's training.
 
 === COACHING CONTEXT — WORK THROUGH ALL 4 LAYERS BEFORE WRITING ===
 {cascade}
-
+{_agreed_plan_block}
 === TODAY'S SESSION ===
 Exercises:
 {session_text}
@@ -5115,6 +5139,20 @@ Write the message now:"""
             # Write challenge cooldown if one was suggested
             if challenge_suggestion and not dry_run:
                 upsert_coach_state("LAST_CHALLENGE", str(today), "HIGH")
+            # Open daily planning conversation — athlete can respond to adjust tomorrow's plan
+            try:
+                import json as _json_dp
+                _dp_thread = {
+                    "date": str(tomorrow),
+                    "session": tomorrow_plan_summary,
+                    "weekly_intent": weekly_intent,
+                    "thread": [{"role": "assistant", "content": msg}],
+                }
+                upsert_coach_state("DAILY_PLAN_THREAD", _json_dp.dumps(_dp_thread), "HIGH")
+                upsert_coach_state("CURRENT_FLOW", f"daily_planning | {today} | tomorrow:{tomorrow}", "MEDIUM")
+                print(f"  Daily planning conversation opened for {tomorrow}.")
+            except Exception as _dp_err:
+                print(f"  Daily planning CURRENT_FLOW failed (non-fatal): {_dp_err}")
         else:
             print("  Evening protocol: Telegram send failed.")
     except Exception as e:

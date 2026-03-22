@@ -548,25 +548,7 @@ Return ONLY the JSON object."""
     append_summary("MONTHLY_SUMMARIES", summary)
     print(f"  monthly_eval(): Month summary committed — {summary.get('training', {}).get('overall_quality', '?')}")
 
-    # Always notify athlete when monthly plan is updated (structural change)
-    if not dry_run:
-        try:
-            from telegram_utils import send_telegram_message
-            training = summary.get("training", {})
-            focus = summary.get("monthly_focus", training.get("focus", ""))
-            weekly_targets = summary.get("weekly_targets", [])
-            target_text = "\n".join(f"  - {t}" for t in weekly_targets[:3]) if weekly_targets else ""
-            notif = (
-                f"Monthly plan updated ({today}).\n\n"
-                f"Focus: {focus}"
-                + (f"\n\nWeekly targets:\n{target_text}" if target_text else "")
-                + "\n\nReply 'show month' to see the full plan."
-            )
-            send_telegram_message(notif)
-        except Exception as _notify_err:
-            print(f"  monthly_eval(): Structural notification failed (non-fatal): {_notify_err}")
-
-    # If escalation-triggered: send message to athlete + set AWAITING_USER
+    # Open monthly planning conversation (non-escalation) or send escalation recommendation
     if is_escalation and summary.get("escalation_recommendation"):
         try:
             from telegram_utils import send_telegram_message
@@ -591,6 +573,36 @@ Return ONLY the JSON object."""
             print(f"  monthly_eval(): Failed to send escalation message: {e}")
             set_level_state("MONTHLY", "IDLE")
     else:
+        # Non-escalation: open collaborative monthly planning conversation
+        try:
+            import anthropic as _ant_mp
+            import json as _json_mp
+            from config import ANTHROPIC_API_KEY as _ak_mp, CLAUDE_MODEL as _model_mp, ATHLETE_NAME as _an_mp
+            from telegram_utils import send_telegram_message as _stm_mp
+            annual = read_single_summary("ANNUAL_SUMMARY") or {}
+            _open_prompt_mp = (
+                f"You are opening the monthly planning conversation with {_an_mp}.\n\n"
+                f"ANNUAL ARC:\n{json.dumps(annual.get('next_12_months', annual), indent=2, ensure_ascii=False)[:600]}\n\n"
+                f"LAST MONTH SUMMARY:\n{json.dumps(summary, indent=2, ensure_ascii=False)[:800]}\n\n"
+                f"Write the opening message for next month's planning (120-140 words):\n"
+                f"1. One honest sentence on how last month went (use the summary data).\n"
+                f"2. Your concrete recommendation for next month: specific focus areas, volume direction,\n"
+                f"   any adjustments needed. Reference the annual arc.\n"
+                f"3. Ask for the athlete's input — schedule constraints, life context, priorities.\n"
+                f"Direct, specific. No filler. No emojis."
+            )
+            _open_resp_mp = _ant_mp.Anthropic(api_key=_ak_mp).messages.create(
+                model=_model_mp, max_tokens=250,
+                messages=[{"role": "user", "content": _open_prompt_mp}],
+            )
+            _opening_mp = _open_resp_mp.content[0].text.strip()
+            _thread_mp = {"month": str(today)[:7], "thread": [{"role": "assistant", "content": _opening_mp}]}
+            upsert_coach_state("MONTHLY_PLAN_THREAD", _json_mp.dumps(_thread_mp), "HIGH")
+            upsert_coach_state("CURRENT_FLOW", f"monthly_planning | {today}", "MEDIUM")
+            _stm_mp(_opening_mp)
+            print(f"  monthly_eval(): Monthly planning conversation opened.")
+        except Exception as _mp_err:
+            print(f"  monthly_eval(): Planning conversation failed (non-fatal): {_mp_err}")
         set_level_state("MONTHLY", "IDLE")
 
     return summary
@@ -737,27 +749,7 @@ Return ONLY the JSON object."""
     write_single_summary("ANNUAL_SUMMARY", summary)
     print(f"  annual_eval(): Annual summary committed — on_track={summary.get('goal_alignment', {}).get('on_track', '?')}")
 
-    # Always notify athlete when annual plan is updated (structural change)
-    if not dry_run:
-        try:
-            from telegram_utils import send_telegram_message
-            goal_align = summary.get("goal_alignment", {})
-            on_track = goal_align.get("on_track", "unknown")
-            key_risks = summary.get("key_risks", [])
-            monthly_focus = summary.get("monthly_focus", "")
-            risk_text = "\n".join(f"  - {r}" for r in key_risks[:3]) if key_risks else "  None identified."
-            notif = (
-                f"Annual plan updated ({today}).\n\n"
-                f"Goal alignment: {'on track' if on_track is True else 'needs attention' if on_track is False else on_track}\n"
-                f"This month's focus: {monthly_focus}\n"
-                f"Key risks:\n{risk_text}\n\n"
-                f"Reply 'show annual' to see the full plan."
-            )
-            send_telegram_message(notif)
-        except Exception as _notify_err:
-            print(f"  annual_eval(): Structural notification failed (non-fatal): {_notify_err}")
-
-    # If escalation-triggered: send message to athlete + set AWAITING_USER
+    # Open annual planning conversation (non-escalation) or send escalation recommendation
     if is_escalation and summary.get("escalation_recommendation"):
         try:
             from telegram_utils import send_telegram_message
@@ -782,6 +774,37 @@ Return ONLY the JSON object."""
             print(f"  annual_eval(): Failed to send escalation message: {e}")
             set_level_state("ANNUAL", "IDLE")
     else:
+        # Non-escalation: open collaborative annual planning conversation
+        try:
+            import anthropic as _ant_ap
+            import json as _json_ap
+            from config import ANTHROPIC_API_KEY as _ak_ap, CLAUDE_MODEL as _model_ap, ATHLETE_NAME as _an_ap
+            from memory import read_single_summary as _rss_ap
+            from telegram_utils import send_telegram_message as _stm_ap
+            longterm = _rss_ap("LONGTERM_PLAN") or {}
+            _open_prompt_ap = (
+                f"You are opening the annual arc review conversation with {_an_ap}.\n\n"
+                f"LONGTERM PLAN:\n{json.dumps(longterm, indent=2, ensure_ascii=False)[:500]}\n\n"
+                f"ANNUAL SUMMARY JUST WRITTEN:\n{json.dumps(summary, indent=2, ensure_ascii=False)[:800]}\n\n"
+                f"Write the opening message for the annual arc review (120-150 words):\n"
+                f"1. One honest sentence on the year so far — achievement and gaps.\n"
+                f"2. Your recommendation for the next 12 months: primary focus, key milestones,\n"
+                f"   any changes to existing goals based on what you see in the data.\n"
+                f"3. Ask for the athlete's input — life changes, shifting priorities, new goals.\n"
+                f"Direct. Specific. Reference actual numbers from the summaries. No emojis."
+            )
+            _open_resp_ap = _ant_ap.Anthropic(api_key=_ak_ap).messages.create(
+                model=_model_ap, max_tokens=280,
+                messages=[{"role": "user", "content": _open_prompt_ap}],
+            )
+            _opening_ap = _open_resp_ap.content[0].text.strip()
+            _thread_ap = {"year": today.year, "thread": [{"role": "assistant", "content": _opening_ap}]}
+            upsert_coach_state("ANNUAL_PLAN_THREAD", _json_ap.dumps(_thread_ap), "HIGH")
+            upsert_coach_state("CURRENT_FLOW", f"annual_planning | {today}", "MEDIUM")
+            _stm_ap(_opening_ap)
+            print(f"  annual_eval(): Annual planning conversation opened.")
+        except Exception as _ap_err:
+            print(f"  annual_eval(): Planning conversation failed (non-fatal): {_ap_err}")
         set_level_state("ANNUAL", "IDLE")
 
     return summary
