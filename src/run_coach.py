@@ -3402,7 +3402,10 @@ The message MUST include ALL of the following in flowing prose (no bullet points
 
 REASONING RULE: At least one sentence must follow: "I see [data] — this means [X] — [action]."
 If Layer 3 shows a CONFLICT, address it directly. If last night's commitment matches today, build on it.
-English. 3–5 sentences MAX. Every brief must feel different from the last."""
+English. 3–5 sentences MAX. Every brief must feel different from the last.
+
+HARD RULE: NEVER ask scheduling questions. Never ask "when can you train?" or "what day works?".
+You have the schedule — make a decision and tell the athlete what to do. Propose, don't ask."""
 
     # Enforce athlete output preferences as hard constraints
     try:
@@ -4590,6 +4593,10 @@ Every message must do ALL of the following — in flowing prose, never as bullet
 LANGUAGE: English. Warm, direct, personal. Text message tone — not a report.
 No bullet lists. No numbered points. No headers. Max 250 words.
 REASONING RULE: At least one sentence must show your reasoning: "I see [data] — this means [X]."
+
+HARD RULE: NEVER ask scheduling questions. Never "when can you train?" or "what day works?".
+You have the athlete's schedule — make a decision and state it. Always propose, never ask openly.
+If a session needs to be rescheduled, pick the day yourself and say "I'm moving this to [day]."
 
 Write the message now:"""
 
