@@ -1228,6 +1228,9 @@ def build_prompt(program_data: dict, memory_data: dict,
             + periodization_context
         )
 
+    # --- Coach State (your compressed knowledge from last run — read this first) ---
+    coach_state = memory_data.get("coach_state", {})
+
     # --- Annual arc (12-month roadmap — weekly email only, so the athlete sees the bigger picture) ---
     annual_arc = coach_state.get("ANNUAL_ARC", {}).get("summary", "") if coach_state else ""
     if annual_arc and is_weekly_summary:
@@ -1242,8 +1245,6 @@ def build_prompt(program_data: dict, memory_data: dict,
             "what phase are we in, what's the next milestone, is anything ahead of/behind schedule?"
         )
 
-    # --- Coach State (your compressed knowledge from last run — read this first) ---
-    coach_state = memory_data.get("coach_state", {})
     state_text = _format_coach_state(coach_state)
     if state_text:
         sections.append(
