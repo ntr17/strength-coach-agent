@@ -3297,51 +3297,93 @@ def run(week_num: int = None, dry_run: bool = False, no_sync: bool = False,
             except Exception as e:
                 print(f"  Weekly Telegram digest failed (non-fatal): {e}")
 
-        # Sunday: ask for schedule first, then map sessions to it
+        # Sunday: open a collaborative weekly planning conversation (Sonnet)
         if is_weekly_summary:
             try:
                 import json as _json_sun
+                import anthropic as _ant_sun
                 from sheets import read_program_data as _rpd_sun
-                from memory import upsert_coach_state as _ucs_sun
+                from memory import (
+                    upsert_coach_state as _ucs_sun,
+                    read_lift_history as _rlh_sun,
+                    read_health_log as _rhl_sun,
+                )
                 from telegram_utils import send_telegram_message as _stm_sun
+                from config import CLAUDE_MODEL as _model_sun
+
+                # Context: last week sessions
+                _lift_sun = _rlh_sun(limit=120)
+                _last_wk_rows = [r for r in _lift_sun if str(r.get("Week", "")).strip() == str(week_num)]
+                _days_trained = len(set(r.get("Day", "") for r in _last_wk_rows if r.get("Day")))
+                _done_exs = sum(1 for r in _last_wk_rows if r.get("Completed", "").lower() in ("yes", "✓", "done"))
+                _total_exs = len(_last_wk_rows)
+
+                # Context: health readiness
+                _cs_sun = read_coach_state() if read_coach_state else {}
+                _health_sun = _cs_sun.get("HEALTH_READINESS", {}).get("summary", "") or \
+                              _cs_sun.get("HEALTH_READINESS", {}).get("Summary", "")
+                _session_q_sun = _cs_sun.get("SESSION_QUALITY", {}).get("summary", "") or \
+                                 _cs_sun.get("SESSION_QUALITY", {}).get("Summary", "")
+                _weekly_intent = _cs_sun.get("WEEKLY_INTENT", {}).get("summary", "") or \
+                                 _cs_sun.get("WEEKLY_INTENT", {}).get("Summary", "")
+
+                # Context: next week program
                 _next_wk_data = _rpd_sun(week_num=week_num + 1, lookback=0)
                 _next_days = _next_wk_data.get("current_week", {}).get("days", [])
-                if _next_days:
-                    # Store next week's sessions so the bot can retrieve them when the user replies
-                    _sessions_data = [
-                        {
-                            "day_num": _d.get("day_num"),
-                            "label": _d.get("label") or f"Day {_d.get('day_num', i+1)}",
-                            "exercises": [
-                                {"name": ex.get("name"), "weight": ex.get("weight"),
-                                 "sets_reps": ex.get("sets_reps")}
-                                for ex in _d.get("exercises", []) if ex.get("name")
-                            ],
-                        }
-                        for i, _d in enumerate(_next_days)
-                    ]
-                    _n_sessions = len(_next_days)
-                    _session_labels = [s["label"] for s in _sessions_data]
-                    _labels_str = ", ".join(_session_labels)
+                _sessions_data = []
+                _sess_lines = []
+                for _i, _d in enumerate(_next_days):
+                    _slabel = _d.get("label") or f"Day {_d.get('day_num', _i+1)}"
+                    _exnames = [ex.get("name") for ex in _d.get("exercises", []) if ex.get("name")]
+                    _sessions_data.append({
+                        "day_num": _d.get("day_num"),
+                        "label": _slabel,
+                        "exercises": [
+                            {"name": ex.get("name"), "weight": ex.get("weight"), "sets_reps": ex.get("sets_reps")}
+                            for ex in _d.get("exercises", []) if ex.get("name")
+                        ],
+                    })
+                    _sess_lines.append(f"  {_slabel}: {', '.join(_exnames[:4])}")
+                _next_wk_str = "\n".join(_sess_lines) if _sess_lines else "  (no sessions found in sheet)"
 
-                    _schedule_msg = (
-                        f"Week {week_num + 1} planning — {_n_sessions} sessions ({_labels_str}).\n\n"
-                        f"What does your week look like? Tell me which days you're training "
-                        f"and roughly what time, plus any constraints (travel, late nights).\n\n"
-                        f"Example: 'Tue 7am, Thu 7pm, Fri 7am, Sun 6pm'"
-                    )
-                    if dry_run:
-                        print(f"\n[DRY RUN — Sunday schedule request]:\n{_schedule_msg}")
-                    else:
-                        _ucs_sun("NEXT_WEEK_PLAN", _json_sun.dumps({
-                            "week": week_num + 1,
-                            "sessions": _sessions_data,
-                        }), "MEDIUM")
-                        _stm_sun(_schedule_msg)
-                        _ucs_sun("CURRENT_FLOW", f"weekly_schedule_input | {today} | week:{week_num + 1}", "MEDIUM")
-                        print(f"  Sunday schedule request sent for Week {week_num + 1}.")
+                # Build Sonnet prompt for planning opening
+                _open_prompt = (
+                    f"You are a strength coach opening the weekly planning conversation with {ATHLETE_NAME}.\n\n"
+                    f"LAST WEEK (Week {week_num}):\n"
+                    f"  Days trained: {_days_trained}, exercises completed: {_done_exs}/{_total_exs}\n"
+                    f"  Session quality: {_session_q_sun or 'no data'}\n"
+                    f"  Health readiness: {_health_sun or 'no data'}\n"
+                    f"  Weekly intent was: {_weekly_intent or 'not set'}\n\n"
+                    f"NEXT WEEK PROGRAM (Week {week_num + 1}):\n{_next_wk_str}\n\n"
+                    f"Write the opening message for this week's planning conversation.\n"
+                    f"In 100-130 words:\n"
+                    f"  1. One honest sentence on last week (no fluff).\n"
+                    f"  2. Your recommendation for next week — which sessions, any adjustments, reasoning.\n"
+                    f"     Include deload if warranted; challenge if athlete is thriving.\n"
+                    f"  3. Ask: what does the week look like schedule-wise? Any constraints?\n"
+                    f"Do NOT use emojis. Do NOT add motivational filler."
+                )
+                _open_resp = _ant_sun.Anthropic(api_key=ANTHROPIC_API_KEY).messages.create(
+                    model=_model_sun, max_tokens=250,
+                    messages=[{"role": "user", "content": _open_prompt}],
+                )
+                _opening_msg = _open_resp.content[0].text.strip()
+
+                # Store thread + session data; set planning flow
+                _plan_thread_data = {
+                    "week": week_num + 1,
+                    "thread": [{"role": "assistant", "content": _opening_msg}],
+                    "next_week_sessions": _sessions_data,
+                }
+                if dry_run:
+                    print(f"\n[DRY RUN — Sunday planning opening]:\n{_opening_msg}")
+                else:
+                    _ucs_sun("WEEKLY_PLAN_THREAD", _json_sun.dumps(_plan_thread_data), "HIGH")
+                    _stm_sun(_opening_msg)
+                    _ucs_sun("CURRENT_FLOW", f"weekly_planning | {today} | week:{week_num + 1}", "MEDIUM")
+                    print(f"  Sunday weekly planning conversation opened for Week {week_num + 1}.")
             except Exception as e:
-                print(f"  Sunday schedule request failed (non-fatal): {e}")
+                print(f"  Sunday weekly planning failed (non-fatal): {e}")
 
     # 15. Write Coach State summaries (bounded Tier 1 memory for next run)
     print("  Writing Coach State summaries...")

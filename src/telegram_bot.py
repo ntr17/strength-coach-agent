@@ -1609,98 +1609,84 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     except Exception as _iz_err:
         print(f"  [IterationZero] Non-fatal: {_iz_err}")
 
-    # weekly_schedule_input CURRENT_FLOW intercept — athlete replies with their week schedule
-    if _cf_raw.startswith("weekly_schedule_input"):
+    # weekly_planning CURRENT_FLOW — multi-turn collaborative planning conversation (Sonnet)
+    # Also handles legacy weekly_schedule_input / weekly_plan_confirm states from older deploys.
+    if _cf_raw.startswith("weekly_planning") or _cf_raw.startswith("weekly_schedule_input") or _cf_raw.startswith("weekly_plan_confirm"):
         try:
-            import json as _json_si
-            import re as _re_si
-            import anthropic as _ant_si
-            from config import ANTHROPIC_API_KEY as _ak_si, CLAUDE_HAIKU as _haiku_si, ATHLETE_NAME as _an_si
-            from memory import upsert_coach_state as _ucs_si
+            import json as _json_wp
+            import re as _re_wp
+            from config import ANTHROPIC_API_KEY as _ak_wp, CLAUDE_MODEL as _model_wp
+            from memory import upsert_coach_state as _ucs_wp
 
-            # Parse the user's schedule text into a structured day→time/rest dict
-            _parse_prompt = (
-                f"Extract the weekly training schedule from this message. "
-                f"Output a JSON object mapping 3-letter day abbreviations (Mon/Tue/Wed/Thu/Fri/Sat/Sun) "
-                f"to either 'rest' (string) or a time string like '07:00' or '19:00'. "
-                f"Use 24h format for times. Infer 'am'=morning≈07:00, 'pm'=evening≈19:00, "
-                f"'morning'=07:00, 'evening'=19:00 if no exact time given. "
-                f"Days not mentioned → 'rest'. Return ONLY valid JSON.\n\n"
-                f"Message: {user_text}"
+            # Load thread; legacy states have no thread → start fresh with user's message as opener
+            _thread_raw_wp = coach_state.get("WEEKLY_PLAN_THREAD", {}).get("summary", "") or \
+                             coach_state.get("WEEKLY_PLAN_THREAD", {}).get("Summary", "")
+            _thread_data_wp = _json_wp.loads(_thread_raw_wp) \
+                if _thread_raw_wp and _thread_raw_wp.strip().startswith("{") else {}
+            _week_n_wp = _thread_data_wp.get("week", "?")
+            _thread_wp = _thread_data_wp.get("thread", [])
+            _next_sess_wp = _thread_data_wp.get("next_week_sessions", [])
+
+            # Append athlete's message
+            _thread_wp.append({"role": "user", "content": user_text})
+
+            # Summarise next week sessions for system prompt
+            _sess_summary_wp = "\n".join(
+                f"  {s.get('label','Day ?')}: " +
+                ", ".join(e.get("name", "?") for e in s.get("exercises", []) if e.get("name"))[:80]
+                for s in _next_sess_wp
+            ) or "  (session data not available)"
+
+            _sys_wp = (
+                f"You are a strength coach in a weekly planning conversation with {ATHLETE_NAME}.\n\n"
+                f"WEEK {_week_n_wp} SESSIONS:\n{_sess_summary_wp}\n\n"
+                "Your role: make concrete proposals, reason about load and recovery, "
+                "ask about schedule and constraints, iterate until you have an agreed plan.\n\n"
+                "When the athlete explicitly confirms the plan (says 'ok', 'confirmed', 'looks good', "
+                "'let's do it', 'perfect', etc.), output:\n"
+                "[CONFIRMED]\n"
+                '{"week": <N>, "schedule": {"Mon": "rest", "Tue": {"session": "Day 1", "time": "07:00"}, ...}}\n\n'
+                "All non-rest days must have session + time. "
+                "Keep each reply under 120 words. No emojis. No motivational filler."
             )
-            _parse_resp = _ant_si.Anthropic(api_key=_ak_si).messages.create(
-                model=_haiku_si, max_tokens=200,
-                messages=[{"role": "user", "content": _parse_prompt}],
+
+            _resp_wp = anthropic.Anthropic(api_key=_ak_wp).messages.create(
+                model=_model_wp, max_tokens=400,
+                system=_sys_wp,
+                messages=_thread_wp,
             )
-            _parsed_raw = _parse_resp.content[0].text.strip()
-            _m_si = _re_si.search(r"\{.*\}", _parsed_raw, _re_si.DOTALL)
-            _schedule: dict = _json_si.loads(_m_si.group()) if _m_si else {}
+            _reply_wp = _resp_wp.content[0].text.strip()
 
-            # Retrieve next week's sessions from NEXT_WEEK_PLAN coach state
-            _nwp_raw = coach_state.get("NEXT_WEEK_PLAN", {}).get("summary", "") or \
-                       coach_state.get("NEXT_WEEK_PLAN", {}).get("Summary", "")
-            _nwp: dict = _json_si.loads(_nwp_raw) if _nwp_raw and _nwp_raw.strip().startswith("{") else {}
-            _week_num_si = _nwp.get("week", "?")
-            _sessions_si = _nwp.get("sessions", [])
-
-            # Map sessions to training days (in order of day of week)
-            _day_order = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
-            _training_days = [d for d in _day_order if _schedule.get(d) not in ("rest", "", None)]
-            _plan_lines = []
-            _schedule_enriched = dict(_schedule)  # copy to add session labels
-            for _si_i, _sess in enumerate(_sessions_si):
-                if _si_i < len(_training_days):
-                    _td = _training_days[_si_i]
-                    _time = _schedule.get(_td, "")
-                    _slabel = _sess.get("label", f"Day {_si_i+1}")
-                    _exs = " | ".join(
-                        f"{ex.get('name','?')} {ex.get('sets_reps','')} @ {ex.get('weight','')}".strip(" @|")
-                        for ex in _sess.get("exercises", []) if ex.get("weight")
-                    )[:120]
-                    _plan_lines.append(f"  {_td} {_time} — {_slabel}: {_exs}")
-                    # Enrich schedule with session label
-                    _schedule_enriched[_td] = {"time": _time, "session": _slabel, "day_num": _si_i + 1}
-
-            # Store enriched WEEKLY_SCHEDULE
-            _ucs_si("WEEKLY_SCHEDULE", _json_si.dumps(_schedule_enriched), "HIGH")
-
-            # Build WEEKLY_INTENT if not set
-            _wi_existing = coach_state.get("WEEKLY_INTENT", {}).get("summary", "")
-
-            # Build confirmation message
-            _rest_days_si = [d for d in _day_order if _schedule.get(d) == "rest" or d not in _schedule]
-            _confirm_lines = [f"Week {_week_num_si}.\n"]
-            if _wi_existing:
-                _confirm_lines.append(f"Goal: {_wi_existing}\n")
-            _confirm_lines.append("Sessions:")
-            _confirm_lines.extend(_plan_lines)
-            _rest_str = ", ".join(_rest_days_si[:4]) + (" (rest)" if _rest_days_si else "")
-            _confirm_lines.append(f"\nRest: {_rest_str}")
-            _confirm_lines.append("\nAnything to change? Reply or say 'ok'.")
-            _confirm_msg = "\n".join(_confirm_lines)
-
-            _ucs_si("CURRENT_FLOW", f"weekly_plan_confirm | {_today_str} | week:{_week_num_si}", "MEDIUM")
-            await update.message.reply_text(_confirm_msg)
-            _log_message("OUT", f"week {_week_num_si} plan confirmation sent")
+            if "[CONFIRMED]" in _reply_wp:
+                # Extract visible reply and structured plan
+                _parts_wp = _reply_wp.split("[CONFIRMED]", 1)
+                _visible_wp = _parts_wp[0].strip()
+                _json_str_wp = _parts_wp[1].strip()
+                _m_wp = _re_wp.search(r"\{.*\}", _json_str_wp, _re_wp.DOTALL)
+                if _m_wp:
+                    _plan_wp = _json_wp.loads(_m_wp.group())
+                    _ucs_wp("NEXT_WEEK_PLAN", _json_wp.dumps(_plan_wp), "MEDIUM")
+                    _ucs_wp("WEEKLY_SCHEDULE", _json_wp.dumps(_plan_wp.get("schedule", {})), "HIGH")
+                _ucs_wp("CURRENT_FLOW", "", "LOW")
+                _ucs_wp("WEEKLY_PLAN_THREAD", "", "LOW")
+                await update.message.reply_text(_visible_wp or "Plan locked in. See you on the first session.")
+                _log_message("OUT", f"weekly_planning confirmed (week {_week_n_wp})")
+            else:
+                # Continue conversation
+                _thread_wp.append({"role": "assistant", "content": _reply_wp})
+                _thread_data_wp["thread"] = _thread_wp
+                _thread_data_wp["week"] = _week_n_wp
+                _ucs_wp("WEEKLY_PLAN_THREAD", _json_wp.dumps(_thread_data_wp), "HIGH")
+                # Keep flow active
+                _ucs_wp("CURRENT_FLOW", f"weekly_planning | {_today_str} | week:{_week_n_wp}", "MEDIUM")
+                await update.message.reply_text(_reply_wp)
+                _log_message("OUT", f"weekly_planning reply (week {_week_n_wp})")
             return
-        except Exception as _si_err:
-            print(f"  [Bot] weekly_schedule_input parse error: {_si_err}")
-            # Fall through to normal routing on failure
-
-    # weekly_plan_confirm — athlete confirms or requests changes after seeing the mapped plan
-    if _cf_raw.startswith("weekly_plan_confirm"):
-        _confirm_words_p = ("ok", "yes", "confirmed", "looks good", "good", "fine", "perfect", "sure")
-        _lower_pc = user_text.strip().lower()
-        from memory import upsert_coach_state as _ucs_pc
-        if any(w in _lower_pc for w in _confirm_words_p):
-            _ucs_pc("CURRENT_FLOW", "", "LOW")
-            await update.message.reply_text("Plan locked in. See you on the first session.")
-            _log_message("OUT", "weekly plan confirmed")
-            return
-        else:
-            # Has changes → clear flow, fall through to program agent
-            _ucs_pc("CURRENT_FLOW", "", "LOW")
-            # Fall through to intent routing
+        except Exception as _wp_err:
+            print(f"  [Bot] weekly_planning error: {_wp_err}")
+            from memory import upsert_coach_state as _ucs_wp_err
+            _ucs_wp_err("CURRENT_FLOW", "", "LOW")
+            # Fall through to normal routing
 
     # weekly_confirm CURRENT_FLOW intercept — athlete confirming or changing next week's plan
     _cf_raw = coach_state.get("CURRENT_FLOW", {}).get("Summary", "") or coach_state.get("CURRENT_FLOW", {}).get("summary", "")
@@ -1721,6 +1707,78 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     # Keyword intercepts for structural plan review commands (before LLM routing)
     _lower = user_text.strip().lower()
+
+    # On-demand weekly planning trigger — athlete can start the planning conversation at any time
+    _plan_triggers = ("plan week", "plan this week", "plan next week", "weekly planning",
+                      "let's plan", "lets plan", "planning session", "plan the week")
+    if any(_lower.startswith(t) or _lower == t for t in _plan_triggers):
+        try:
+            import json as _json_pd
+            import anthropic as _ant_pd
+            from config import ANTHROPIC_API_KEY as _ak_pd, CLAUDE_MODEL as _model_pd
+            from memory import upsert_coach_state as _ucs_pd, read_lift_history as _rlh_pd
+            from sheets import read_program_data as _rpd_pd
+
+            _week_pd = _get_authoritative_week_num()
+            _lift_pd = _rlh_pd(limit=80)
+            _last_wk_pd = [r for r in _lift_pd if str(r.get("Week", "")).strip() == str(_week_pd)]
+            _days_pd = len(set(r.get("Day", "") for r in _last_wk_pd if r.get("Day")))
+            _done_pd = sum(1 for r in _last_wk_pd if r.get("Completed", "").lower() in ("yes", "✓", "done"))
+            _total_pd = len(_last_wk_pd)
+
+            _health_pd = coach_state.get("HEALTH_READINESS", {}).get("summary", "") or \
+                         coach_state.get("HEALTH_READINESS", {}).get("Summary", "")
+            _sess_q_pd = coach_state.get("SESSION_QUALITY", {}).get("summary", "") or \
+                         coach_state.get("SESSION_QUALITY", {}).get("Summary", "")
+
+            _next_pd = _rpd_pd(week_num=_week_pd + 1, lookback=0)
+            _next_days_pd = _next_pd.get("current_week", {}).get("days", [])
+            _sessions_pd = []
+            _sess_lines_pd = []
+            for _i_pd, _d_pd in enumerate(_next_days_pd):
+                _sl = _d_pd.get("label") or f"Day {_d_pd.get('day_num', _i_pd+1)}"
+                _exn = [ex.get("name") for ex in _d_pd.get("exercises", []) if ex.get("name")]
+                _sessions_pd.append({"day_num": _d_pd.get("day_num"), "label": _sl,
+                    "exercises": [{"name": ex.get("name"), "weight": ex.get("weight"),
+                                   "sets_reps": ex.get("sets_reps")}
+                                  for ex in _d_pd.get("exercises", []) if ex.get("name")]})
+                _sess_lines_pd.append(f"  {_sl}: {', '.join(_exn[:4])}")
+            _next_str_pd = "\n".join(_sess_lines_pd) or "  (no sessions in sheet)"
+
+            _open_pd = (
+                f"You are a strength coach opening a weekly planning conversation with {ATHLETE_NAME}.\n\n"
+                f"CURRENT WEEK (Week {_week_pd}):\n"
+                f"  Days trained: {_days_pd}, exercises done: {_done_pd}/{_total_pd}\n"
+                f"  Session quality: {_sess_q_pd or 'no data'}\n"
+                f"  Health readiness: {_health_pd or 'no data'}\n\n"
+                f"NEXT WEEK PROGRAM (Week {_week_pd + 1}):\n{_next_str_pd}\n\n"
+                f"The athlete just initiated the planning conversation. Write your opening message:\n"
+                f"1. Honest one-sentence take on where they are right now.\n"
+                f"2. Concrete recommendation for next week (advance, deload, adjust volume?).\n"
+                f"3. Ask about schedule and constraints.\n"
+                f"Under 130 words. No emojis. No filler."
+            )
+            _open_resp_pd = _ant_pd.Anthropic(api_key=_ak_pd).messages.create(
+                model=_model_pd, max_tokens=250,
+                messages=[{"role": "user", "content": _open_pd}],
+            )
+            _opening_pd = _open_resp_pd.content[0].text.strip()
+
+            _thread_data_pd = {
+                "week": _week_pd + 1,
+                "thread": [{"role": "assistant", "content": _opening_pd}],
+                "next_week_sessions": _sessions_pd,
+            }
+            _ucs_pd("WEEKLY_PLAN_THREAD", _json_pd.dumps(_thread_data_pd), "HIGH")
+            _ucs_pd("CURRENT_FLOW", f"weekly_planning | {_today_str} | week:{_week_pd + 1}", "MEDIUM")
+            await update.message.reply_text(_opening_pd)
+            _log_message("OUT", f"weekly_planning opened on demand (week {_week_pd + 1})")
+            return
+        except Exception as _pd_err:
+            print(f"  [Bot] on-demand planning failed: {_pd_err}")
+            await update.message.reply_text("Couldn't start planning conversation right now. Try again.")
+            return
+
     if _lower in ("show annual", "show year", "show annual plan"):
         from memory import read_single_summary
         _ann = read_single_summary("ANNUAL_SUMMARY")
