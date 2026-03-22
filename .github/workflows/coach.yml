@@ -2,12 +2,11 @@ name: Coaching Pipeline
 
 on:
   schedule:
-    # 19:00 UTC = 20:00 Spain (CET) / 21:00 Spain (CEST)
-    # Weekdays: evening protocol (plan check Telegram)
-    # Sundays: weekly email + think pass
-    - cron: '0 19 * * *'
-    # 21:00 UTC — Sunday strategic pass + export (after weekly email is sent)
-    - cron: '0 21 * * 0'
+    # 18:00 UTC = 20:00 CEST — evening protocol (before 9 PM Spain)
+    # Weekdays: session plan Telegram; Sundays: weekly email
+    - cron: '0 18 * * *'
+    # 20:00 UTC = 22:00 CEST — Sunday strategic pass (after weekly email)
+    - cron: '0 20 * * 0'
     # 22:00 UTC — daily close (V17: close_day + weekly_eval on Sundays)
     - cron: '0 22 * * *'
   workflow_dispatch:
@@ -64,11 +63,11 @@ jobs:
           if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "$MODE" ]; then
             echo "Manual dispatch — running: $MODE"
             python src/run_coach.py --${MODE}
-          elif [ "$DAY" = "7" ] && [ "$HOUR" = "19" ]; then
-            echo "Sunday 19:00 UTC — running weekly coaching email..."
+          elif [ "$DAY" = "7" ] && [ "$HOUR" = "18" ]; then
+            echo "Sunday 18:00 UTC (20:00 CEST) — running weekly coaching email..."
             python src/run_coach.py --weekly
-          elif [ "$HOUR" = "19" ]; then
-            echo "Weekday ${HOUR}:00 UTC — running evening protocol..."
+          elif [ "$HOUR" = "18" ]; then
+            echo "Weekday 18:00 UTC (20:00 CEST) — running evening protocol..."
             python src/run_coach.py --evening-protocol
           else
             echo "${HOUR}:00 UTC — Sunday strategic pass trigger (handled in next step)."
@@ -99,7 +98,7 @@ jobs:
             echo "${HOUR}:00 UTC — skipping daily close."
           fi
 
-      - name: Sunday strategic planning pass + export (21:00 UTC)
+      - name: Sunday strategic planning pass + export (20:00 UTC)
         if: github.event_name == 'schedule'
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
@@ -115,8 +114,8 @@ jobs:
           # Only run on Sundays at 21:00 UTC (day of week = 7)
           HOUR=$(date -u +%H)
           DAY=$(date +%u)
-          if [ "$DAY" = "7" ] && [ "$HOUR" = "21" ]; then
-            echo "Sunday 21:00 UTC — running strategic planning pass..."
+          if [ "$DAY" = "7" ] && [ "$HOUR" = "20" ]; then
+            echo "Sunday 20:00 UTC (22:00 CEST) — running strategic planning pass..."
             python src/run_coach.py --think
             echo "Sunday — exporting Coach Memory backup..."
             python src/run_coach.py --export

@@ -260,8 +260,21 @@ def handle_iteration_zero_reply(message: str) -> Optional[str]:
 
     state = read_iteration_zero_state()
 
+    if state["status"] == "COMPLETE":
+        return None
     if state["status"] not in ("IN_PROGRESS", "COVERAGE_TESTING"):
         return None
+
+    # Guard: if stuck in COVERAGE_TESTING and all areas already complete, force-commit
+    if state["status"] == "COVERAGE_TESTING":
+        all_done = all(a in state.get("areas_complete", []) for a in COVERAGE_AREAS)
+        if all_done and state.get("areas_data"):
+            _commit_iteration_zero(state)
+            state["status"] = "COMPLETE"
+            state["completed_at"] = str(date.today())
+            state["coverage_test_passed"] = True
+            write_iteration_zero_state(state)
+            return "Interview complete — I have everything I need. I'm ready to coach you."
 
     current_area = state["current_area"]
 
