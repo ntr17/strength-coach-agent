@@ -104,6 +104,107 @@ def _collect_1rm_readings(
     return raw
 
 
+def _extract_raw_weight(s: str) -> Optional[float]:
+    """Extract numeric kg from raw strings like '92.5 x5', '90kg', '3x95'."""
+    if not s:
+        return None
+    # Remove everything from first rep separator onward (e.g. "92.5 x5" → "92.5")
+    s_clean = re.split(r'\s*[xX×]\s*\d', s)[0]
+    m = re.search(r"(\d+(?:[.,]\d+)?)", s_clean)
+    if m:
+        try:
+            return float(m.group(1).replace(",", "."))
+        except ValueError:
+            return None
+    return None
+
+
+def _extract_reps_from_entry(entry: dict) -> Optional[int]:
+    """
+    Extract actual rep count from a lift history entry.
+    Priority: Actual Weight/Reps field → Sets x Reps field.
+    For "92.5 x5" → 5. For "4x5" → 5. For "x3" → 3.
+    """
+    actual = str(entry.get("Actual Weight/Reps") or entry.get("actual") or "")
+    # "x5" or "× 5" at end → reps = 5
+    m = re.search(r'[xX×]\s*(\d+)', actual)
+    if m:
+        return int(m.group(1))
+    # "3x" at start (sets x ...) — not helpful for reps; skip
+    # Try Sets x Reps field: "4x5" → reps = 5
+    sr = str(entry.get("Sets x Reps") or entry.get("sets_reps") or "")
+    m = re.search(r'\d+\s*[xX×]\s*(\d+)', sr)
+    if m:
+        return int(m.group(1))
+    return None
+
+
+def _collect_e1rm_for_rep_range(
+    exercise_name: str,
+    lift_history: list[dict],
+    cutoff: Optional[date] = None,
+    target_reps_min: int = 4,
+    target_reps_max: int = 6,
+) -> list[tuple[date, float]]:
+    """
+    Collect (date, e1RM) pairs derived from sets in a specific rep range.
+    Uses raw weight + reps from lift history, not the pre-computed Est 1RM column.
+
+    Useful for a 5RM track: set target_reps_min=4, target_reps_max=6.
+    e1RM is estimated from raw weight+reps via compute_e1rm_multi().
+    """
+    try:
+        from strength_tracker import compute_e1rm_multi
+    except ImportError:
+        return []
+
+    raw = []
+    for row in lift_history:
+        if not _exercise_matches(exercise_name, row.get("Exercise", "")):
+            continue
+        date_str = row.get("Date", "")
+        d = _parse_date(date_str)
+        if not d or (cutoff is not None and d < cutoff):
+            continue
+
+        reps = _extract_reps_from_entry(row)
+        if not reps or not (target_reps_min <= reps <= target_reps_max):
+            continue
+
+        actual_raw = str(row.get("Actual Weight/Reps") or row.get("actual") or "")
+        weight_raw = str(row.get("Weight") or row.get("weight") or
+                         row.get("Prescribed Weight") or "")
+        weight = _extract_raw_weight(actual_raw) or _parse_weight_kg(weight_raw)
+        if not weight or weight <= 0:
+            continue
+
+        est = compute_e1rm_multi(weight, reps)
+        if est:
+            raw.append((d, est["e1rm"]))
+
+    return raw
+
+
+def _slope_recent_wow(readings: list[tuple[date, float]], n_weeks: int = 4) -> Optional[float]:
+    """
+    Compute mean week-over-week gain from the last n_weeks unique-date readings.
+    Returns None if fewer than 2 data points.
+    """
+    if len(readings) < 2:
+        return None
+    sorted_r = sorted(readings, key=lambda r: r[0])
+    recent = sorted_r[-n_weeks:]
+    if len(recent) < 2:
+        return None
+    gains = []
+    for i in range(1, len(recent)):
+        d_prev, v_prev = recent[i - 1]
+        d_curr, v_curr = recent[i]
+        weeks_between = max((d_curr - d_prev).days / 7.0, 0.5)
+        gains.append((v_curr - v_prev) / weeks_between)
+    return sum(gains) / len(gains) if gains else None
+
+
 def project_1rm(
     exercise_name: str,
     lift_history: list[dict],
@@ -162,11 +263,34 @@ def project_1rm(
     xs = [_weeks_since(reference_date, d) for d, _ in recent]
     ys = [v for _, v in recent]
 
-    slope, intercept = _linear_regression(xs, ys)
+    slope_linreg, intercept = _linear_regression(xs, ys)
     # Use MAX in window as current 1RM — intentionally lighter sessions shouldn't pull it down.
     # The regression slope reflects the trend; the max reflects actual capability.
     current_1rm = max(v for _, v in recent)
     latest_date = recent[-1][0]  # most recent date for projection anchor
+
+    # --- Ensemble slope voting (3 methods, equal weight) ---
+    # Method 1: linear regression on all e1RM readings (computed above)
+    # Method 2: mean week-over-week gain from last 4 readings (robust to sparse data)
+    # Method 3: linear regression on 5RM-derived e1RM (4-6 rep sets, separate signal)
+    slope_wow = _slope_recent_wow(readings, n_weeks=4)
+    _5rm_readings = _collect_e1rm_for_rep_range(
+        exercise_name, lift_history, cutoff=None, target_reps_min=4, target_reps_max=6
+    )
+    slope_5rm: Optional[float] = None
+    if len(_5rm_readings) >= 2:
+        by_date_5rm: dict[date, float] = {}
+        for d, val in _5rm_readings:
+            by_date_5rm[d] = max(by_date_5rm.get(d, 0.0), val)
+        r5_sorted = sorted(by_date_5rm.items())[-8:]
+        if len(r5_sorted) >= 2:
+            ref5 = r5_sorted[0][0]
+            xs5 = [_weeks_since(ref5, d) for d, _ in r5_sorted]
+            ys5 = [v for _, v in r5_sorted]
+            slope_5rm, _ = _linear_regression(xs5, ys5)
+
+    candidate_slopes = [s for s in [slope_linreg, slope_wow, slope_5rm] if s is not None]
+    slope = sum(candidate_slopes) / len(candidate_slopes)  # equal-weight vote
 
     # Cap slope at 1.5% of current e1RM per week (physiological limit for trained athletes)
     MAX_WEEKLY_GAIN_PCT = 0.015
@@ -200,6 +324,12 @@ def project_1rm(
         "exercise": exercise_name,
         "current_1rm": round(current_1rm, 1),
         "rate_per_week": round(slope, 2),
+        "slope_methods": {
+            "linreg": round(slope_linreg, 3),
+            "wow": round(slope_wow, 3) if slope_wow is not None else None,
+            "5rm": round(slope_5rm, 3) if slope_5rm is not None else None,
+            "n_voted": len(candidate_slopes),
+        },
         "projected_end_1rm": projected_end,
         "target_1rm": target_1rm,
         "on_track": on_track,
