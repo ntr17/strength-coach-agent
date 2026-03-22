@@ -1723,10 +1723,11 @@ def _get_authoritative_week_num() -> int:
         from sheets import infer_week_from_sheet
         sheet_week = infer_week_from_sheet()
         calendar_week = compute_current_week(resolve_program_start_date())
-        if abs(sheet_week - calendar_week) > 1:
+        if sheet_week != calendar_week:
             print(
                 f"  [WeekCheck] Sheet says Week {sheet_week}, "
-                f"calendar says Week {calendar_week} — using sheet."
+                f"calendar says Week {calendar_week} — using sheet "
+                f"({'athlete ahead' if sheet_week > calendar_week else 'athlete behind — deload swap or extended break'})."
             )
         return sheet_week
     except Exception:

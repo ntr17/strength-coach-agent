@@ -2304,6 +2304,51 @@ class TestInferWeekFromSheet:
 
         assert result == 10  # Week 10 in progress (not fully done)
 
+    def test_deload_swap_athlete_far_behind_calendar(self):
+        """
+        Athlete swapped/moved the deload: calendar says Week 10 but they have
+        only done sessions in Weeks 1-3. The scan must reach Week 3 even though
+        it is 7 weeks behind the calendar position.
+        Old bug: scan_end was calendar_week-4=6, so weeks 1-5 were invisible.
+        Fix: scan_end is always 1.
+        """
+        from unittest.mock import patch, MagicMock
+        import gspread
+
+        week3_data = {"days": [{"label": "Day 1", "exercises": [
+            {"name": "Squat", "done": True},
+            {"name": "Bench", "done": True},
+            {"name": "OHP", "done": False},  # still in progress
+        ]}]}
+
+        call_log = []
+        data_map = {3: week3_data}
+        mock_sheet = MagicMock()
+
+        def worksheet_side_effect(tab_name):
+            for num in data_map:
+                if tab_name in (f"Week {num}", f"Semana {num}", f"W{num}"):
+                    call_log.append(num)
+                    ws = MagicMock()
+                    ws.get_all_values.return_value = []
+                    return ws
+            raise gspread.WorksheetNotFound(tab_name)
+        mock_sheet.worksheet.side_effect = worksheet_side_effect
+
+        def parse_side_effect(rows):
+            return data_map.get(call_log[-1], {}) if call_log else {}
+
+        with patch("sheets.get_client") as mock_gc, \
+             patch("sheets.get_program_sheet_id", return_value="fake"), \
+             patch("sheets.compute_current_week", return_value=10), \
+             patch("sheets.resolve_program_start_date", return_value="2026-01-13"), \
+             patch("sheets._parse_week_tab", side_effect=parse_side_effect):
+            mock_gc.return_value.open_by_key.return_value = mock_sheet
+            from sheets import infer_week_from_sheet
+            result = infer_week_from_sheet()
+
+        assert result == 3  # found Week 3 in progress despite calendar saying Week 10
+
 
 # ===========================================================================
 # V15: _get_authoritative_week_num (unit tests)

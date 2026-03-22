@@ -563,14 +563,15 @@ def infer_week_from_sheet(sheet_id: str = None, max_weeks: int = 35) -> int:
     """
     Infer the current training week from actual sheet data.
 
-    Searches week tabs from (calendar_week+2) downwards. Returns:
+    Searches week tabs from (calendar_week+2) downwards to week 1. Returns:
     - The highest week that has at least one Done=Yes entry and is NOT fully done
       (i.e., at least one named exercise is undone) → athlete is still in this week.
     - If the highest started week IS fully done → return week+1 (athlete finished it).
     - Falls back to compute_current_week() if sheet is unreadable or no activity found.
 
-    This prevents the calendar-math off-by-one that fires when the athlete hasn't started
-    the calendar-computed week yet but still has undone sessions in the previous week.
+    Scans all the way to week 1 so that athletes who swapped deloads, took long breaks,
+    or restructured their program (and are therefore N weeks behind calendar position)
+    are found correctly rather than falling back to the (wrong) calendar week.
     """
     try:
         calendar_week = compute_current_week(resolve_program_start_date())
@@ -578,7 +579,7 @@ def infer_week_from_sheet(sheet_id: str = None, max_weeks: int = 35) -> int:
         sheet = client.open_by_key(get_program_sheet_id(sheet_id))
 
         scan_start = min(calendar_week + 2, max_weeks)
-        scan_end = max(1, calendar_week - 4)
+        scan_end = 1  # always scan all the way back — athlete may be far behind calendar
 
         for w in range(scan_start, scan_end - 1, -1):
             data = None
