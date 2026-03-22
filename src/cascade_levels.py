@@ -31,11 +31,23 @@ from typing import Optional
 # Constants
 # ---------------------------------------------------------------------------
 
-INJURY_KEYWORDS = [
-    "injury", "injured", "pain", "hurt", "pulled", "torn", "sprain",
-    "strain", "shoulder", "elbow", "knee", "back pain", "wrist", "hip",
-    "can't train", "doctor", "physio", "rest weeks", "tendon", "inflammation",
+# Severe/explicit → immediate cascade escalation (structural damage, can't train, medical)
+INJURY_ESCALATION_KEYWORDS = [
+    "can't train", "cannot train", "torn", "pulled muscle", "sprain",
+    "strain", "fracture", "doctor", "physio", "physiotherapist",
+    "rest weeks", "surgery", "mri", "x-ray", "hospital", "emergency",
+    "serious injury", "badly hurt", "can't lift", "can not lift",
+    "no puedo entrenar", "lesión grave", "rotura", "descanso forzado",
 ]
+# Casual mention → coach notes and asks, but does NOT fire cascade escalation
+INJURY_WATCH_KEYWORDS = [
+    "pain", "hurt", "sore", "tight", "ache",
+    "shoulder", "elbow", "knee", "wrist", "hip",
+    "tendon", "inflammation", "tweak", "tweaked",
+    "molestia", "dolor", "codo", "rodilla", "hombro",
+]
+# Legacy alias — close_day() uses the full combined set for its soft check
+INJURY_KEYWORDS = INJURY_ESCALATION_KEYWORDS + INJURY_WATCH_KEYWORDS
 GOAL_CHANGE_KEYWORDS = [
     "change my goal", "new goal", "different goal", "pivot", "rethink",
     "not olympic", "switch to", "give up on", "no longer want",

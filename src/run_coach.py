@@ -4047,13 +4047,19 @@ SESSION ORDER (fatigue accumulates top to bottom — use this to interpret perfo
 
 def _check_escalation_from_message(user_message: str, _coach_state: dict = None) -> dict | None:
     """
-    Check if a user message contains escalation-triggering keywords.
+    Check if a user message contains SEVERE escalation-triggering keywords.
+    Casual mentions of pain/elbow/soreness do NOT trigger escalation — only
+    explicit, structural-damage signals do (torn, can't train, doctor, surgery, etc.).
+
+    Casual mentions (INJURY_WATCH_KEYWORDS) are handled by the coach's Q&A
+    in endsession — not by triggering a cascade replanning.
+
     Returns escalation context dict or None.
-    Mirrors _check_escalation() from cascade_levels.py but works on live message text.
     """
-    from cascade_levels import INJURY_KEYWORDS, GOAL_CHANGE_KEYWORDS
+    from cascade_levels import INJURY_ESCALATION_KEYWORDS, GOAL_CHANGE_KEYWORDS
     text = user_message.lower()
-    for kw in INJURY_KEYWORDS:
+    # Only escalate on severe/explicit injury language
+    for kw in INJURY_ESCALATION_KEYWORDS:
         if kw in text:
             return {"type": "injury", "disruption": "injury", "context": {"keyword": kw}}
     for kw in GOAL_CHANGE_KEYWORDS:
@@ -5130,11 +5136,15 @@ def run_bootstrap_cascade(dry_run: bool = False) -> None:
     all available lift history + health log, then run annual_eval + longterm_eval.
 
     Robustness constraints:
-    - Sheet tabs use "Week N" names only — no dates in rows.
-      Infer dates: Week N starts on program_start + (N-1)*7 days.
+    - Sheet tabs use "Week N" names only — no dates in rows. Dates are inferred
+      from actual lift history (Date column), NOT from a formula. The athlete
+      progressed slower than 1 week per calendar week, so the formula is wrong.
+      Approximate dates (prefixed with ~) are used only when lift history has no
+      entries for a given week.
     - Session notes may be absent for some weeks — handled gracefully.
     - No RPE data exists yet — rpe_avg set to null in all synthesized summaries.
-    - Does NOT close week 9 (still open). Covers weeks 1-8 only for summaries.
+    - Includes current week (e.g. week 9) as a partial/in-progress summary
+      alongside the closed weeks. Does NOT call weekly_eval for the current week.
 
     Flow:
       1. Read weeks 1-8 from program sheet
@@ -5172,12 +5182,13 @@ def run_bootstrap_cascade(dry_run: bool = False) -> None:
 
     print(f"[BOOTSTRAP] Loaded {len(lift_history)} lift entries, {len(health_log)} health entries.")
 
-    # Read program data for weeks 1-8
-    # Week 9 is still open — do not include it in summaries
-    BOOTSTRAP_WEEKS = 8
+    # Read program data for all weeks up to and including current week.
+    # Closed weeks (1 to current_week-1) get full WEEKLY_SUMMARYs.
+    # Current week (e.g. week 9) gets included as a PARTIAL summary
+    # — whatever is logged so far, marked as in-progress.
     current_week = _get_authoritative_week_num()
-    weeks_to_read = min(BOOTSTRAP_WEEKS, current_week - 1)
-    print(f"[BOOTSTRAP] Will synthesize summaries for weeks 1-{weeks_to_read}.")
+    weeks_to_read = current_week  # include current week
+    print(f"[BOOTSTRAP] Current week: {current_week}. Reading weeks 1-{weeks_to_read}.")
 
     week_data_by_num: dict = {}
     for wn in range(1, weeks_to_read + 1):
@@ -5188,15 +5199,56 @@ def run_bootstrap_cascade(dry_run: bool = False) -> None:
             sessions_done = sum(
                 1 for d in days if any(e.get("done") for e in d.get("exercises", []))
             )
-            print(f"[BOOTSTRAP]   Week {wn}: {sessions_done}/{len(days)} sessions logged")
+            status = "(partial/in-progress)" if wn == current_week else ""
+            print(f"[BOOTSTRAP]   Week {wn}: {sessions_done}/{len(days)} sessions logged {status}")
         except Exception as e:
             print(f"[BOOTSTRAP]   Week {wn}: failed to read ({e})")
 
+    # Build actual date ranges from lift_history "Date" + "Week" columns
+    # Nacho's program weeks ≠ calendar weeks (he went slower), so we can't
+    # use start_date + (N-1)*7. Instead, read actual dates logged per week.
+    _week_dates_cache: dict = {}
+    import re as _re_bs
+    for _entry in lift_history:
+        _raw_week = str(_entry.get("Week") or _entry.get("week") or "")
+        _wn_match = _re_bs.search(r"\d+", _raw_week)
+        if not _wn_match:
+            continue
+        try:
+            _wn = int(_wn_match.group())
+        except ValueError:
+            continue
+        _raw_date = _entry.get("Date") or _entry.get("date") or ""
+        try:
+            from datetime import datetime as _dtt
+            _d = _dtt.fromisoformat(str(_raw_date)[:10]).date()
+            if _wn not in _week_dates_cache:
+                _week_dates_cache[_wn] = (_d, _d)
+            else:
+                _min_d, _max_d = _week_dates_cache[_wn]
+                _week_dates_cache[_wn] = (min(_min_d, _d), max(_max_d, _d))
+        except (ValueError, TypeError):
+            continue
+
     def _infer_week_dates(week_num: int) -> tuple:
-        """Return (week_start_str, week_end_str) for a given week number."""
+        """
+        Return (week_start_str, week_end_str) from actual lift history dates.
+        Falls back to approximate calendar math only if lift history has no data
+        for this week. Marks approximate dates with a ~ prefix so LLM knows.
+        """
+        if week_num in _week_dates_cache:
+            start_d, end_d = _week_dates_cache[week_num]
+            return str(start_d), str(end_d)
+        # No actual data — try to interpolate from surrounding weeks
+        prev_end = _week_dates_cache.get(week_num - 1, (None, None))[1]
+        if prev_end:
+            approx_start = prev_end + _td(days=1)
+            approx_end = approx_start + _td(days=6)
+            return f"~{approx_start}", f"~{approx_end}"
+        # Last resort: formula (warn that it may be off)
         start = program_start + _td(days=(week_num - 1) * 7)
         end = start + _td(days=6)
-        return str(start), str(end)
+        return f"~{start}(approx)", f"~{end}(approx)"
 
     def _summarize_week_data(week_num: int) -> str:
         """Build a text summary of a single week's training data for the LLM prompt."""
@@ -5239,8 +5291,11 @@ def run_bootstrap_cascade(dry_run: bool = False) -> None:
         start_d, end_d = _infer_week_dates(week_num)
         try:
             from datetime import datetime as _dt
-            start = _dt.fromisoformat(start_d).date()
-            end = _dt.fromisoformat(end_d).date()
+            # Strip ~ or (approx) prefix from approximate dates
+            clean_start = start_d.lstrip("~").split("(")[0].strip()
+            clean_end = end_d.lstrip("~").split("(")[0].strip()
+            start = _dt.fromisoformat(clean_start).date()
+            end = _dt.fromisoformat(clean_end).date()
         except ValueError:
             return "No health data."
 
@@ -5259,22 +5314,32 @@ def run_bootstrap_cascade(dry_run: bool = False) -> None:
 
         return "\n".join(entries) if entries else "No health log data for this week."
 
-    # --- Step 3: Synthesize 4 WEEKLY_SUMMARYs ---
-    # Group weeks into pairs: (1-2), (3-4), (5-6), (7-8)
-    weekly_summary_pairs = [(1, 2), (3, 4), (5, 6), (7, 8)]
+    # --- Step 3: Synthesize WEEKLY_SUMMARYs ---
+    # Group closed weeks into pairs: (1-2), (3-4), (5-6), (7-8)
+    # Current week (9) gets its own entry, marked as partial/in-progress.
+    closed_weeks = current_week - 1  # weeks fully completed
+    weekly_summary_pairs = []
+    for pair_start in range(1, closed_weeks + 1, 2):
+        pair_end = min(pair_start + 1, closed_weeks)
+        weekly_summary_pairs.append((pair_start, pair_end))
+    # Add current (partial) week solo
+    if current_week <= weeks_to_read:
+        weekly_summary_pairs.append((current_week, current_week))
+
     synthesized_weekly: list = []
 
     client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
     for w_start, w_end in weekly_summary_pairs:
-        if w_end > weeks_to_read:
-            w_end = min(w_end, weeks_to_read)
         if w_start > weeks_to_read:
             break
 
-        print(f"[BOOTSTRAP] Synthesizing WEEKLY_SUMMARY for weeks {w_start}-{w_end}...")
+        is_partial_week = (w_start == current_week)
+        label = f"weeks {w_start}-{w_end}" if w_start != w_end else f"week {w_start}"
+        status_note = " (IN-PROGRESS — not yet complete)" if is_partial_week else ""
+        print(f"[BOOTSTRAP] Synthesizing WEEKLY_SUMMARY for {label}{status_note}...")
 
-        # Build training summary for both weeks
+        # Build training summary
         training_text = ""
         for wn in range(w_start, w_end + 1):
             training_text += _summarize_week_data(wn) + "\n\n"
@@ -5286,6 +5351,11 @@ def run_bootstrap_cascade(dry_run: bool = False) -> None:
         w_start_str, _ = _infer_week_dates(w_start)
         _, w_end_str = _infer_week_dates(w_end)
 
+        partial_note = """
+IMPORTANT: This week is CURRENTLY IN PROGRESS — not all sessions are complete yet.
+Set "status": "in_progress" in the output. Do not treat missing sessions as skips.
+""" if is_partial_week else ""
+
         prompt = f"""You are synthesizing historical training data into a structured WEEKLY_SUMMARY JSON.
 This is a bootstrap operation — no real-time data, only what was logged in the program sheet.
 
@@ -5293,6 +5363,7 @@ IMPORTANT DATA CONSTRAINTS:
 - No RPE data exists for any of these weeks (RPE column was not yet in the program). Set rpe_avg to null.
 - Session notes may be absent — use exercise completion + actual weights as the primary signal.
 - Infer effort quality from: completion rate, weight progression, and any available notes.
+{partial_note}
 
 === ATHLETE PROFILE ===
 {athlete_model_raw[:600] if athlete_model_raw else "Finance professional, 4x/week strength training, goals: 120kg squat, 105kg bench by Week 30."}
@@ -5312,6 +5383,7 @@ Return ONLY this JSON (no markdown fences, no explanation):
 {{
   "week": {w_end},
   "week_range": "{w_start}-{w_end}",
+  "status": "{"in_progress" if is_partial_week else "closed"}",
   "period_start": "{w_start_str}",
   "period_end": "{w_end_str}",
   "training": {{
@@ -5396,7 +5468,11 @@ Return ONLY this JSON (no markdown fences, no explanation):
         )
         print(f"[BOOTSTRAP] Wrote {len(synthesized_weekly)} WEEKLY_SUMMARIES to Coach State.")
 
-    # --- Step 4: Synthesize 2 MONTHLY_SUMMARYs ---
+    # --- Step 4: Synthesize MONTHLY_SUMMARYs ---
+    # M1 = weeks 1-4 (first month of program)
+    # M2 = weeks 5-current (second month, includes partial week 9 if present)
+    # Note: month boundaries don't correspond to calendar months — they follow
+    # the program's own pace, which was slower than 4 weeks per month.
     monthly_pairs = [
         ("M1", [s for s in synthesized_weekly if int(s.get("week", 0)) <= 4]),
         ("M2", [s for s in synthesized_weekly if int(s.get("week", 0)) > 4]),
