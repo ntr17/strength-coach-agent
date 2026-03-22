@@ -111,6 +111,19 @@ def _build_bot_context() -> str:
             "If an automated message didn't arrive, tell the athlete honestly — you cannot investigate or retry it."
         )
 
+        # --- Init Zero completion note (suppress stale golden-rules thread) ---
+        try:
+            from iteration_zero import read_iteration_zero_state
+            _iz = read_iteration_zero_state()
+            if _iz.get("status") == "COMPLETE":
+                sections.append(
+                    "SYSTEM NOTE: Initialization interview (Iteration Zero) is COMPLETE. "
+                    "Do NOT ask any more golden rules, long-term vision, or onboarding questions. "
+                    "All profile data has been collected and committed. Operate in normal coaching mode."
+                )
+        except Exception:
+            pass
+
         # --- Tier 1: Coach State (compressed domain summaries — the coach's brain) ---
         coach_state = read_coach_state()
         commands = read_commands()
