@@ -6,10 +6,18 @@ to Coach State. The cascade levels read these computed facts instead of
 estimating them from scratch.
 
 What this file computes:
-  e1RM          — Epley formula, only for sets ≤ 6 reps (strength sets)
-  Weekly e1RM   — per exercise per ISO week, using max from that week
-  Stall detection     — same weight ± 1% for N+ consecutive weeks
-  Regression detection — weight going down vs prior 3-week average
+  e1RM          — Multi-formula estimation across all rep ranges (1-15),
+                  AMRAP sets get highest confidence. Formula blend per rep range:
+                  1-3:  Epley + Brzycki (high accuracy)
+                  4-6:  Epley + Brzycki + Wathan (good accuracy)
+                  7-10: Epley + Wathan + Mayhew (moderate — all included)
+                  11-15: Wathan + Mayhew (low — flagged as estimate)
+                  16+:  unreliable — excluded from projections
+                  AMRAP: treated as max effort -> high-confidence signal
+  RM table      — derives 2RM, 3RM, 5RM, 8RM, 10RM, 12RM from e1RM
+  Weekly e1RM   — best accuracy estimate per exercise per ISO week
+  Stall detection     — same e1RM ± 1.5% for N+ consecutive weeks
+  Regression detection — e1RM going down vs prior moving average
   Overload compliance — did actual weight increase when it should have?
   Rep bucket volume   — weekly sets partitioned into 1-5 / 6-12 / 12+ per motion group
   Volume balance      — push : pull ratio, flag imbalances
@@ -20,6 +28,7 @@ Entry point: run_weekly_strength_report(lift_history, program_data, goals)
 """
 
 import json
+import math
 import re
 import statistics as stats_lib
 from datetime import date
@@ -116,17 +125,177 @@ def _classify_motion_group(exercise_name: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Core computation: e1RM
+# Rep accuracy tiers — how reliable is an e1RM estimate at each rep range?
 # ---------------------------------------------------------------------------
+
+# Maps rep count to (accuracy_label, confidence_weight 0-1)
+# Higher reps = more formula error, lower confidence weight in projections
+REP_ACCURACY: dict[tuple, tuple] = {
+    (1, 3):   ("high",     1.00),
+    (4, 6):   ("good",     0.90),
+    (7, 10):  ("moderate", 0.72),
+    (11, 15): ("low",      0.50),
+    (16, 999):("unreliable", 0.0),  # excluded from projections
+}
+
+# RM conversion table: what fraction of 1RM can you lift for N reps?
+# Based on Epley formula inverse — used for 2RM, 3RM, 5RM, 8RM, 10RM projections
+RM_FRACTIONS: dict[int, float] = {
+    1:  1.000,
+    2:  0.970,
+    3:  0.940,
+    4:  0.910,
+    5:  0.870,
+    6:  0.850,
+    7:  0.830,
+    8:  0.800,
+    10: 0.750,
+    12: 0.700,
+    15: 0.650,
+    20: 0.580,
+}
+
+# AMRAP keywords — if any of these appear in notes/sets_reps, treat reps as max effort
+AMRAP_KEYWORDS = ("amrap", "max reps", "to failure", "all out", "max effort", "myo", "+ reps")
+
+
+# ---------------------------------------------------------------------------
+# Core e1RM computation — multi-formula, rep-range aware
+# ---------------------------------------------------------------------------
+
+def _e1rm_epley(weight: float, reps: int) -> float:
+    """Epley: w × (1 + r/30). Accurate 1-10 reps."""
+    return weight * (1 + reps / 30)
+
+
+def _e1rm_brzycki(weight: float, reps: int) -> Optional[float]:
+    """Brzycki: w × 36 / (37 - r). Accurate 1-10, breaks at r >= 37."""
+    if reps >= 37:
+        return None
+    return weight * 36 / (37 - reps)
+
+
+def _e1rm_wathan(weight: float, reps: int) -> float:
+    """Wathan: 100w / (48.8 + 53.8 × e^(-0.075r)). Validated wider range."""
+    return 100 * weight / (48.8 + 53.8 * math.exp(-0.075 * reps))
+
+
+def _e1rm_mayhew(weight: float, reps: int) -> float:
+    """Mayhew: 100w / (52.2 + 41.9 × e^(-0.055r)). Better for higher reps (8-20)."""
+    return 100 * weight / (52.2 + 41.9 * math.exp(-0.055 * reps))
+
+
+def compute_e1rm_multi(weight_kg: float, reps: int,
+                        is_amrap: bool = False) -> Optional[dict]:
+    """
+    Estimate e1RM using multiple formulas weighted by rep-range accuracy.
+
+    Returns dict:
+    {
+        "e1rm": float,          # blended estimate
+        "e1rm_low": float,      # conservative bound (min of applicable formulas)
+        "e1rm_high": float,     # aggressive bound (max of applicable formulas)
+        "accuracy": str,        # "high" / "good" / "moderate" / "low" / "unreliable"
+        "confidence": float,    # 0.0-1.0
+        "formula_note": str,    # which formulas were used
+        "is_amrap": bool,
+    }
+
+    AMRAP sets are treated as max-effort (full rep range = true capability signal).
+    Their accuracy is bumped up one tier because the athlete went to near-failure.
+
+    Returns None if reps < 1 or weight <= 0.
+    """
+    if reps < 1 or weight_kg <= 0:
+        return None
+
+    # Determine base accuracy tier
+    accuracy_label = "unreliable"
+    confidence = 0.0
+    for (lo, hi), (label, conf) in REP_ACCURACY.items():
+        if lo <= reps <= hi:
+            accuracy_label = label
+            confidence = conf
+            break
+
+    # AMRAP bump: max-effort set is more informative than a submaximal set at same reps
+    # e.g., AMRAP of 8 reps > prescribed 3x8 (the 8 represents true ceiling)
+    if is_amrap and accuracy_label in ("moderate", "low"):
+        prev_tiers = ["high", "good", "moderate", "low", "unreliable"]
+        idx = prev_tiers.index(accuracy_label)
+        accuracy_label = prev_tiers[max(0, idx - 1)]
+        confidence = min(1.0, confidence + 0.20)
+
+    # Exclude unreliable
+    if accuracy_label == "unreliable":
+        return None
+
+    # Select formulas by rep range
+    estimates: list[float] = []
+    notes: list[str] = []
+
+    epley = _e1rm_epley(weight_kg, reps)
+    estimates.append(epley)
+    notes.append("Epley")
+
+    if reps <= 10:
+        brz = _e1rm_brzycki(weight_kg, reps)
+        if brz:
+            estimates.append(brz)
+            notes.append("Brzycki")
+
+    if reps >= 4:
+        wat = _e1rm_wathan(weight_kg, reps)
+        estimates.append(wat)
+        notes.append("Wathan")
+
+    if reps >= 7:
+        may = _e1rm_mayhew(weight_kg, reps)
+        estimates.append(may)
+        notes.append("Mayhew")
+
+    blended = sum(estimates) / len(estimates)
+
+    return {
+        "e1rm": round(blended, 1),
+        "e1rm_low": round(min(estimates), 1),
+        "e1rm_high": round(max(estimates), 1),
+        "accuracy": accuracy_label,
+        "confidence": round(confidence, 2),
+        "formula_note": "+".join(notes),
+        "is_amrap": is_amrap,
+        "source_weight": weight_kg,
+        "source_reps": reps,
+    }
+
 
 def compute_e1rm(weight_kg: float, reps: int) -> Optional[float]:
     """
-    Estimate 1RM using Epley formula: weight × (1 + reps/30).
-    Only valid for sets ≤ 6 reps. Returns None for reps > 6.
+    Simple e1RM estimate — backward-compatible wrapper around compute_e1rm_multi.
+    Returns blended estimate or None if unreliable (reps > 15).
     """
-    if reps < 1 or reps > 6 or weight_kg <= 0:
-        return None
-    return round(weight_kg * (1 + reps / 30), 1)
+    result = compute_e1rm_multi(weight_kg, reps)
+    return result["e1rm"] if result else None
+
+
+# ---------------------------------------------------------------------------
+# RM table from e1RM
+# ---------------------------------------------------------------------------
+
+def compute_rm_table(e1rm: float, rounding: float = 2.5) -> dict:
+    """
+    Derive the full RM table from an estimated 1RM.
+    Returns realistic targets for 2RM through 20RM.
+
+    rounding: round to nearest value (2.5 = standard plate increment).
+    """
+    def _round(val: float) -> float:
+        return round(round(val / rounding) * rounding, 1)
+
+    return {
+        f"{rm}RM": _round(e1rm * frac)
+        for rm, frac in RM_FRACTIONS.items()
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -144,19 +313,40 @@ def _extract_weight(text: str) -> Optional[float]:
     return None
 
 
+def _detect_amrap(entry: dict) -> bool:
+    """Return True if the entry represents an AMRAP / max-effort set."""
+    combined = " ".join([
+        str(entry.get("Notes") or ""),
+        str(entry.get("notes") or ""),
+        str(entry.get("Sets x Reps") or ""),
+        str(entry.get("sets_reps") or ""),
+        str(entry.get("Actual Weight/Reps") or ""),
+    ]).lower()
+    return any(kw in combined for kw in AMRAP_KEYWORDS)
+
+
 def _parse_sets_reps_from_entry(entry: dict) -> tuple[int, int]:
     """
     Parse (sets, reps) from a lift history entry.
     Checks sets_reps, actual, notes fields. Returns (0, 0) if unparseable.
+    For AMRAP fields like "1xAMRAP" or "AMRAP", reps extracted from context.
     """
     for field in ("Sets x Reps", "sets_reps", "Actual Weight/Reps", "actual", "Notes", "notes"):
         val = entry.get(field) or ""
         if not val:
             continue
-        # "4x5" or "4 x 5" format
-        m = re.search(r"(\d+)\s*[xX×]\s*(\d+)", str(val))
+        val_str = str(val)
+        # "4x5" or "4 x 5" format (standard)
+        m = re.search(r"(\d+)\s*[xX×]\s*(\d+)", val_str)
         if m:
             return int(m.group(1)), int(m.group(2))
+        # "AMRAP: 12" or "did 12" in notes — single number for AMRAP reps
+        if any(kw in val_str.lower() for kw in AMRAP_KEYWORDS):
+            m2 = re.search(r"(\d+)", val_str)
+            if m2:
+                n = int(m2.group(1))
+                if 1 <= n <= 50:  # sanity check
+                    return 1, n   # treat as 1 set of N reps
     return 0, 0
 
 
@@ -185,10 +375,28 @@ def _get_exercise_name(entry: dict) -> str:
 
 def compute_weekly_e1rm(lift_history: list) -> dict:
     """
-    Compute weekly max e1RM per exercise from lift history.
-    Only uses sets with ≤ 6 reps for accuracy.
+    Compute weekly best e1RM per exercise from lift history.
 
-    Returns: {exercise_name: {week_key: {"e1rm": float, "weight": float, "reps": int}}}
+    Uses all sets with 1-15 reps (not just ≤6). Selects the highest-confidence
+    estimate each week. AMRAP sets are treated as max-effort and get a confidence
+    boost. Sets >15 reps are excluded as too unreliable for strength projection.
+
+    Returns:
+    {
+        exercise_name: {
+            week_key: {
+                "e1rm": float,         # blended estimate
+                "e1rm_low": float,     # conservative bound
+                "e1rm_high": float,    # aggressive bound
+                "accuracy": str,       # "high"/"good"/"moderate"/"low"
+                "confidence": float,   # 0-1
+                "weight": float,       # source weight
+                "reps": int,           # source reps
+                "is_amrap": bool,
+                "rm_table": dict,      # 2RM, 3RM, 5RM, 8RM, 10RM, 12RM
+            }
+        }
+    }
     """
     result: dict = {}
 
@@ -211,27 +419,32 @@ def compute_weekly_e1rm(lift_history: list) -> dict:
 
         sets, reps = _parse_sets_reps_from_entry(entry)
         if reps == 0:
-            # Try to parse reps from the sets_reps field directly
             sr_field = entry.get("Sets x Reps") or entry.get("sets_reps") or ""
             m = re.search(r"(\d+)\s*[xX×]\s*(\d+)", str(sr_field))
             if m:
                 sets, reps = int(m.group(1)), int(m.group(2))
 
-        if reps < 1 or reps > 6:
-            continue  # only strength sets for e1RM
-
-        e1rm = compute_e1rm(weight, reps)
-        if e1rm is None:
+        if reps < 1:
             continue
 
-        if exercise not in result:
-            result[exercise] = {}
+        is_amrap = _detect_amrap(entry)
+        estimate = compute_e1rm_multi(weight, reps, is_amrap=is_amrap)
+        if estimate is None:
+            continue  # reps > 15 or unreliable
 
-        if week_key not in result[exercise] or e1rm > result[exercise][week_key]["e1rm"]:
+        result.setdefault(exercise, {})
+
+        # Replace if this estimate has higher confidence, or same confidence + higher e1rm
+        existing = result[exercise].get(week_key)
+        if (existing is None
+                or estimate["confidence"] > existing["confidence"]
+                or (estimate["confidence"] == existing["confidence"]
+                    and estimate["e1rm"] > existing["e1rm"])):
             result[exercise][week_key] = {
-                "e1rm": e1rm,
+                **estimate,
                 "weight": weight,
                 "reps": reps,
+                "rm_table": compute_rm_table(estimate["e1rm"]),
             }
 
     return result
@@ -580,7 +793,7 @@ def compute_goal_proximity(weekly_e1rm: dict, goals: dict) -> list:
 # Overload timing prediction — when should the next weight increase happen?
 # ---------------------------------------------------------------------------
 
-def predict_next_increase(weekly_e1rm: dict, program_config: dict = None) -> dict:  # noqa: ARG001
+def predict_next_increase(weekly_e1rm: dict) -> dict:
     """
     Based on recent e1RM trend, predict when each lift should next increase weight.
     Uses rate of gain to compute expected week of next meaningful jump.
@@ -759,14 +972,20 @@ def run_weekly_strength_report(
     volume_summary = summarize_volume_buckets(volume_buckets, last_n_weeks=4)
     stall_insights = generate_stall_insights(stalls, regressions)
 
-    # Current e1RM snapshot (latest week per lift)
+    # Current e1RM snapshot (latest week per lift) — with RM table and accuracy
     current_snapshot: dict = {}
     for exercise, weekly in weekly_e1rm.items():
         sorted_weeks = sorted(weekly.keys())
         if sorted_weeks:
+            latest = weekly[sorted_weeks[-1]]
             current_snapshot[exercise] = {
-                "e1rm": weekly[sorted_weeks[-1]]["e1rm"],
+                "e1rm": latest["e1rm"],
+                "e1rm_low": latest.get("e1rm_low"),
+                "e1rm_high": latest.get("e1rm_high"),
+                "accuracy": latest.get("accuracy", "unknown"),
+                "confidence": latest.get("confidence", 0.0),
                 "week": sorted_weeks[-1],
+                "rm_table": latest.get("rm_table", {}),
             }
 
     report = {
@@ -812,11 +1031,36 @@ def run_weekly_strength_report(
 def format_strength_report_for_prompt(report: dict) -> str:
     """
     Compact text block summarizing strength tracker output for LLM prompt injection.
+    Includes e1RM estimates, RM table for main lifts, accuracy tags, and alerts.
     """
     if not report:
         return ""
 
     lines = []
+
+    # Current e1RM snapshot with RM table (main lifts only — squat, bench, deadlift, OHP)
+    snapshot = report.get("current_e1rm_snapshot", {})
+    main_lifts = [ex for ex in snapshot if any(
+        k in ex for k in ("squat", "bench", "deadlift", "overhead", "ohp")
+    )]
+    if main_lifts:
+        lines.append("Current strength estimates (e1RM):")
+        for ex in sorted(main_lifts):
+            s = snapshot[ex]
+            acc = s.get("accuracy", "?")
+            conf_note = f" [{acc} accuracy]" if acc not in ("high", "good") else ""
+            e1rm = s["e1rm"]
+            # Key RM targets from table
+            rm_table = s.get("rm_table", {})
+            rm_parts = []
+            for rm_key in ("5RM", "3RM", "8RM", "10RM"):
+                if rm_key in rm_table:
+                    rm_parts.append(f"{rm_key}: {rm_table[rm_key]}kg")
+            rm_str = " | ".join(rm_parts[:3])  # show 3 most useful
+            lines.append(
+                f"  {ex}: {e1rm}kg e1RM{conf_note}"
+                + (f" -> {rm_str}" if rm_str else "")
+            )
 
     # Goal proximity
     if report.get("goal_proximity"):
@@ -829,8 +1073,8 @@ def format_strength_report_for_prompt(report: dict) -> str:
                 "in_progress": "in progress",
             }.get(gp["status"], gp["status"])
             lines.append(
-                f"  {gp['exercise']}: {gp['current_e1rm']}kg e1RM | "
-                f"goal {gp['goal']}kg | gap {gp['gap_kg']:+.1f}kg | {status_icon}"
+                f"  {gp['exercise']}: {gp['current_e1rm']}kg / {gp['goal']}kg goal "
+                f"({gp['gap_kg']:+.1f}kg) - {status_icon}"
             )
 
     # Stalls and regressions
@@ -839,12 +1083,12 @@ def format_strength_report_for_prompt(report: dict) -> str:
         for insight in report["stall_insights"]:
             lines.append(f"  {insight}")
 
-    # Push/pull balance (flag non-balanced weeks)
+    # Push/pull balance flags
     if report.get("push_pull_balance"):
         flagged = [w for w in report["push_pull_balance"] if w.get("flag") not in ("balanced", None)]
         if flagged:
             lines.append("Volume balance alerts:")
-            for w in flagged[-2:]:  # last 2 flagged weeks
+            for w in flagged[-2:]:
                 lines.append(f"  {w['week']}: {w['note']}")
 
     # Next increase predictions
@@ -854,7 +1098,7 @@ def format_strength_report_for_prompt(report: dict) -> str:
             wks = pred.get("weeks_to_next_increase", "?")
             rate = pred.get("rate_per_week", 0)
             lines.append(
-                f"  {ex}: +{rate:.2f}kg/wk trend -> next 2.5kg increase in ~{wks} weeks"
+                f"  {ex}: +{rate:.2f}kg/wk -> next 2.5kg increase in ~{wks} weeks"
             )
 
     return "\n".join(lines) if lines else ""
