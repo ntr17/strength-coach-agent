@@ -3296,51 +3296,51 @@ def run(week_num: int = None, dry_run: bool = False, no_sync: bool = False,
             except Exception as e:
                 print(f"  Weekly Telegram digest failed (non-fatal): {e}")
 
-        # Sunday: send next-week plan proposal to Telegram + set CURRENT_FLOW
+        # Sunday: ask for schedule first, then map sessions to it
         if is_weekly_summary:
             try:
+                import json as _json_sun
                 from sheets import read_program_data as _rpd_sun
                 from memory import upsert_coach_state as _ucs_sun
                 from telegram_utils import send_telegram_message as _stm_sun
                 _next_wk_data = _rpd_sun(week_num=week_num + 1, lookback=0)
                 _next_days = _next_wk_data.get("current_week", {}).get("days", [])
                 if _next_days:
-                    # Read monthly focus if available
-                    _monthly_focus = ""
-                    try:
-                        from memory import read_summary_list as _rsl
-                        _monthly_summaries = _rsl("MONTHLY_SUMMARIES", limit=1)
-                        if _monthly_summaries:
-                            _monthly_focus = _monthly_summaries[-1].get("training", {}).get("focus", "")
-                    except Exception:
-                        pass
+                    # Store next week's sessions so the bot can retrieve them when the user replies
+                    _sessions_data = [
+                        {
+                            "day_num": _d.get("day_num"),
+                            "label": _d.get("label") or f"Day {_d.get('day_num', i+1)}",
+                            "exercises": [
+                                {"name": ex.get("name"), "weight": ex.get("weight"),
+                                 "sets_reps": ex.get("sets_reps")}
+                                for ex in _d.get("exercises", []) if ex.get("name")
+                            ],
+                        }
+                        for i, _d in enumerate(_next_days)
+                    ]
+                    _n_sessions = len(_next_days)
+                    _session_labels = [s["label"] for s in _sessions_data]
+                    _labels_str = ", ".join(_session_labels)
 
-                    _day_abbrevs = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
-                    _plan_lines = []
-                    for _di, _day in enumerate(_next_days):
-                        _dlabel = _day.get("label") or f"Day {_day.get('day_num', _di+1)}"
-                        _exs = " | ".join(
-                            f"{ex.get('name','?')} {ex.get('sets_reps','')} @ {ex.get('weight','')}".strip(" @|")
-                            for ex in _day.get("exercises", []) if ex.get("weight")
-                        )
-                        _abbrev = _day_abbrevs[_di] if _di < 7 else f"D{_di+1}"
-                        _plan_lines.append(f"  {_abbrev} — {_dlabel}: {_exs}")
-
-                    _header = f"Week {week_num + 1}"
-                    if _monthly_focus:
-                        _header += f" — {_monthly_focus}"
-                    _plan_msg = (
-                        f"{_header}.\n\nPlan:\n" + "\n".join(_plan_lines) +
-                        "\n\nAnything to adjust? Reply now or reply 'ok'."
+                    _schedule_msg = (
+                        f"Week {week_num + 1} planning — {_n_sessions} sessions ({_labels_str}).\n\n"
+                        f"What does your week look like? Tell me which days you're training "
+                        f"and roughly what time, plus any constraints (travel, late nights).\n\n"
+                        f"Example: 'Tue 7am, Thu 7pm, Fri 7am, Sun 6pm'"
                     )
                     if dry_run:
-                        print(f"\n[DRY RUN — Sunday plan Telegram]:\n{_plan_msg}")
+                        print(f"\n[DRY RUN — Sunday schedule request]:\n{_schedule_msg}")
                     else:
-                        _stm_sun(_plan_msg)
-                        _ucs_sun("CURRENT_FLOW", f"weekly_confirm | {today} | week:{week_num + 1}", "MEDIUM")
-                        print(f"  Sunday plan message sent for Week {week_num + 1}.")
+                        _ucs_sun("NEXT_WEEK_PLAN", _json_sun.dumps({
+                            "week": week_num + 1,
+                            "sessions": _sessions_data,
+                        }), "MEDIUM")
+                        _stm_sun(_schedule_msg)
+                        _ucs_sun("CURRENT_FLOW", f"weekly_schedule_input | {today} | week:{week_num + 1}", "MEDIUM")
+                        print(f"  Sunday schedule request sent for Week {week_num + 1}.")
             except Exception as e:
-                print(f"  Sunday plan message failed (non-fatal): {e}")
+                print(f"  Sunday schedule request failed (non-fatal): {e}")
 
     # 15. Write Coach State summaries (bounded Tier 1 memory for next run)
     print("  Writing Coach State summaries...")
@@ -4725,12 +4725,65 @@ def run_evening_protocol(dry_run: bool = False):
         except Exception:
             pass
 
+    # Check WEEKLY_SCHEDULE: is tomorrow explicitly a rest day?
+    tomorrow_name = tomorrow.strftime("%a")  # e.g. "Mon", "Tue"
+    tomorrow_full = tomorrow.strftime("%A")  # e.g. "Monday"
+    weekly_schedule_raw = coach_state.get("WEEKLY_SCHEDULE", {}).get("summary", "")
+    _tomorrow_is_rest = False
+    _tomorrow_session_time = ""
+    if weekly_schedule_raw:
+        try:
+            import json as _json_ep
+            _ws = _json_ep.loads(weekly_schedule_raw) if weekly_schedule_raw.strip().startswith("{") else {}
+            _tm_entry = _ws.get(tomorrow_name) or _ws.get(tomorrow_full)
+            if _tm_entry == "rest" or (isinstance(_tm_entry, dict) and _tm_entry.get("rest")):
+                _tomorrow_is_rest = True
+            elif isinstance(_tm_entry, dict):
+                _tomorrow_session_time = _tm_entry.get("time", "")
+            elif isinstance(_tm_entry, str) and _tm_entry not in ("rest", ""):
+                _tomorrow_session_time = _tm_entry
+        except Exception:
+            pass
+
     if not next_session:
+        if _tomorrow_is_rest:
+            # Explicit rest day — send a recovery-focused message
+            _week_intent = coach_state.get("WEEKLY_INTENT", {}).get("summary", "")
+            _rest_prompt = (
+                f"You are {ATHLETE_NAME}'s strength coach. Tomorrow ({tomorrow_full}) is a rest day.\n\n"
+                f"Write a short Telegram message (2-3 sentences) that:\n"
+                f"1. Confirms tomorrow is a rest day\n"
+                f"2. Gives 1-2 specific recovery actions for tonight/tomorrow relevant to this week's training\n"
+                f"3. Optionally references what's coming next\n\n"
+                f"Weekly intent: {_week_intent or '(not set)'}\n\n"
+                f"Style: direct, specific. No greeting, no sign-off. Not generic 'rest and recover' — "
+                f"say WHY (what muscle groups need it, what the training load has been).\n"
+                f"Write it now:"
+            )
+            try:
+                from anthropic import Anthropic as _Anthropic
+                from config import ANTHROPIC_API_KEY as _APIKEY, CLAUDE_HAIKU as _HAIKU
+                _rest_resp = _Anthropic(api_key=_APIKEY).messages.create(
+                    model=_HAIKU, max_tokens=100,
+                    messages=[{"role": "user", "content": _rest_prompt}],
+                )
+                _rest_msg = _rest_resp.content[0].text.strip()
+                if dry_run:
+                    print(f"\n[DRY RUN — rest day message]:\n{_rest_msg}")
+                    return
+                from telegram_utils import send_telegram_message as _stm_ep
+                if _stm_ep(_rest_msg):
+                    upsert_coach_state("LAST_EVENING_PROTOCOL", str(today), "HIGH")
+                    print(f"  Rest day message sent for {tomorrow_full}.")
+            except Exception as _re:
+                print(f"  Rest day message failed (non-fatal): {_re}")
+            return
         print("  Evening protocol: all sessions complete or no upcoming session — skipping.")
         return
 
     # Build session summary
-    label = next_session.get("label", "next session")
+    _raw_label = next_session.get("label", "next session")
+    label = f"{tomorrow_full} {_tomorrow_session_time} — {_raw_label}" if _tomorrow_session_time else _raw_label
     exercises = next_session.get("exercises", [])
     main_lifts = [ex for ex in exercises if ex.get("weight")][:4]
     lift_summary = ", ".join(

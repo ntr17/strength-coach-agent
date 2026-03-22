@@ -1609,6 +1609,99 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     except Exception as _iz_err:
         print(f"  [IterationZero] Non-fatal: {_iz_err}")
 
+    # weekly_schedule_input CURRENT_FLOW intercept — athlete replies with their week schedule
+    if _cf_raw.startswith("weekly_schedule_input"):
+        try:
+            import json as _json_si
+            import re as _re_si
+            import anthropic as _ant_si
+            from config import ANTHROPIC_API_KEY as _ak_si, CLAUDE_HAIKU as _haiku_si, ATHLETE_NAME as _an_si
+            from memory import upsert_coach_state as _ucs_si
+
+            # Parse the user's schedule text into a structured day→time/rest dict
+            _parse_prompt = (
+                f"Extract the weekly training schedule from this message. "
+                f"Output a JSON object mapping 3-letter day abbreviations (Mon/Tue/Wed/Thu/Fri/Sat/Sun) "
+                f"to either 'rest' (string) or a time string like '07:00' or '19:00'. "
+                f"Use 24h format for times. Infer 'am'=morning≈07:00, 'pm'=evening≈19:00, "
+                f"'morning'=07:00, 'evening'=19:00 if no exact time given. "
+                f"Days not mentioned → 'rest'. Return ONLY valid JSON.\n\n"
+                f"Message: {user_text}"
+            )
+            _parse_resp = _ant_si.Anthropic(api_key=_ak_si).messages.create(
+                model=_haiku_si, max_tokens=200,
+                messages=[{"role": "user", "content": _parse_prompt}],
+            )
+            _parsed_raw = _parse_resp.content[0].text.strip()
+            _m_si = _re_si.search(r"\{.*\}", _parsed_raw, _re_si.DOTALL)
+            _schedule: dict = _json_si.loads(_m_si.group()) if _m_si else {}
+
+            # Retrieve next week's sessions from NEXT_WEEK_PLAN coach state
+            _nwp_raw = coach_state.get("NEXT_WEEK_PLAN", {}).get("summary", "") or \
+                       coach_state.get("NEXT_WEEK_PLAN", {}).get("Summary", "")
+            _nwp: dict = _json_si.loads(_nwp_raw) if _nwp_raw and _nwp_raw.strip().startswith("{") else {}
+            _week_num_si = _nwp.get("week", "?")
+            _sessions_si = _nwp.get("sessions", [])
+
+            # Map sessions to training days (in order of day of week)
+            _day_order = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+            _training_days = [d for d in _day_order if _schedule.get(d) not in ("rest", "", None)]
+            _plan_lines = []
+            _schedule_enriched = dict(_schedule)  # copy to add session labels
+            for _si_i, _sess in enumerate(_sessions_si):
+                if _si_i < len(_training_days):
+                    _td = _training_days[_si_i]
+                    _time = _schedule.get(_td, "")
+                    _slabel = _sess.get("label", f"Day {_si_i+1}")
+                    _exs = " | ".join(
+                        f"{ex.get('name','?')} {ex.get('sets_reps','')} @ {ex.get('weight','')}".strip(" @|")
+                        for ex in _sess.get("exercises", []) if ex.get("weight")
+                    )[:120]
+                    _plan_lines.append(f"  {_td} {_time} — {_slabel}: {_exs}")
+                    # Enrich schedule with session label
+                    _schedule_enriched[_td] = {"time": _time, "session": _slabel, "day_num": _si_i + 1}
+
+            # Store enriched WEEKLY_SCHEDULE
+            _ucs_si("WEEKLY_SCHEDULE", _json_si.dumps(_schedule_enriched), "HIGH")
+
+            # Build WEEKLY_INTENT if not set
+            _wi_existing = coach_state.get("WEEKLY_INTENT", {}).get("summary", "")
+
+            # Build confirmation message
+            _rest_days_si = [d for d in _day_order if _schedule.get(d) == "rest" or d not in _schedule]
+            _confirm_lines = [f"Week {_week_num_si}.\n"]
+            if _wi_existing:
+                _confirm_lines.append(f"Goal: {_wi_existing}\n")
+            _confirm_lines.append("Sessions:")
+            _confirm_lines.extend(_plan_lines)
+            _rest_str = ", ".join(_rest_days_si[:4]) + (" (rest)" if _rest_days_si else "")
+            _confirm_lines.append(f"\nRest: {_rest_str}")
+            _confirm_lines.append("\nAnything to change? Reply or say 'ok'.")
+            _confirm_msg = "\n".join(_confirm_lines)
+
+            _ucs_si("CURRENT_FLOW", f"weekly_plan_confirm | {_today_str} | week:{_week_num_si}", "MEDIUM")
+            await update.message.reply_text(_confirm_msg)
+            _log_message("OUT", f"week {_week_num_si} plan confirmation sent")
+            return
+        except Exception as _si_err:
+            print(f"  [Bot] weekly_schedule_input parse error: {_si_err}")
+            # Fall through to normal routing on failure
+
+    # weekly_plan_confirm — athlete confirms or requests changes after seeing the mapped plan
+    if _cf_raw.startswith("weekly_plan_confirm"):
+        _confirm_words_p = ("ok", "yes", "confirmed", "looks good", "good", "fine", "perfect", "sure")
+        _lower_pc = user_text.strip().lower()
+        from memory import upsert_coach_state as _ucs_pc
+        if any(w in _lower_pc for w in _confirm_words_p):
+            _ucs_pc("CURRENT_FLOW", "", "LOW")
+            await update.message.reply_text("Plan locked in. See you on the first session.")
+            _log_message("OUT", "weekly plan confirmed")
+            return
+        else:
+            # Has changes → clear flow, fall through to program agent
+            _ucs_pc("CURRENT_FLOW", "", "LOW")
+            # Fall through to intent routing
+
     # weekly_confirm CURRENT_FLOW intercept — athlete confirming or changing next week's plan
     _cf_raw = coach_state.get("CURRENT_FLOW", {}).get("Summary", "") or coach_state.get("CURRENT_FLOW", {}).get("summary", "")
     if _cf_raw.startswith("weekly_confirm"):
