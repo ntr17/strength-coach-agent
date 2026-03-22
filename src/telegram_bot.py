@@ -1700,6 +1700,44 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     except Exception as _rpe_err:
         print(f"  [RPE intercept] Non-fatal: {_rpe_err}")
 
+    # Fix C: Cascade confirmation routing
+    # If CURRENT_FLOW = "cascade_awaiting_confirm | LEVEL | DATE | type"
+    # and athlete says "confirm" / "yes" / "ok" → cascade down + execute
+    try:
+        from datetime import date as _date2
+        _today_str2 = str(_date2.today())
+        from memory import read_coach_state as _rcs2, upsert_coach_state as _ucs2
+        _cs2 = _rcs2()
+        _flow2 = _cs2.get("CURRENT_FLOW", {}).get("Summary", "") or _cs2.get("CURRENT_FLOW", {}).get("summary", "")
+        if _flow2 and _flow2.startswith(f"cascade_awaiting_confirm | "):
+            _confirm_words = {"confirm", "yes", "ok", "go ahead", "apply", "do it", "confirmed", "sí", "si", "adelante"}
+            if any(w in user_text.lower() for w in _confirm_words):
+                parts = _flow2.split(" | ")
+                _cascade_level = parts[1].strip() if len(parts) > 1 else "MONTHLY"
+                import asyncio as _aio3
+                loop3 = _aio3.get_event_loop()
+
+                def _execute_cascade_down():
+                    """On athlete confirmation: cascade down to update program."""
+                    try:
+                        from cascade_state import set_level_state
+                        from cascade_levels import weekly_eval
+                        from memory import upsert_coach_state as _ucs3
+                        from telegram_utils import send_telegram_message as _stm
+                        _stm("Confirmed. Cascading the changes down through weekly planning and updating the program now...")
+                        # weekly_eval re-runs with updated monthly context
+                        weekly_eval(dry_run=False)
+                        set_level_state(_cascade_level, "IDLE")
+                        _ucs3("CURRENT_FLOW", f"cascade_completed | {_cascade_level} | {_today_str2}", "MEDIUM")
+                        _stm("Done. The program has been updated. Weekly plan reflects the changes.")
+                    except Exception as _cd_err:
+                        print(f"  [Cascade down] Failed: {_cd_err}")
+
+                await loop3.run_in_executor(None, _execute_cascade_down)
+                return  # Don't fall through to GENERAL handler
+    except Exception as _cc_err:
+        print(f"  [Cascade confirm] Non-fatal: {_cc_err}")
+
     # GENERAL intent (or fallback from failed specialized agent/workout/meta) — tool use
     try:
         response = await _generate_response_with_tools(

@@ -21,6 +21,7 @@ sys.stdout.reconfigure(encoding="utf-8")
 import anthropic
 
 from config import ANTHROPIC_API_KEY, ATHLETE_NAME, CLAUDE_MODEL, CLAUDE_HAIKU, KEY_LIFTS, compute_current_week, resolve_program_start_date
+CLAUDE_SONNET = CLAUDE_MODEL  # alias for clarity in bootstrap/cascade calls
 
 
 # ---------------------------------------------------------------------------
@@ -75,6 +76,8 @@ def parse_args():
                         help="Fetch Garmin recovery data for last 14 days → Health Log. No email, no Telegram.")
     parser.add_argument("--sync-sheet", action="store_true",
                         help="Run sheet delta sync: detect changes, update Coach State, resolve Commands. No email, no Telegram.")
+    parser.add_argument("--bootstrap", action="store_true",
+                        help="V17: Bootstrap cascade — synthesize WEEKLY/MONTHLY summaries from all available history, then run annual+longterm eval.")
     return parser.parse_args()
 
 
@@ -1534,12 +1537,54 @@ def _detect_session_delta(program_data: dict, coach_state: dict) -> dict:
             if was_done is True and is_done_now is False:
                 newly_skipped.append(name)
 
-    has_changes = bool(new_sessions_done or newly_skipped or new_health_data)
+    # Retroactive change detection: exercises already marked done but with different actual weights
+    retroactive_changes: list[dict] = []
+    for day in days:
+        label = day.get("label", "")
+        exercises = day.get("exercises", [])
+        curr_day = current_snapshot.get(label, {})
+        prev_day = prev_snapshot.get(label, {})
+
+        for ex in exercises:
+            if ex.get("done") is not True:
+                continue
+            name = ex.get("name", "")
+            if not name:
+                continue
+            curr_ex = curr_day.get(name, {})
+            prev_ex = prev_day.get(name, {})
+            if not isinstance(curr_ex, dict) or not isinstance(prev_ex, dict):
+                continue
+            # Both must have been done previously (prev had done=True)
+            if prev_ex.get("done") is not True:
+                continue
+            curr_actual = (curr_ex.get("actual") or "").strip()
+            prev_actual = (prev_ex.get("actual") or "").strip()
+            if curr_actual and prev_actual and curr_actual != prev_actual:
+                # Extract numeric weights for comparison
+                curr_nums = _rej.findall(r"\d+(?:\.\d+)?", curr_actual)
+                prev_nums = _rej.findall(r"\d+(?:\.\d+)?", prev_actual)
+                if curr_nums and prev_nums:
+                    try:
+                        curr_val = float(curr_nums[0])
+                        prev_val = float(prev_nums[0])
+                        if abs(curr_val - prev_val) >= 1.0:  # 1kg threshold for retroactive
+                            retroactive_changes.append({
+                                "label": label,
+                                "exercise": name,
+                                "old_weight": prev_actual,
+                                "new_weight": curr_actual,
+                            })
+                    except (ValueError, TypeError):
+                        pass
+
+    has_changes = bool(new_sessions_done or newly_skipped or new_health_data or retroactive_changes)
     return {
         "new_sessions_done": new_sessions_done,
         "newly_skipped": newly_skipped,
         "no_rpe_sessions": no_rpe_sessions,
         "new_health_data": new_health_data,
+        "retroactive_changes": retroactive_changes,
         "current_snapshot_json": _json.dumps(current_snapshot),
         "snapshot_updated": has_changes,
     }
@@ -1547,6 +1592,85 @@ def _detect_session_delta(program_data: dict, coach_state: dict) -> dict:
 
 import re as _re_module
 _re_rpe = _re_module.compile(r"@?RPE\s*\d", _re_module.IGNORECASE)
+
+
+def _format_delta_for_athlete(session_delta: dict, session: dict) -> str:
+    """
+    Format a session delta dict into a transparent, readable "I see from the sheet:" block.
+    Shown at the START of the endsession message — athlete can correct before we log anything.
+
+    Example output:
+        What I see in the sheet for today's session:
+          ✓ Squat 4x5 @ 90kg
+          ~ Bench 4x5 @ 75kg — 3 sets logged, 1 missing
+          ✗ Barbell Row 3x8 — not logged
+
+        Retroactive change detected:
+          Tuesday Squat: was 87.5kg → now 85kg in the sheet
+
+        Tell me if any of this is wrong before I close the session.
+
+    Returns empty string if no useful delta to show.
+    """
+    exercises = session.get("exercises", []) if session else []
+    new_done = session_delta.get("new_sessions_done", [])
+    retro = session_delta.get("retroactive_changes", [])
+
+    lines = []
+
+    if new_done:
+        session_info = new_done[0]  # Focus on today's session
+        lines.append("Here's what I see in the sheet for this session:")
+
+        done_names = set()
+        skipped_names = set(session_info.get("skipped_names", []))
+
+        for ex in exercises:
+            name = ex.get("name", "")
+            if not name:
+                continue
+            prescribed = ex.get("weight") or ex.get("prescribed") or ""
+            actual = ex.get("actual") or ""
+            is_done = ex.get("done") is True
+
+            if is_done:
+                done_names.add(name)
+                if actual:
+                    weight_str = f" @ {actual}"
+                elif prescribed:
+                    weight_str = f" @ {prescribed} (prescribed)"
+                else:
+                    weight_str = ""
+                sets_reps = ex.get("sets_reps") or ex.get("scheme") or ""
+                sr_str = f" {sets_reps}" if sets_reps else ""
+                lines.append(f"  ✓ {name}{sr_str}{weight_str}")
+            elif name in skipped_names:
+                sets_reps = ex.get("sets_reps") or ex.get("scheme") or ""
+                sr_str = f" {sets_reps}" if sets_reps else ""
+                prescribed_str = f" @ {prescribed}" if prescribed else ""
+                lines.append(f"  ✗ {name}{sr_str}{prescribed_str} — not logged")
+
+        # Weight deviations
+        for dev in session_info.get("weight_deviations", []):
+            lines.append(f"  ⚠ Weight deviation: {dev}")
+
+    if retro:
+        if lines:
+            lines.append("")
+        lines.append("Retroactive change detected in the sheet:")
+        for change in retro:
+            lines.append(
+                f"  {change['label']} — {change['exercise']}: "
+                f"was {change['old_weight']} → now {change['new_weight']}"
+            )
+        lines.append("  Want me to update my records with the new value?")
+
+    if not lines:
+        return ""
+
+    lines.append("")
+    lines.append("Let me know if any of this is wrong before I close the session.")
+    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
@@ -3699,14 +3823,14 @@ def run_endsession_protocol(user_message: str = "", dry_run: bool = False) -> st
     # Dedup: if post-session already ran today, return short ack
     last_post = coach_state.get("LAST_POST_SESSION", {}).get("summary", "")
     if last_post == str(today):
-        return "Ya registré el check-in de hoy — ¿algo más que añadir?"
+        return "Already logged today's session check-in — anything to add or correct?"
 
     # Load program data
     try:
         program_data = read_program_data(week_num=week_num, lookback=0)
     except Exception as e:
         print(f"  EndSession: program load failed: {e}")
-        return "No pude cargar el programa ahora mismo — mándame los datos manualmente."
+        return "Couldn't load the program right now — send me the details directly."
 
     current_week = program_data.get("current_week", {})
     today_str = today.strftime("%A")
@@ -3727,7 +3851,16 @@ def run_endsession_protocol(user_message: str = "", dry_run: bool = False) -> st
                 if plan_label.lower() in day.get("label", "").lower()
             ]
 
-    # Last resort: next undone session
+    # Last resort: most recently logged session (has done exercises)
+    if not today_sessions:
+        logged = [
+            day for day in current_week.get("days", [])
+            if any(ex.get("done") is True for ex in day.get("exercises", []))
+        ]
+        if logged:
+            today_sessions = [logged[-1]]  # most recently logged
+
+    # Final fallback: next undone session
     if not today_sessions:
         undone = [
             day for day in current_week.get("days", [])
@@ -3737,11 +3870,17 @@ def run_endsession_protocol(user_message: str = "", dry_run: bool = False) -> st
             today_sessions = [undone[0]]
 
     if not today_sessions:
-        return "No encontré sesión para hoy — ¿qué hiciste? Mándame los detalles."
+        return "Couldn't find today's session — what did you do? Send me the details."
 
     session = today_sessions[0]
     session_label = session.get("label", "today's session")
     exercises = session.get("exercises", [])
+
+    # --- Layer 1: Detect session delta and show it upfront ---
+    session_delta = _detect_session_delta(program_data, coach_state)
+    delta_display = _format_delta_for_athlete(session_delta, session)
+    print(f"  EndSession delta: {len(session_delta.get('new_sessions_done', []))} new, "
+          f"{len(session_delta.get('retroactive_changes', []))} retro changes")
 
     # Build ordered exercise context with fatigue chain notes
     ordered_ex_text, fatigue_note_text = _build_ordered_exercise_context(exercises)
@@ -3809,6 +3948,9 @@ def run_endsession_protocol(user_message: str = "", dry_run: bool = False) -> st
 === SESSION JUST COMPLETED: {session_label} ===
 ({len(done_exs)}/{total_named} exercises completed)
 
+{"=== WHAT I SEE IN THE SHEET (show this to athlete FIRST, before any questions) ===" if delta_display else ""}
+{delta_display if delta_display else ""}
+
 SESSION ORDER (fatigue accumulates top to bottom — use this to interpret performance):
 {ordered_ex_text}
 
@@ -3821,12 +3963,14 @@ SESSION ORDER (fatigue accumulates top to bottom — use this to interpret perfo
 {"This appears to be an AM/first session — do NOT assume the day is over. Ask if there's a PM session." if is_partial_day else ""}
 
 === WHAT TO ASK (priority order) ===
+{"0. START by showing the delta block above verbatim — let the athlete confirm or correct before anything else." if delta_display else ""}
 1. RPE for each COMPLETED main lift (one question per lift) — SKIP if already reported above.
 2. For each SKIPPED exercise: ask why specifically — reference the fatigue chain notes above.
    E.g.: "You skipped bench [push/chest, pos 2] — your chest was fresh when you got to dips [pos 4];
    dips being easy makes sense. What happened with bench?"
-3. If Layer 3 shows a pending catch-up, ask if it needs rescheduling.
-4. If partial day: ask if there's a PM session planned.
+3. If retroactive changes detected: ask athlete to confirm the new value is correct.
+4. If Layer 3 shows a pending catch-up, ask if it needs rescheduling.
+5. If partial day: ask if there's a PM session planned.
 
 === RULES ===
 - Max 3–4 questions total, grouped naturally.
@@ -3864,20 +4008,126 @@ SESSION ORDER (fatigue accumulates top to bottom — use this to interpret perfo
             print(f"  EndSession check-in sent: {response[:80]}")
             upsert_coach_state("LAST_POST_SESSION", str(today), "HIGH")
             # Track what was asked so the bot can continue this conversation if athlete replies
+            _skipped = [ex['name'] for ex in exercises if ex.get('done') is False and ex.get('name')]
+            _retro = session_delta.get("retroactive_changes", [])
             _questions_summary = (
                 f"RPE for completed lifts in {session_label}"
-                + (f"; skip reasons for {', '.join(ex['name'] for ex in exercises if ex.get('done') is False and ex.get('name'))[:60]}" if any(ex.get('done') is False for ex in exercises) else "")
+                + (f"; skip reasons for {', '.join(_skipped)[:60]}" if _skipped else "")
+                + (f"; retroactive changes: {len(_retro)}" if _retro else "")
+                + ("; delta shown to athlete" if delta_display else "")
             )
             upsert_coach_state(
                 "CURRENT_FLOW",
-                f"endsession | {today} | {session_label} | asked: {_questions_summary[:150]}",
+                f"endsession | {today} | {session_label} | asked: {_questions_summary[:200]}",
                 "HIGH",
             )
+            # Write new snapshot after showing the delta
+            if session_delta.get("snapshot_updated"):
+                upsert_coach_state(
+                    "LAST_PROGRAM_SNAPSHOT",
+                    session_delta.get("current_snapshot_json", ""),
+                    "HIGH",
+                )
+
+            # --- Part 3 Fix A: Immediate escalation check ---
+            # Check user message for injury/goal-change keywords — fire cascade if triggered
+            _esc = _check_escalation_from_message(user_message)
+            if _esc:
+                try:
+                    _fire_immediate_escalation(_esc, session_label, dry_run=dry_run)
+                except Exception as _esc_err:
+                    print(f"  [Escalation] Failed (non-fatal): {_esc_err}")
+
         return response
 
     except Exception as e:
         print(f"  EndSession failed (non-fatal): {e}")
-        return "Algo falló al generar el check-in — mándame los datos directamente."
+        return "Something went wrong generating the check-in — send me the details directly."
+
+
+def _check_escalation_from_message(user_message: str, _coach_state: dict = None) -> dict | None:
+    """
+    Check if a user message contains escalation-triggering keywords.
+    Returns escalation context dict or None.
+    Mirrors _check_escalation() from cascade_levels.py but works on live message text.
+    """
+    from cascade_levels import INJURY_KEYWORDS, GOAL_CHANGE_KEYWORDS
+    text = user_message.lower()
+    for kw in INJURY_KEYWORDS:
+        if kw in text:
+            return {"type": "injury", "disruption": "injury", "context": {"keyword": kw}}
+    for kw in GOAL_CHANGE_KEYWORDS:
+        if kw in text:
+            return {"type": "goal_change", "disruption": "goal_change", "context": {"keyword": kw}}
+    return None
+
+
+def _fire_immediate_escalation(
+    escalation_ctx: dict,
+    session_label: str,
+    dry_run: bool = False,
+) -> None:
+    """
+    Fix A: After endsession, immediately fire escalation:
+    1. Send bridge message to athlete ("I'm flagging a concern...")
+    2. Call appropriate cascade level with escalation_context
+    Called only when escalation detected in endsession message.
+    """
+    from cascade_state import initiate_escalation, classify_disruption
+    from telegram_utils import send_telegram_message
+
+    disruption_type = escalation_ctx.get("disruption", "injury")
+    esc_type = escalation_ctx.get("type", "unknown")
+    keyword = escalation_ctx.get("context", {}).get("keyword", "")
+
+    # Decide which cascade level to call
+    target_level = classify_disruption(disruption_type)
+
+    # Bridge message — let athlete know reasoning is happening
+    type_display = {
+        "injury": "a potential injury concern",
+        "goal_change": "a goal change",
+        "sessions_skipped": "multiple missed sessions",
+    }.get(esc_type, "a concern")
+    bridge = (
+        f"I'm flagging {type_display} ('{keyword}' in your message). "
+        f"Before I close today, I want to reason through the impact on your program. "
+        f"Give me a moment."
+    )
+    print(f"  [Escalation] Firing immediate escalation: {esc_type} → {target_level}")
+    if not dry_run:
+        try:
+            send_telegram_message(bridge)
+        except Exception as e:
+            print(f"  [Escalation] Bridge message failed: {e}")
+
+    # Escalation context for cascade level
+    full_ctx = {
+        **escalation_ctx,
+        "session_label": session_label,
+    }
+
+    # Lock levels + create snapshot
+    if not dry_run:
+        try:
+            initiate_escalation(disruption_type, full_ctx)
+        except Exception as e:
+            print(f"  [Escalation] initiate_escalation failed: {e}")
+
+    # Call cascade level with escalation_context
+    if not dry_run:
+        try:
+            if target_level in ("ANNUAL", "LONGTERM"):
+                from cascade_levels import annual_eval
+                annual_eval(dry_run=False, escalation_context=full_ctx)
+            elif target_level == "MONTHLY":
+                from cascade_levels import monthly_eval
+                monthly_eval(dry_run=False, escalation_context=full_ctx)
+            # WEEKLY is handled at close_day() — no immediate action needed
+        except Exception as e:
+            print(f"  [Escalation] Cascade level call failed: {e}")
+    else:
+        print(f"  [DRY RUN] Would call {target_level} with escalation_context={full_ctx}")
 
 
 # ---------------------------------------------------------------------------
@@ -4870,6 +5120,412 @@ Format: numbered list, concise. Max 400 words total."""
 
 
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Bootstrap Cascade — synthesize historical summaries from raw lift/health data
+# ---------------------------------------------------------------------------
+
+def run_bootstrap_cascade(dry_run: bool = False) -> None:
+    """
+    One-time bootstrap: synthesize WEEKLY_SUMMARIES and MONTHLY_SUMMARIES from
+    all available lift history + health log, then run annual_eval + longterm_eval.
+
+    Robustness constraints:
+    - Sheet tabs use "Week N" names only — no dates in rows.
+      Infer dates: Week N starts on program_start + (N-1)*7 days.
+    - Session notes may be absent for some weeks — handled gracefully.
+    - No RPE data exists yet — rpe_avg set to null in all synthesized summaries.
+    - Does NOT close week 9 (still open). Covers weeks 1-8 only for summaries.
+
+    Flow:
+      1. Read weeks 1-8 from program sheet
+      2. Read full lift_history + health_log + GOLDEN_RULES + ANNUAL_ARC
+      3. Sonnet → 4 WEEKLY_SUMMARYs (W1-2, W3-4, W5-6, W7-8)
+      4. Sonnet → 2 MONTHLY_SUMMARYs (M1=W1-4, M2=W5-8)
+      5. annual_eval() → ANNUAL_SUMMARY
+      6. longterm_eval() → LONGTERM_PLAN
+      7. run_weekly_health_science() → HEALTH_INSIGHTS + LIFT_INSIGHTS
+    """
+    import json as _json
+    from datetime import date as _date, timedelta as _td
+    from memory import (
+        read_lift_history, read_health_log, read_coach_state,
+        append_summary, write_single_summary,
+    )
+    from sheets import read_program_data
+    from health_science import run_weekly_health_science
+
+    print(f"[BOOTSTRAP] Starting cascade bootstrap at {_date.today()}...")
+
+    # Resolve program start date
+    program_start = resolve_program_start_date()
+    print(f"[BOOTSTRAP] Program start: {program_start}")
+
+    # Read all available data
+    print("[BOOTSTRAP] Reading lift history and health log...")
+    lift_history = read_lift_history(limit=500)
+    health_log = read_health_log(limit=500)
+    coach_state = read_coach_state()
+
+    golden_rules_raw = coach_state.get("GOLDEN_RULES", {}).get("summary", "")
+    annual_arc_raw = coach_state.get("ANNUAL_ARC", {}).get("summary", "")
+    athlete_model_raw = coach_state.get("ATHLETE_MODEL", {}).get("summary", "")
+
+    print(f"[BOOTSTRAP] Loaded {len(lift_history)} lift entries, {len(health_log)} health entries.")
+
+    # Read program data for weeks 1-8
+    # Week 9 is still open — do not include it in summaries
+    BOOTSTRAP_WEEKS = 8
+    current_week = _get_authoritative_week_num()
+    weeks_to_read = min(BOOTSTRAP_WEEKS, current_week - 1)
+    print(f"[BOOTSTRAP] Will synthesize summaries for weeks 1-{weeks_to_read}.")
+
+    week_data_by_num: dict = {}
+    for wn in range(1, weeks_to_read + 1):
+        try:
+            pd = read_program_data(week_num=wn, lookback=0)
+            week_data_by_num[wn] = pd
+            days = pd.get("current_week", {}).get("days", [])
+            sessions_done = sum(
+                1 for d in days if any(e.get("done") for e in d.get("exercises", []))
+            )
+            print(f"[BOOTSTRAP]   Week {wn}: {sessions_done}/{len(days)} sessions logged")
+        except Exception as e:
+            print(f"[BOOTSTRAP]   Week {wn}: failed to read ({e})")
+
+    def _infer_week_dates(week_num: int) -> tuple:
+        """Return (week_start_str, week_end_str) for a given week number."""
+        start = program_start + _td(days=(week_num - 1) * 7)
+        end = start + _td(days=6)
+        return str(start), str(end)
+
+    def _summarize_week_data(week_num: int) -> str:
+        """Build a text summary of a single week's training data for the LLM prompt."""
+        pd = week_data_by_num.get(week_num, {})
+        start_str, end_str = _infer_week_dates(week_num)
+        lines = [f"WEEK {week_num} ({start_str} to {end_str}):"]
+
+        days = pd.get("current_week", {}).get("days", [])
+        if not days:
+            lines.append("  No data available for this week.")
+            return "\n".join(lines)
+
+        for day in days:
+            label = day.get("label", f"Day")
+            exercises = day.get("exercises", [])
+            done_exs = [e for e in exercises if e.get("done") is True]
+            skip_exs = [e for e in exercises if e.get("done") is False and e.get("name")]
+
+            if not exercises:
+                continue
+
+            status = f"COMPLETED ({len(done_exs)}/{len(exercises)})" if done_exs else "NOT LOGGED"
+            lines.append(f"  {label}: {status}")
+
+            for ex in done_exs:
+                name = ex.get("name", "")
+                actual = ex.get("actual") or ex.get("weight") or "?"
+                note = ex.get("session_note") or ex.get("notes") or ""
+                note_str = f" | Note: {note[:60]}" if note else ""
+                lines.append(f"    - {name}: {actual}{note_str}")
+
+            if skip_exs:
+                skip_names = [e.get("name", "") for e in skip_exs]
+                lines.append(f"    SKIPPED: {', '.join(skip_names)}")
+
+        return "\n".join(lines)
+
+    def _get_health_for_week(week_num: int) -> str:
+        """Build a text summary of health log entries for a given week."""
+        start_d, end_d = _infer_week_dates(week_num)
+        try:
+            from datetime import datetime as _dt
+            start = _dt.fromisoformat(start_d).date()
+            end = _dt.fromisoformat(end_d).date()
+        except ValueError:
+            return "No health data."
+
+        entries = []
+        for entry in health_log:
+            raw_d = entry.get("Date") or entry.get("date") or ""
+            try:
+                entry_d = _dt.fromisoformat(str(raw_d)[:10]).date()
+                if start <= entry_d <= end:
+                    sleep = entry.get("Sleep (hrs)") or entry.get("sleep_hrs") or "?"
+                    bw = entry.get("Body Weight") or entry.get("bw") or "?"
+                    food = entry.get("Food Quality") or entry.get("food_quality") or "?"
+                    entries.append(f"  {entry_d}: sleep={sleep}h, BW={bw}kg, food_quality={food}")
+            except (ValueError, TypeError):
+                continue
+
+        return "\n".join(entries) if entries else "No health log data for this week."
+
+    # --- Step 3: Synthesize 4 WEEKLY_SUMMARYs ---
+    # Group weeks into pairs: (1-2), (3-4), (5-6), (7-8)
+    weekly_summary_pairs = [(1, 2), (3, 4), (5, 6), (7, 8)]
+    synthesized_weekly: list = []
+
+    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+
+    for w_start, w_end in weekly_summary_pairs:
+        if w_end > weeks_to_read:
+            w_end = min(w_end, weeks_to_read)
+        if w_start > weeks_to_read:
+            break
+
+        print(f"[BOOTSTRAP] Synthesizing WEEKLY_SUMMARY for weeks {w_start}-{w_end}...")
+
+        # Build training summary for both weeks
+        training_text = ""
+        for wn in range(w_start, w_end + 1):
+            training_text += _summarize_week_data(wn) + "\n\n"
+
+        health_text = ""
+        for wn in range(w_start, w_end + 1):
+            health_text += f"Week {wn} health:\n" + _get_health_for_week(wn) + "\n"
+
+        w_start_str, _ = _infer_week_dates(w_start)
+        _, w_end_str = _infer_week_dates(w_end)
+
+        prompt = f"""You are synthesizing historical training data into a structured WEEKLY_SUMMARY JSON.
+This is a bootstrap operation — no real-time data, only what was logged in the program sheet.
+
+IMPORTANT DATA CONSTRAINTS:
+- No RPE data exists for any of these weeks (RPE column was not yet in the program). Set rpe_avg to null.
+- Session notes may be absent — use exercise completion + actual weights as the primary signal.
+- Infer effort quality from: completion rate, weight progression, and any available notes.
+
+=== ATHLETE PROFILE ===
+{athlete_model_raw[:600] if athlete_model_raw else "Finance professional, 4x/week strength training, goals: 120kg squat, 105kg bench by Week 30."}
+
+=== TRAINING DATA ===
+{training_text}
+
+=== HEALTH DATA ===
+{health_text}
+
+=== LIFT HISTORY EXCERPT (most relevant) ===
+{_json.dumps([e for e in lift_history if e.get("Week") in [str(w) for w in range(w_start, w_end + 1)]][:30], ensure_ascii=False, indent=2)[:2000] if lift_history else "Not available."}
+
+Synthesize a WEEKLY_SUMMARY JSON covering weeks {w_start}-{w_end} (period: {w_start_str} to {w_end_str}).
+
+Return ONLY this JSON (no markdown fences, no explanation):
+{{
+  "week": {w_end},
+  "week_range": "{w_start}-{w_end}",
+  "period_start": "{w_start_str}",
+  "period_end": "{w_end_str}",
+  "training": {{
+    "sessions_done": <integer>,
+    "sessions_possible": <integer>,
+    "avg_effort_quality": "<poor|moderate|strong|excellent>",
+    "volume_achieved": "<below_plan|partial|full|above_plan>",
+    "primary_lift_progress": {{
+      "squat": "<e.g. +0, +2.5kg, -2.5kg, or 'no data'>",
+      "bench": "<...>",
+      "deadlift": "<...>",
+      "overhead_press": "<...>"
+    }},
+    "notable": "<1-2 sentence summary of what stood out>"
+  }},
+  "health": {{
+    "avg_sleep": <float or null>,
+    "avg_hrv": <float or null>,
+    "avg_readiness": <float or null>,
+    "bw_trend": "<e.g. 'stable at 82.3kg', 'dropped 0.5kg', or 'no data'>"
+  }},
+  "rpe_note": "RPE data not available — RPE column added from Week 10 onwards",
+  "escalations": [],
+  "patterns": {{
+    "recurring_concern": "<e.g. right_elbow_pulls or null>",
+    "behavioral_notes": "<any patterns observed or null>"
+  }},
+  "markov_note_for_next_week": "<1 sentence key carryover insight>",
+  "to_monthly": "<1 sentence key contribution to monthly picture>"
+}}"""
+
+        if dry_run:
+            print(f"[BOOTSTRAP][DRY RUN] Would synthesize WEEKLY_SUMMARY for weeks {w_start}-{w_end}")
+            synthesized_weekly.append({
+                "week": w_end, "week_range": f"{w_start}-{w_end}",
+                "period_start": w_start_str, "period_end": w_end_str,
+                "training": {"sessions_done": 0, "sessions_possible": 0, "avg_effort_quality": "dry_run"},
+                "health": {"avg_sleep": None}, "rpe_note": "dry_run",
+                "escalations": [], "patterns": {}, "markov_note_for_next_week": "", "to_monthly": "",
+            })
+            continue
+
+        try:
+            result = client.messages.create(
+                model=CLAUDE_SONNET,
+                max_tokens=800,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            raw = result.content[0].text.strip()
+            # Strip markdown fences if present
+            if raw.startswith("```"):
+                raw = raw.split("```")[1]
+                if raw.startswith("json"):
+                    raw = raw[4:]
+            summary = _json.loads(raw.strip())
+            synthesized_weekly.append(summary)
+            print(f"[BOOTSTRAP]   OK — weeks {w_start}-{w_end}: effort={summary.get('training', {}).get('avg_effort_quality', '?')}")
+        except Exception as e:
+            print(f"[BOOTSTRAP]   FAILED synthesizing weeks {w_start}-{w_end}: {e}")
+            # Add minimal fallback so cascade doesn't skip
+            w_s, _ = _infer_week_dates(w_start)
+            _, w_e = _infer_week_dates(w_end)
+            synthesized_weekly.append({
+                "week": w_end, "week_range": f"{w_start}-{w_end}",
+                "period_start": w_s, "period_end": w_e,
+                "training": {"sessions_done": 0, "sessions_possible": 0,
+                             "avg_effort_quality": "unknown", "volume_achieved": "unknown",
+                             "primary_lift_progress": {}, "notable": "Synthesis failed — raw data unavailable."},
+                "health": {"avg_sleep": None, "avg_hrv": None, "avg_readiness": None, "bw_trend": "no data"},
+                "rpe_note": "RPE data not available",
+                "escalations": [], "patterns": {},
+                "markov_note_for_next_week": "Insufficient data.", "to_monthly": "Insufficient data.",
+            })
+
+    # Write WEEKLY_SUMMARIES
+    if not dry_run and synthesized_weekly:
+        from memory import upsert_coach_state
+        upsert_coach_state(
+            "WEEKLY_SUMMARIES",
+            _json.dumps(synthesized_weekly, ensure_ascii=False),
+            "HIGH",
+        )
+        print(f"[BOOTSTRAP] Wrote {len(synthesized_weekly)} WEEKLY_SUMMARIES to Coach State.")
+
+    # --- Step 4: Synthesize 2 MONTHLY_SUMMARYs ---
+    monthly_pairs = [
+        ("M1", [s for s in synthesized_weekly if int(s.get("week", 0)) <= 4]),
+        ("M2", [s for s in synthesized_weekly if int(s.get("week", 0)) > 4]),
+    ]
+    synthesized_monthly: list = []
+
+    for month_label, month_weeks in monthly_pairs:
+        if not month_weeks:
+            continue
+
+        period_start = month_weeks[0].get("period_start", "?")
+        period_end = month_weeks[-1].get("period_end", "?")
+        print(f"[BOOTSTRAP] Synthesizing MONTHLY_SUMMARY {month_label} ({period_start} to {period_end})...")
+
+        weekly_summaries_text = _json.dumps(month_weeks, ensure_ascii=False, indent=2)
+
+        prompt = f"""You are synthesizing weekly summaries into a MONTHLY_SUMMARY JSON.
+
+=== ATHLETE PROFILE ===
+{athlete_model_raw[:400] if athlete_model_raw else "Finance professional. Goals: 120kg squat, 105kg bench by Week 30."}
+
+=== GOLDEN RULES ===
+{golden_rules_raw[:400] if golden_rules_raw else "Strength + aesthetics + health + longevity + sleep > volume."}
+
+=== ANNUAL ARC (program goals and trajectory) ===
+{annual_arc_raw[:400] if annual_arc_raw else "30-week strength program. Targets: 120kg squat, 105kg bench by Week 30."}
+
+=== WEEKLY SUMMARIES ===
+{weekly_summaries_text[:3000]}
+
+Return ONLY this JSON (no markdown, no explanation):
+{{
+  "month": "{month_label}",
+  "period_start": "{period_start}",
+  "period_end": "{period_end}",
+  "training": {{
+    "avg_sessions_per_week": <float>,
+    "avg_effort_quality": "<poor|moderate|strong|excellent>",
+    "volume_trend": "<decreasing|stable|increasing>",
+    "primary_lift_progress": {{
+      "squat": "<overall trend for this month>",
+      "bench": "<...>",
+      "deadlift": "<...>",
+      "overhead_press": "<...>"
+    }},
+    "notable": "<2-3 sentences: what defined this month of training>"
+  }},
+  "health": {{
+    "avg_sleep": <float or null>,
+    "avg_readiness": <float or null>,
+    "bw_trend": "<trend summary or 'no data'>"
+  }},
+  "escalations": [],
+  "recurring_patterns": "<key behavioral or performance patterns>",
+  "markov_note": "<key carryover insight for next month>",
+  "to_annual": "<1-2 sentence contribution to annual picture>"
+}}"""
+
+        if dry_run:
+            print(f"[BOOTSTRAP][DRY RUN] Would synthesize MONTHLY_SUMMARY {month_label}")
+            synthesized_monthly.append({"month": month_label, "period_start": period_start, "period_end": period_end})
+            continue
+
+        try:
+            result = client.messages.create(
+                model=CLAUDE_SONNET,
+                max_tokens=600,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            raw = result.content[0].text.strip()
+            if raw.startswith("```"):
+                raw = raw.split("```")[1]
+                if raw.startswith("json"):
+                    raw = raw[4:]
+            summary = _json.loads(raw.strip())
+            synthesized_monthly.append(summary)
+            print(f"[BOOTSTRAP]   OK — {month_label}: effort={summary.get('training', {}).get('avg_effort_quality', '?')}")
+        except Exception as e:
+            print(f"[BOOTSTRAP]   FAILED synthesizing {month_label}: {e}")
+            synthesized_monthly.append({
+                "month": month_label, "period_start": period_start, "period_end": period_end,
+                "training": {"avg_sessions_per_week": 0, "notable": "Synthesis failed."},
+                "health": {}, "escalations": [], "recurring_patterns": "",
+                "markov_note": "Insufficient data.", "to_annual": "Insufficient data.",
+            })
+
+    # Write MONTHLY_SUMMARIES
+    if not dry_run and synthesized_monthly:
+        from memory import upsert_coach_state
+        upsert_coach_state(
+            "MONTHLY_SUMMARIES",
+            _json.dumps(synthesized_monthly, ensure_ascii=False),
+            "HIGH",
+        )
+        print(f"[BOOTSTRAP] Wrote {len(synthesized_monthly)} MONTHLY_SUMMARIES to Coach State.")
+
+    # --- Step 5: annual_eval ---
+    print("[BOOTSTRAP] Running annual_eval()...")
+    try:
+        from cascade_levels import annual_eval
+        annual_eval(dry_run=dry_run)
+        print("[BOOTSTRAP] annual_eval() complete.")
+    except Exception as e:
+        print(f"[BOOTSTRAP] annual_eval() failed (non-fatal): {e}")
+
+    # --- Step 6: longterm_eval ---
+    print("[BOOTSTRAP] Running longterm_eval()...")
+    try:
+        from cascade_levels import longterm_eval
+        longterm_eval(dry_run=dry_run)
+        print("[BOOTSTRAP] longterm_eval() complete.")
+    except Exception as e:
+        print(f"[BOOTSTRAP] longterm_eval() failed (non-fatal): {e}")
+
+    # --- Step 7: lift + health science ---
+    print("[BOOTSTRAP] Running lift + health science pass...")
+    try:
+        results = run_weekly_health_science(health_log, lift_history, dry_run=dry_run)
+        h_count = len(results.get("health", {}))
+        l_trends = len(results.get("lift", {}).get("trends", {}))
+        print(f"[BOOTSTRAP] Science pass done: {h_count} health correlations, {l_trends} lift trends.")
+    except Exception as e:
+        print(f"[BOOTSTRAP] Science pass failed (non-fatal): {e}")
+
+    print("[BOOTSTRAP] Bootstrap complete.")
+    if dry_run:
+        print("[BOOTSTRAP][DRY RUN] No data was written to Coach State.")
+
+
 # Entry point
 # ---------------------------------------------------------------------------
 
@@ -4922,6 +5578,8 @@ if __name__ == "__main__":
         elif getattr(args, "longterm_eval", False):
             from cascade_levels import longterm_eval
             longterm_eval(dry_run=args.dry_run)
+        elif getattr(args, "bootstrap", False):
+            run_bootstrap_cascade(dry_run=args.dry_run)
         elif getattr(args, "sync_garmin", False):
             sync_garmin(days=14, dry_run=args.dry_run)
         elif getattr(args, "sync_sheet", False):

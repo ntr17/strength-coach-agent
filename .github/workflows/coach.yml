@@ -12,7 +12,7 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: 'Override mode (init, evening-protocol, weekly, think, close-day, weekly-eval, monthly-eval). Leave blank for time-based routing.'
+        description: 'Override mode (init, bootstrap, evening-protocol, weekly, think, close-day, weekly-eval, monthly-eval, annual-eval, longterm-eval). Leave blank for time-based routing.'
         required: false
         default: 'evening-protocol'
 

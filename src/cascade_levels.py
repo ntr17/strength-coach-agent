@@ -395,19 +395,23 @@ Rules:
 # monthly_eval()
 # ---------------------------------------------------------------------------
 
-def monthly_eval(dry_run: bool = False) -> Optional[dict]:
+def monthly_eval(dry_run: bool = False, escalation_context: Optional[dict] = None) -> Optional[dict]:
     """
     Monthly evaluation — runs end of each month.
     Reads last 4-5 WEEKLY_SUMMARIES, produces MONTHLY_SUMMARY.
     Uses Sonnet (strategic reasoning).
+
+    escalation_context: if provided, eval was triggered by disruption (injury, skips, etc.).
+    In this case: prompt focuses on specific concern, result sent to athlete, state → AWAITING_USER.
     """
     import anthropic
     from config import ANTHROPIC_API_KEY, CLAUDE_MODEL
-    from memory import read_summary_list, append_summary, read_single_summary
+    from memory import read_summary_list, append_summary, read_single_summary, upsert_coach_state
     from cascade_state import set_level_state
 
     today = date.today()
-    print(f"[{today}] monthly_eval() starting...")
+    is_escalation = escalation_context is not None
+    print(f"[{today}] monthly_eval() starting... (escalation={is_escalation})")
     set_level_state("MONTHLY", "GATHERING")
 
     weekly_summaries = read_summary_list("WEEKLY_SUMMARIES", limit=5)
@@ -421,6 +425,21 @@ def monthly_eval(dry_run: bool = False) -> Optional[dict]:
 
     set_level_state("MONTHLY", "REASONING")
 
+    escalation_block = ""
+    if escalation_context:
+        esc_type = escalation_context.get("type", "unknown")
+        esc_detail = escalation_context.get("context", {})
+        session_label = escalation_context.get("session_label", "recent session")
+        escalation_block = f"""
+ESCALATION TRIGGER (reason this eval was triggered now, not on schedule):
+  Type: {esc_type}
+  Detail: {json.dumps(esc_detail, ensure_ascii=False)}
+  Triggered during: {session_label}
+
+Focus your analysis on this concern. Produce a specific proposal the athlete can confirm.
+E.g.: "I recommend reducing pull volume by 20% for weeks 10-12. This does not impact bench/squat timeline."
+"""
+
     prompt = f"""You are a strength coaching AI. Produce a monthly evaluation from the weekly summaries.
 
 ANNUAL SUMMARY (for context):
@@ -428,7 +447,7 @@ ANNUAL SUMMARY (for context):
 
 WEEKLY SUMMARIES (last 4-5 weeks):
 {weekly_json}
-
+{escalation_block}
 Produce a JSON monthly summary:
 {{
   "month": "<YYYY-MM>",
@@ -451,7 +470,9 @@ Produce a JSON monthly summary:
     "risk_flags": "<anything that needs attention next month>"
   }},
   "markov_note_for_next_month": "<specific actionable guidance for next month's planning>",
-  "to_annual": "<1-2 sentences: what annual-level planner needs to know>"
+  "to_annual": "<1-2 sentences: what annual-level planner needs to know>",
+  "escalation_recommendation": "<if escalation triggered: specific proposal for athlete to confirm, or null>",
+  "escalation_adjustments": ["<list of specific program changes being proposed, or empty>"]
 }}
 
 Return ONLY the JSON object."""
@@ -465,7 +486,7 @@ Return ONLY the JSON object."""
         client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
         result = client.messages.create(
             model=CLAUDE_MODEL,
-            max_tokens=900,
+            max_tokens=1000,
             messages=[{"role": "user", "content": prompt}],
         )
         raw = result.content[0].text.strip()
@@ -483,7 +504,33 @@ Return ONLY the JSON object."""
     append_summary("MONTHLY_SUMMARIES", summary, max_keep=6)
     print(f"  monthly_eval(): Month summary committed — {summary.get('training', {}).get('overall_quality', '?')}")
 
-    set_level_state("MONTHLY", "IDLE")
+    # If escalation-triggered: send message to athlete + set AWAITING_USER
+    if is_escalation and summary.get("escalation_recommendation"):
+        try:
+            from telegram_utils import send_telegram_message
+            rec = summary["escalation_recommendation"]
+            adjustments = summary.get("escalation_adjustments", [])
+            adj_text = "\n".join(f"  • {a}" for a in adjustments) if adjustments else ""
+            msg = (
+                f"I've looked at this from the monthly planning level.\n\n"
+                f"{rec}"
+                + (f"\n\nSpecific changes:\n{adj_text}" if adj_text else "")
+                + "\n\nReply 'confirm' to apply these changes, or tell me what you'd adjust."
+            )
+            send_telegram_message(msg)
+            set_level_state("MONTHLY", "AWAITING_USER")
+            upsert_coach_state(
+                "CURRENT_FLOW",
+                f"cascade_awaiting_confirm | MONTHLY | {today} | {escalation_context.get('type', 'unknown')}",
+                "HIGH",
+            )
+            print(f"  monthly_eval(): Escalation recommendation sent to athlete. State → AWAITING_USER.")
+        except Exception as e:
+            print(f"  monthly_eval(): Failed to send escalation message: {e}")
+            set_level_state("MONTHLY", "IDLE")
+    else:
+        set_level_state("MONTHLY", "IDLE")
+
     return summary
 
 
@@ -491,19 +538,26 @@ Return ONLY the JSON object."""
 # annual_eval() and longterm_eval() — Phase 7, stubs for now
 # ---------------------------------------------------------------------------
 
-def annual_eval(dry_run: bool = False) -> Optional[dict]:
+def annual_eval(dry_run: bool = False, escalation_context: Optional[dict] = None) -> Optional[dict]:
     """
     Annual evaluation — runs monthly (re-evaluates year plan each month).
     Reads last 6 MONTHLY_SUMMARIES + GOLDEN_RULES + athlete long-term goals.
     Uses Sonnet (strategic, rare). Writes ANNUAL_SUMMARY.
+
+    escalation_context: if provided, this eval was triggered by an escalation event (injury,
+    goal change, etc.) not a schedule. In this case:
+      - Prompt focuses on the specific concern
+      - Result is sent to athlete via Telegram as a message + awaits confirmation
+      - Cascade state set to AWAITING_USER
     """
     import anthropic
     from config import ANTHROPIC_API_KEY, CLAUDE_MODEL
-    from memory import read_summary_list, read_single_summary, write_single_summary, read_coach_state
+    from memory import read_summary_list, read_single_summary, write_single_summary, read_coach_state, upsert_coach_state
     from cascade_state import set_level_state
 
     today = date.today()
-    print(f"[{today}] annual_eval() starting...")
+    is_escalation = escalation_context is not None
+    print(f"[{today}] annual_eval() starting... (escalation={is_escalation})")
     set_level_state("ANNUAL", "GATHERING")
 
     monthly_summaries = read_summary_list("MONTHLY_SUMMARIES", limit=6)
@@ -528,6 +582,25 @@ def annual_eval(dry_run: bool = False) -> Optional[dict]:
 
     set_level_state("ANNUAL", "REASONING")
 
+    escalation_block = ""
+    if escalation_context:
+        esc_type = escalation_context.get("type", "unknown")
+        esc_detail = escalation_context.get("context", {})
+        session_label = escalation_context.get("session_label", "recent session")
+        escalation_block = f"""
+ESCALATION TRIGGER (reason this eval was triggered now, not on schedule):
+  Type: {esc_type}
+  Detail: {json.dumps(esc_detail, ensure_ascii=False)}
+  Triggered during: {session_label}
+
+Focus your analysis on this specific concern. Answer:
+1. Does this disruption threaten the annual goals?
+2. What program adjustment, if any, is needed?
+3. Frame your recommendation as a specific proposal the athlete can confirm or reject.
+   E.g.: "I recommend reducing pull volume by 20% for weeks 10-12 to protect the elbow.
+   This does not impact the bench or squat timeline. Confirm and I'll update the program."
+"""
+
     prompt = f"""You are a strength coaching AI. Produce an annual evaluation from the monthly summaries.
 
 GOLDEN RULES (constitutional constraints — must be respected):
@@ -538,7 +611,7 @@ LONG-TERM GOALS:
 
 MONTHLY SUMMARIES (last 6 months):
 {monthly_json}
-
+{escalation_block}
 Produce a JSON annual summary:
 {{
   "year": <integer>,
@@ -568,7 +641,9 @@ Produce a JSON annual summary:
     "monthly_objectives": ["<up to 3 key objectives>"],
     "risks_to_watch": ["<list>"]
   }},
-  "markov_note": "<what the next quarterly review should know about this year so far>"
+  "markov_note": "<what the next quarterly review should know about this year so far>",
+  "escalation_recommendation": "<if escalation triggered: specific proposal for athlete to confirm, or null>",
+  "escalation_adjustments": ["<list of specific program changes being proposed, or empty>"]
 }}
 
 Return ONLY the JSON object."""
@@ -582,7 +657,7 @@ Return ONLY the JSON object."""
         client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
         result = client.messages.create(
             model=CLAUDE_MODEL,
-            max_tokens=1200,
+            max_tokens=1400,
             messages=[{"role": "user", "content": prompt}],
         )
         raw = result.content[0].text.strip()
@@ -600,7 +675,33 @@ Return ONLY the JSON object."""
     write_single_summary("ANNUAL_SUMMARY", summary)
     print(f"  annual_eval(): Annual summary committed — on_track={summary.get('goal_alignment', {}).get('on_track', '?')}")
 
-    set_level_state("ANNUAL", "IDLE")
+    # If escalation-triggered: send message to athlete + set AWAITING_USER
+    if is_escalation and summary.get("escalation_recommendation"):
+        try:
+            from telegram_utils import send_telegram_message
+            rec = summary["escalation_recommendation"]
+            adjustments = summary.get("escalation_adjustments", [])
+            adj_text = "\n".join(f"  • {a}" for a in adjustments) if adjustments else ""
+            msg = (
+                f"I've reviewed the situation at the annual planning level.\n\n"
+                f"{rec}"
+                + (f"\n\nSpecific changes:\n{adj_text}" if adj_text else "")
+                + "\n\nReply 'confirm' to apply these changes, or tell me what you'd adjust."
+            )
+            send_telegram_message(msg)
+            set_level_state("ANNUAL", "AWAITING_USER")
+            upsert_coach_state(
+                "CURRENT_FLOW",
+                f"cascade_awaiting_confirm | ANNUAL | {today} | {escalation_context.get('type', 'unknown')}",
+                "HIGH",
+            )
+            print(f"  annual_eval(): Escalation recommendation sent to athlete. State → AWAITING_USER.")
+        except Exception as e:
+            print(f"  annual_eval(): Failed to send escalation message: {e}")
+            set_level_state("ANNUAL", "IDLE")
+    else:
+        set_level_state("ANNUAL", "IDLE")
+
     return summary
 
 

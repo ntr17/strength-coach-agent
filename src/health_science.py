@@ -4,11 +4,16 @@ health_science.py — V17 Health Coach Data Science Engine
 Pure Python correlation engine (no LLM, deterministic, reproducible).
 Surfaces insights only when N >= N_MIN observations and r² >= R2_MIN.
 
-Correlations computed:
+Correlations computed (health):
   sleep_strength  — sleep hours → next-day session max weight (% change vs baseline)
   sleep_rpe       — sleep hours → next-session RPE (negative expected: less sleep → higher RPE)
   hrv_readiness   — HRV → session RPE (negative: high HRV → lower RPE)
   steps_food      — daily steps → food quality score next day
+
+Correlations computed (lift science):
+  lift_family     — within-family lift correlation (bench ↔ incline bench, squat ↔ front squat)
+  volume_lag      — weekly volume → strength 2 weeks later (lagged correlation)
+  lift_trends     — per-lift moving average + trajectory flag (trending_up/plateaued/trending_down)
 
 Daily readiness signal (no LLM):
   compute_daily_readiness() → HEALTH_READINESS JSON dict
@@ -16,7 +21,8 @@ Daily readiness signal (no LLM):
   Outputs: readiness_score (0-100), constraints, recommendations, flags, insights
 
 Stored in Coach State:
-  HEALTH_INSIGHTS   — weekly correlation pass results (JSON)
+  HEALTH_INSIGHTS   — weekly health correlation pass results (JSON)
+  LIFT_INSIGHTS     — weekly lift science pass results (JSON)
   HEALTH_READINESS  — daily readiness signal (JSON)
 """
 
@@ -30,12 +36,55 @@ from typing import Optional
 # Constants
 # ---------------------------------------------------------------------------
 
-N_MIN = 20          # Minimum observations before surfacing a correlation insight
-R2_MIN = 0.05       # Minimum R² (5%) to surface — avoids noise
+N_MIN = 20          # Minimum observations before surfacing a health correlation insight
+N_MIN_LIFT = 15     # Minimum observations for lift family correlations (less data available)
+N_MIN_VOLUME_LAG = 12  # Minimum weeks for volume-strength lag analysis
+R2_MIN = 0.05       # Minimum R² (5%) to surface health correlations — avoids noise
+R2_MIN_LIFT = 0.10  # Minimum R² (10%) for lift correlations — tighter threshold
 SLEEP_TARGET_HRS = 7.5
 SLEEP_LOW_THRESHOLD = 6.0  # Below this = poor sleep flag
 HRV_DEBT_DAYS = 3   # How many days below baseline triggers HRV flag
 STEPS_GOOD = 8000   # Steps threshold for "active day"
+
+# ---------------------------------------------------------------------------
+# Lift family groupings — exercises that share the same motor pattern
+# and transfer to each other. Coach treats these as correlated, not independent.
+# ---------------------------------------------------------------------------
+
+LIFT_FAMILIES = {
+    "horizontal_push": [
+        "bench", "bench press", "incline bench", "incline press", "dumbbell bench",
+        "db bench", "chest press", "inclined bench", "close grip bench",
+    ],
+    "vertical_push": [
+        "overhead press", "ohp", "military press", "push press",
+        "seated press", "dumbbell press", "db shoulder press",
+    ],
+    "squat_pattern": [
+        "squat", "back squat", "front squat", "goblet squat", "leg press",
+        "box squat", "pause squat", "tempo squat",
+    ],
+    "hip_hinge": [
+        "deadlift", "conventional deadlift", "rdl", "romanian deadlift",
+        "sumo deadlift", "good morning", "stiff leg", "trap bar deadlift",
+    ],
+    "vertical_pull": [
+        "pullup", "pull-up", "chin-up", "chinup", "lat pulldown",
+        "pulldown", "cable pulldown", "assisted pullup",
+    ],
+    "horizontal_pull": [
+        "row", "barbell row", "bent over row", "cable row", "seated row",
+        "dumbbell row", "db row", "t-bar row", "chest supported row",
+    ],
+    "accessory_arm": [
+        "curl", "bicep curl", "hammer curl", "preacher curl",
+        "tricep", "triceps", "extension", "pushdown", "skull crusher",
+    ],
+    "core_compound": [
+        "nordic", "nordic curl", "hip thrust", "glute bridge",
+        "lunges", "lunge", "bulgarian", "split squat",
+    ],
+}
 
 
 # ---------------------------------------------------------------------------
@@ -299,22 +348,340 @@ def run_weekly_health_science(health_log: list, lift_history: list,
                                dry_run: bool = False) -> dict:
     """
     Weekly correlation pass. Called Sunday with full lift history + health log.
-    Writes HEALTH_INSIGHTS to Coach State if correlations surfaced.
-    Returns insights dict.
+    Writes HEALTH_INSIGHTS and LIFT_INSIGHTS to Coach State.
+    Returns dict with both 'health' and 'lift' keys.
     """
-    insights = compute_weekly_correlations(health_log, lift_history)
+    health_insights = compute_weekly_correlations(health_log, lift_history)
+    lift_insights = compute_lift_science(lift_history)
 
-    if insights and not dry_run:
+    if not dry_run:
         try:
-            from memory import write_single_summary
-            write_single_summary("HEALTH_INSIGHTS", insights)
-            print(f"  health_science: {len(insights)} correlation(s) computed and stored.")
-        except Exception as e:
-            print(f"  health_science: HEALTH_INSIGHTS write failed: {e}")
-    elif not insights:
-        print("  health_science: No correlations met threshold (N_MIN={N_MIN}, R2_MIN={R2_MIN}).")
+            from memory import write_single_summary, upsert_coach_state
+            if health_insights:
+                write_single_summary("HEALTH_INSIGHTS", health_insights)
+                print(f"  health_science: {len(health_insights)} health correlation(s) stored.")
+            else:
+                print(f"  health_science: No health correlations met threshold (N_MIN={N_MIN}).")
 
-    return insights
+            if lift_insights:
+                upsert_coach_state(
+                    "LIFT_INSIGHTS",
+                    json.dumps(lift_insights, ensure_ascii=False),
+                    "HIGH",
+                )
+                trend_count = len(lift_insights.get("trends", {}))
+                corr_count = len(lift_insights.get("family_correlations", {}))
+                print(f"  health_science: lift insights — {trend_count} trends, {corr_count} family correlations stored.")
+            else:
+                print("  health_science: No lift insights computed (insufficient data).")
+        except Exception as e:
+            print(f"  health_science: write failed: {e}")
+
+    return {"health": health_insights, "lift": lift_insights}
+
+
+# ---------------------------------------------------------------------------
+# Lift Science: within-family correlations, volume lag, trends
+# ---------------------------------------------------------------------------
+
+def compute_lift_science(lift_history: list) -> dict:
+    """
+    Compute all lift science insights from raw lift history.
+    Pure Python — no LLM, deterministic.
+
+    Returns LIFT_INSIGHTS dict:
+    {
+        "computed_date": "2026-03-22",
+        "family_correlations": {
+            "horizontal_push": {
+                "exercises": ["bench", "incline bench"],
+                "r": 0.84, "r2": 0.71, "n": 18,
+                "insight_text": "Your bench and incline bench move together (r=0.84)..."
+            }
+        },
+        "volume_lag": {
+            "squat": {"lag_weeks": 2, "r": 0.71, "r2": 0.50, "n": 14, "insight_text": "..."},
+        },
+        "trends": {
+            "squat": {"ma4": 92.5, "ma8": 90.1, "direction": "trending_up", "pct_change_4w": 2.7},
+            "bench": {"ma4": 78.0, "ma8": 75.5, "direction": "trending_up", "pct_change_4w": 3.3},
+        }
+    }
+    """
+    today = str(date.today())
+    result: dict = {
+        "computed_date": today,
+        "family_correlations": {},
+        "volume_lag": {},
+        "trends": {},
+    }
+
+    if not lift_history:
+        return result
+
+    result["family_correlations"] = _compute_lift_family_correlations(lift_history)
+    result["volume_lag"] = _compute_volume_strength_lag(lift_history)
+    result["trends"] = _compute_lift_trends(lift_history)
+
+    return result
+
+
+def _normalize_exercise_name(name: str) -> str:
+    """Lowercase, strip extra whitespace, normalize common variants."""
+    if not name:
+        return ""
+    n = name.lower().strip()
+    # Normalize common abbreviations
+    n = n.replace("b. press", "bench press").replace("bp", "bench press")
+    n = n.replace("b.squat", "back squat").replace("sq.", "squat")
+    return n
+
+
+def _classify_exercise_family(exercise_name: str) -> Optional[str]:
+    """Return the LIFT_FAMILIES key that best matches this exercise, or None."""
+    normalized = _normalize_exercise_name(exercise_name)
+    for family, members in LIFT_FAMILIES.items():
+        for member in members:
+            if member in normalized or normalized in member:
+                return family
+    return None
+
+
+def _build_weekly_exercise_data(lift_history: list) -> dict:
+    """
+    Aggregate lift_history into weekly data per exercise.
+    Infers week from Date field.
+    Returns: {exercise_name: {week_key: {"max_weight": float, "total_volume": float, "sets": int}}}
+    Week key format: "YYYY-WNN" (ISO week)
+    """
+    weekly: dict = {}
+
+    for entry in lift_history:
+        raw_date = entry.get("Date") or entry.get("date") or ""
+        exercise = _normalize_exercise_name(
+            entry.get("Exercise") or entry.get("exercise") or
+            entry.get("Lift") or entry.get("lift") or ""
+        )
+        if not exercise or not raw_date:
+            continue
+
+        # Parse date and get ISO week
+        try:
+            if len(raw_date) >= 10:
+                d = date.fromisoformat(raw_date[:10])
+            else:
+                continue
+        except ValueError:
+            continue
+
+        week_key = f"{d.isocalendar()[0]}-W{d.isocalendar()[1]:02d}"
+
+        # Extract weight and rep data
+        actual_raw = (
+            entry.get("Actual Weight/Reps") or entry.get("actual") or
+            entry.get("Weight") or entry.get("weight") or ""
+        )
+        weight = _extract_weight_kg(str(actual_raw))
+        if not weight:
+            continue
+
+        # Estimate reps from entry (sets×reps format like "4x5")
+        reps = 1
+        import re as _re
+        reps_m = _re.search(r"(\d+)\s*[xX×]\s*(\d+)", str(actual_raw))
+        if reps_m:
+            reps = int(reps_m.group(2))
+        sets_m = _re.search(r"(\d+)\s*[xX×]", str(actual_raw))
+        sets = int(sets_m.group(1)) if sets_m else 1
+
+        if exercise not in weekly:
+            weekly[exercise] = {}
+        if week_key not in weekly[exercise]:
+            weekly[exercise][week_key] = {"max_weight": 0.0, "total_volume": 0.0, "sets": 0}
+
+        weekly[exercise][week_key]["max_weight"] = max(
+            weekly[exercise][week_key]["max_weight"], weight
+        )
+        weekly[exercise][week_key]["total_volume"] += weight * reps * sets
+        weekly[exercise][week_key]["sets"] += sets
+
+    return weekly
+
+
+def _compute_lift_family_correlations(lift_history: list) -> dict:
+    """
+    For each lift family with 2+ exercises present, compute week-over-week
+    % change correlation between exercise pairs.
+    Returns family_correlations dict.
+    """
+    weekly = _build_weekly_exercise_data(lift_history)
+    results: dict = {}
+
+    for family, members in LIFT_FAMILIES.items():
+        # Find exercises present in history that belong to this family
+        present = []
+        for ex in weekly.keys():
+            if _classify_exercise_family(ex) == family:
+                present.append(ex)
+
+        if len(present) < 2:
+            continue
+
+        # For each pair, compute week-over-week % changes and correlate
+        best_pair = None
+        best_r2 = 0.0
+
+        for i in range(len(present)):
+            for j in range(i + 1, len(present)):
+                ex_a, ex_b = present[i], present[j]
+                weeks_a = weekly[ex_a]
+                weeks_b = weekly[ex_b]
+
+                # Common weeks with enough data in both
+                common_weeks = sorted(set(weeks_a.keys()) & set(weeks_b.keys()))
+                if len(common_weeks) < N_MIN_LIFT + 1:
+                    continue
+
+                # Compute week-over-week % change series
+                changes_a: list = []
+                changes_b: list = []
+                for idx, wk in enumerate(common_weeks[1:], 1):
+                    prev_wk = common_weeks[idx - 1]
+                    if prev_wk not in weeks_a or prev_wk not in weeks_b:
+                        continue
+                    prev_a = weeks_a[prev_wk]["max_weight"]
+                    curr_a = weeks_a[wk]["max_weight"]
+                    prev_b = weeks_b[prev_wk]["max_weight"]
+                    curr_b = weeks_b[wk]["max_weight"]
+                    if prev_a > 0 and prev_b > 0:
+                        changes_a.append((curr_a - prev_a) / prev_a * 100)
+                        changes_b.append((curr_b - prev_b) / prev_b * 100)
+
+                if len(changes_a) < N_MIN_LIFT:
+                    continue
+
+                r, r2, n = _pearson_correlation(changes_a, changes_b)
+                if r2 > best_r2:
+                    best_r2 = r2
+                    best_pair = (ex_a, ex_b, r, r2, n)
+
+        if best_pair and best_pair[3] >= R2_MIN_LIFT:
+            ex_a, ex_b, r, r2, n = best_pair
+            direction = "together" if r > 0 else "inversely"
+            lag_note = ""
+            if r > 0.6:
+                lag_note = f" When {ex_a} stalls, {ex_b} typically follows within 1-2 weeks."
+            results[family] = {
+                "exercises": [ex_a, ex_b],
+                "r": round(r, 3),
+                "r2": round(r2, 3),
+                "n": n,
+                "insight_text": (
+                    f"Your {ex_a} and {ex_b} move {direction} (r={r:.2f}, N={n})."
+                    f"{lag_note}"
+                    f" Programming one affects the other — don't treat them as independent."
+                ),
+            }
+
+    return results
+
+
+def _compute_volume_strength_lag(lift_history: list, lag_weeks: int = 2) -> dict:
+    """
+    For each main lift, check if weekly volume predicts max weight lag_weeks later.
+    Returns volume_lag dict per exercise.
+    """
+    weekly = _build_weekly_exercise_data(lift_history)
+    results: dict = {}
+
+    for exercise, week_data in weekly.items():
+        sorted_weeks = sorted(week_data.keys())
+        if len(sorted_weeks) < N_MIN_VOLUME_LAG + lag_weeks:
+            continue
+
+        pairs = []
+        for i, wk in enumerate(sorted_weeks):
+            future_idx = i + lag_weeks
+            if future_idx >= len(sorted_weeks):
+                break
+            future_wk = sorted_weeks[future_idx]
+            vol = week_data[wk]["total_volume"]
+            future_strength = week_data[future_wk]["max_weight"]
+            if vol > 0 and future_strength > 0:
+                pairs.append((vol, future_strength))
+
+        if len(pairs) < N_MIN_VOLUME_LAG:
+            continue
+
+        r, r2, n = _pearson_correlation([p[0] for p in pairs], [p[1] for p in pairs])
+        if r2 >= R2_MIN_LIFT and r > 0:  # positive lag expected: more volume → future strength
+            # Compute interpretable numbers
+            high_vol_weeks = [p for p in pairs if p[0] >= stats_lib.median([p[0] for p in pairs])]
+            low_vol_weeks = [p for p in pairs if p[0] < stats_lib.median([p[0] for p in pairs])]
+            if high_vol_weeks and low_vol_weeks:
+                avg_high_strength = stats_lib.mean([p[1] for p in high_vol_weeks])
+                avg_low_strength = stats_lib.mean([p[1] for p in low_vol_weeks])
+                pct_diff = (avg_high_strength - avg_low_strength) / avg_low_strength * 100 if avg_low_strength else 0
+                results[exercise] = {
+                    "lag_weeks": lag_weeks,
+                    "r": round(r, 3),
+                    "r2": round(r2, 3),
+                    "n": n,
+                    "insight_text": (
+                        f"High {exercise} volume in a given week predicts "
+                        f"+{pct_diff:.1f}% strength {lag_weeks} weeks later "
+                        f"(r={r:.2f}, N={n}). Current volume is your future strength signal."
+                    ),
+                }
+
+    return results
+
+
+def _compute_lift_trends(lift_history: list) -> dict:
+    """
+    For each exercise with enough data, compute 4-week and 8-week moving averages
+    of max weight and flag trend direction.
+    Returns trends dict per exercise.
+    """
+    weekly = _build_weekly_exercise_data(lift_history)
+    results: dict = {}
+
+    for exercise, week_data in weekly.items():
+        sorted_weeks = sorted(week_data.keys())
+        if len(sorted_weeks) < 4:
+            continue
+
+        weights = [week_data[wk]["max_weight"] for wk in sorted_weeks]
+
+        ma4 = stats_lib.mean(weights[-4:]) if len(weights) >= 4 else None
+        ma8 = stats_lib.mean(weights[-8:]) if len(weights) >= 8 else None
+
+        # Trend direction: compare most recent 2 weeks vs 2 weeks prior in the 4-week window
+        if len(weights) >= 4:
+            recent_avg = stats_lib.mean(weights[-2:])
+            prior_avg = stats_lib.mean(weights[-4:-2])
+            pct_change = (recent_avg - prior_avg) / prior_avg * 100 if prior_avg else 0
+
+            if pct_change > 1.0:
+                direction = "trending_up"
+            elif pct_change < -1.0:
+                direction = "trending_down"
+            else:
+                direction = "plateaued"
+        else:
+            pct_change = 0.0
+            direction = "insufficient_data"
+
+        results[exercise] = {
+            "ma4": round(ma4, 1) if ma4 else None,
+            "ma8": round(ma8, 1) if ma8 else None,
+            "direction": direction,
+            "pct_change_4w": round(pct_change, 1),
+            "last_weight": round(weights[-1], 1),
+            "weeks_tracked": len(sorted_weeks),
+        }
+
+    return results
 
 
 # ---------------------------------------------------------------------------
