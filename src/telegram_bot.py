@@ -1609,6 +1609,23 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     except Exception as _iz_err:
         print(f"  [IterationZero] Non-fatal: {_iz_err}")
 
+    # weekly_confirm CURRENT_FLOW intercept — athlete confirming or changing next week's plan
+    _cf_raw = coach_state.get("CURRENT_FLOW", {}).get("Summary", "") or coach_state.get("CURRENT_FLOW", {}).get("summary", "")
+    if _cf_raw.startswith("weekly_confirm"):
+        _confirm_words = ("ok", "yes", "confirmed", "looks good", "good", "fine", "perfect", "sure", "confirmed")
+        _lower_cf = user_text.strip().lower()
+        if any(w in _lower_cf for w in _confirm_words):
+            from memory import upsert_coach_state as _ucs_cf
+            _ucs_cf("CURRENT_FLOW", "", "LOW")
+            await update.message.reply_text("Week confirmed. See you Monday.")
+            _log_message("OUT", "weekly confirmed")
+            return
+        else:
+            # Has changes — clear flow and fall through to normal routing (program agent)
+            from memory import upsert_coach_state as _ucs_cf2
+            _ucs_cf2("CURRENT_FLOW", "", "LOW")
+            # Fall through to intent routing below
+
     # Keyword intercepts for structural plan review commands (before LLM routing)
     _lower = user_text.strip().lower()
     if _lower in ("show annual", "show year", "show annual plan"):

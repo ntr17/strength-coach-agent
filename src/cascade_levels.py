@@ -292,6 +292,38 @@ Rules:
         set_level_state("DAILY", "IDLE")
         return summary
 
+    # --- 4. Send end-of-day Telegram message ---
+    if not dry_run:
+        try:
+            from telegram_utils import send_telegram_message
+            _sess = summary.get("session", {})
+            _week = summary.get("week") or "?"
+            _effort = _sess.get("effort_quality", "unknown")
+            _label = _sess.get("label", "")
+            _notable = _sess.get("notable", "")
+            _esc = summary.get("escalation_check", "none")
+
+            if _sess.get("completed"):
+                _status_line = f"Done ({_effort})"
+            elif _effort == "rest_day":
+                _status_line = "Rest day"
+            else:
+                _status_line = f"Missed ({_effort})"
+
+            if _label:
+                _status_line = f"{_label} — {_status_line}"
+
+            lines = [f"Day closed — Week {_week}.", _status_line]
+            if _notable:
+                lines.append(_notable)
+            if _esc and _esc != "none":
+                lines.append(f"Flagged: {_esc}")
+
+            send_telegram_message("\n".join(lines))
+            print(f"  close_day(): End-of-day message sent.")
+        except Exception as _tg_err:
+            print(f"  close_day(): Telegram message failed (non-fatal): {_tg_err}")
+
     set_level_state("DAILY", "IDLE")
     return summary
 

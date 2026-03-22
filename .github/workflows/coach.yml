@@ -64,8 +64,9 @@ jobs:
             echo "Manual dispatch — running: $MODE"
             python src/run_coach.py --${MODE}
           elif [ "$DAY" = "7" ] && [ "$HOUR" = "18" ]; then
-            echo "Sunday 18:00 UTC (20:00 CEST) — running weekly coaching email..."
+            echo "Sunday 18:00 UTC (20:00 CEST) — running weekly coaching email + Monday brief..."
             python src/run_coach.py --weekly
+            python src/run_coach.py --evening-protocol
           elif [ "$HOUR" = "18" ]; then
             echo "Weekday 18:00 UTC (20:00 CEST) — running evening protocol..."
             python src/run_coach.py --evening-protocol

@@ -3206,7 +3206,8 @@ def run(week_num: int = None, dry_run: bool = False, no_sync: bool = False,
     if is_weekly_summary:
         print("  Generating charts...")
         try:
-            from charts import generate_1rm_chart, generate_volume_chart, generate_bodyweight_chart
+            from charts import (generate_1rm_chart, generate_volume_chart,
+                                generate_bodyweight_chart, generate_strength_trajectory_chart)
             chart_list = []
             c1 = generate_1rm_chart(memory_data.get("lift_history", []),
                                     tracked_lifts=memory_data.get("tracked_lifts"))
@@ -3221,6 +3222,31 @@ def run(week_num: int = None, dry_run: bool = False, no_sync: bool = False,
             c3 = generate_bodyweight_chart(memory_data.get("health_log", []))
             if c3:
                 chart_list.append((c3, "chart-bw"))
+            # e1RM trajectory chart with goal lines (requires weekly_e1rm)
+            try:
+                from strength_tracker import compute_weekly_e1rm
+                from projections import _parse_lift_targets
+                _traj_weekly = compute_weekly_e1rm(memory_data.get("lift_history", []))
+                _traj_goals = {}
+                _arc_raw = coach_state.get("ANNUAL_ARC", {})
+                _arc_summary = _arc_raw.get("Summary", _arc_raw.get("summary", "")) if isinstance(_arc_raw, dict) else ""
+                if _arc_summary and _arc_summary.strip().startswith("{"):
+                    import json as _json_c
+                    _arc = _json_c.loads(_arc_summary)
+                    _medium = _arc.get("medium_goals", {})
+                    _traj_goals = {k: float(v) for k, v in {
+                        "Squat": _medium.get("squat_goal_kg"),
+                        "Bench Press": _medium.get("bench_goal_kg"),
+                        "Deadlift": _medium.get("deadlift_goal_kg"),
+                    }.items() if v}
+                if not _traj_goals:
+                    _traj_goals = {k.title(): v for k, v in _parse_lift_targets(
+                        memory_data.get("long_term_goals", "")).items()}
+                c4 = generate_strength_trajectory_chart(_traj_weekly, goals=_traj_goals or None)
+                if c4:
+                    chart_list.append((c4, "chart-e1rm-trajectory"))
+            except Exception as _ce:
+                print(f"    → trajectory chart failed (non-fatal): {_ce}")
             charts = chart_list if chart_list else None
             print(f"    → {len(chart_list)} chart(s) generated")
         except ImportError:
@@ -3269,6 +3295,52 @@ def run(week_num: int = None, dry_run: bool = False, no_sync: bool = False,
                 )
             except Exception as e:
                 print(f"  Weekly Telegram digest failed (non-fatal): {e}")
+
+        # Sunday: send next-week plan proposal to Telegram + set CURRENT_FLOW
+        if is_weekly_summary:
+            try:
+                from sheets import read_program_data as _rpd_sun
+                from memory import upsert_coach_state as _ucs_sun
+                from telegram_utils import send_telegram_message as _stm_sun
+                _next_wk_data = _rpd_sun(week_num=week_num + 1, lookback=0)
+                _next_days = _next_wk_data.get("current_week", {}).get("days", [])
+                if _next_days:
+                    # Read monthly focus if available
+                    _monthly_focus = ""
+                    try:
+                        from memory import read_summary_list as _rsl
+                        _monthly_summaries = _rsl("MONTHLY_SUMMARIES", limit=1)
+                        if _monthly_summaries:
+                            _monthly_focus = _monthly_summaries[-1].get("training", {}).get("focus", "")
+                    except Exception:
+                        pass
+
+                    _day_abbrevs = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+                    _plan_lines = []
+                    for _di, _day in enumerate(_next_days):
+                        _dlabel = _day.get("label") or f"Day {_day.get('day_num', _di+1)}"
+                        _exs = " | ".join(
+                            f"{ex.get('name','?')} {ex.get('sets_reps','')} @ {ex.get('weight','')}".strip(" @|")
+                            for ex in _day.get("exercises", []) if ex.get("weight")
+                        )
+                        _abbrev = _day_abbrevs[_di] if _di < 7 else f"D{_di+1}"
+                        _plan_lines.append(f"  {_abbrev} — {_dlabel}: {_exs}")
+
+                    _header = f"Week {week_num + 1}"
+                    if _monthly_focus:
+                        _header += f" — {_monthly_focus}"
+                    _plan_msg = (
+                        f"{_header}.\n\nPlan:\n" + "\n".join(_plan_lines) +
+                        "\n\nAnything to adjust? Reply now or reply 'ok'."
+                    )
+                    if dry_run:
+                        print(f"\n[DRY RUN — Sunday plan Telegram]:\n{_plan_msg}")
+                    else:
+                        _stm_sun(_plan_msg)
+                        _ucs_sun("CURRENT_FLOW", f"weekly_confirm | {today} | week:{week_num + 1}", "MEDIUM")
+                        print(f"  Sunday plan message sent for Week {week_num + 1}.")
+            except Exception as e:
+                print(f"  Sunday plan message failed (non-fatal): {e}")
 
     # 15. Write Coach State summaries (bounded Tier 1 memory for next run)
     print("  Writing Coach State summaries...")
@@ -4642,12 +4714,14 @@ def run_evening_protocol(dry_run: bool = False):
             break
 
     # If no incomplete session in current week, try next week
-    if not next_session and tomorrow.weekday() == 0:
+    # On Sundays: always look at next week Day 1 so Monday brief is always sent
+    if not next_session and (tomorrow.weekday() == 0 or today.weekday() == 6):
         try:
             next_week_data = read_program_data(week_num=week_num + 1, lookback=0)
             next_week_days = next_week_data.get("current_week", {}).get("days", [])
             if next_week_days:
                 next_session = next_week_days[0]
+                print(f"  Evening protocol: Sunday mode — targeting Week {week_num + 1} Day 1.")
         except Exception:
             pass
 
