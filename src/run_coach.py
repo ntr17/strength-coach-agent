@@ -5246,7 +5246,9 @@ def run_bootstrap_cascade(dry_run: bool = False) -> None:
             approx_end = approx_start + _td(days=6)
             return f"~{approx_start}", f"~{approx_end}"
         # Last resort: formula (warn that it may be off)
-        start = program_start + _td(days=(week_num - 1) * 7)
+        from datetime import datetime as _dtt2
+        _ps = _dtt2.fromisoformat(str(program_start)[:10]).date() if isinstance(program_start, str) else program_start
+        start = _ps + _td(days=(week_num - 1) * 7)
         end = start + _td(days=6)
         return f"~{start}(approx)", f"~{end}(approx)"
 
