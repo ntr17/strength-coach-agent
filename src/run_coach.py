@@ -868,7 +868,40 @@ def run_think(week_num: int = None, dry_run: bool = False):
     except Exception as e:
         print(f"  Weekly health science failed (non-fatal): {e}")
 
-    # 9. V17 annual eval — runs on first Sunday of each month (monthly gate)
+    # 9. V17 strength tracker — e1RM, stalls, volume buckets, push/pull balance
+    try:
+        from strength_tracker import run_weekly_strength_report
+        from memory import read_lift_history as _rlifth
+        print("  Running weekly strength analytics...")
+        _st_lift_history = _rlifth(limit=500)
+        _st_goals_text = memory_data.get("long_term_goals", "") if memory_data else ""
+        _st_goals: dict = {}
+        import re as _re_st
+        for _pat, _lift in [
+            (r"(\d+)\s*kg\s+squat", "squat"),
+            (r"(\d+)\s*kg\s+bench", "bench press"),
+            (r"(\d+)\s*kg\s+deadlift", "deadlift"),
+            (r"(\d+)\s*kg\s+ohp", "overhead press"),
+        ]:
+            _m = _re_st.search(_pat, _st_goals_text, _re_st.IGNORECASE)
+            if _m:
+                try:
+                    _st_goals[_lift] = float(_m.group(1))
+                except (ValueError, IndexError):
+                    pass
+        run_weekly_strength_report(_st_lift_history, goals=_st_goals, dry_run=dry_run)
+    except Exception as e:
+        print(f"  Weekly strength analytics failed (non-fatal): {e}")
+
+    # 10. V17 cardio zones analysis — runs weekly if Garmin is available
+    try:
+        from cardio_zones import CardioOrchestrator
+        print("  Running cardio zone analysis...")
+        CardioOrchestrator().run_cardio_analysis(days=21, dry_run=dry_run)
+    except Exception as e:
+        print(f"  Cardio zone analysis failed (non-fatal): {e}")
+
+    # 11. V17 annual eval — runs on first Sunday of each month (monthly gate)
     try:
         if today.day <= 7:  # first week of month = run annual eval
             print("  First week of month — running annual_eval()...")
@@ -4762,6 +4795,29 @@ def run_evening_protocol(dry_run: bool = False):
     except Exception:
         pass
 
+    # STRENGTH_PROJECTIONS — stall detection, goal proximity, push/pull balance
+    _ep_strength_text = ""
+    try:
+        import json as _json_sp
+        _raw_sp = coach_state.get("STRENGTH_PROJECTIONS", {}).get("summary", "")
+        if _raw_sp:
+            _sp = _json_sp.loads(_raw_sp)
+            from strength_tracker import format_strength_report_for_prompt
+            _ep_strength_text = format_strength_report_for_prompt(_sp)
+    except Exception:
+        pass
+
+    # CARDIO_ZONES — weekly zone summary for prompt context
+    _ep_cardio_text = ""
+    try:
+        import json as _json_cz
+        _raw_cz = coach_state.get("CARDIO_ZONES", {}).get("summary", "")
+        if _raw_cz:
+            _cz = _json_cz.loads(_raw_cz)
+            _ep_cardio_text = _cz.get("summary_text", "")
+    except Exception:
+        pass
+
     # Load commands for cascade conflict detection
     _ep_commands: list = []
     try:
@@ -4819,6 +4875,8 @@ Recent health (last 3 days only — if empty, there is NO recent data, do not me
 {f"Readiness signal: {_ep_readiness_text}" if _ep_readiness_text else ""}
 Active concerns (elbow, injury, follow-ups): {concerns_text}
 {challenge_suggestion}
+{f"Strength analytics:{chr(10)}{_ep_strength_text}" if _ep_strength_text else ""}
+{f"Cardio:{chr(10)}{_ep_cardio_text}" if _ep_cardio_text else ""}
 
 === COACHING TONE DIRECTIVE ===
 Every message must do ALL of the following — in flowing prose, never as bullet points or headers:

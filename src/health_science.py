@@ -52,38 +52,113 @@ STEPS_GOOD = 8000   # Steps threshold for "active day"
 # ---------------------------------------------------------------------------
 
 LIFT_FAMILIES = {
+    # Horizontal push — bench/incline are highly correlated (same motor pattern,
+    # similar muscles). Dips share the pattern but are less correlated with bench
+    # because grip width, shoulder angle, and loading differ meaningfully.
     "horizontal_push": [
         "bench", "bench press", "incline bench", "incline press", "dumbbell bench",
         "db bench", "chest press", "inclined bench", "close grip bench",
+        # Dips included in family but tagged lower tier in LIFT_CORRELATION_TIERS
+        "dips", "weighted dips", "chest dips",
     ],
     "vertical_push": [
         "overhead press", "ohp", "military press", "push press",
-        "seated press", "dumbbell press", "db shoulder press",
+        "seated press", "seated overhead press", "dumbbell press", "db shoulder press",
+        "arnold press",
     ],
     "squat_pattern": [
         "squat", "back squat", "front squat", "goblet squat", "leg press",
-        "box squat", "pause squat", "tempo squat",
+        "box squat", "pause squat", "tempo squat", "safety bar squat",
     ],
     "hip_hinge": [
         "deadlift", "conventional deadlift", "rdl", "romanian deadlift",
-        "sumo deadlift", "good morning", "stiff leg", "trap bar deadlift",
+        "sumo deadlift", "good morning", "stiff leg", "stiff leg deadlift",
+        "trap bar deadlift", "hex bar deadlift",
     ],
     "vertical_pull": [
         "pullup", "pull-up", "chin-up", "chinup", "lat pulldown",
-        "pulldown", "cable pulldown", "assisted pullup",
+        "pulldown", "cable pulldown", "assisted pullup", "weighted pullup",
     ],
     "horizontal_pull": [
         "row", "barbell row", "bent over row", "cable row", "seated row",
         "dumbbell row", "db row", "t-bar row", "chest supported row",
+        "pendlay row", "meadows row",
     ],
     "accessory_arm": [
-        "curl", "bicep curl", "hammer curl", "preacher curl",
+        "curl", "bicep curl", "hammer curl", "preacher curl", "ez curl",
+        "barbell curl", "incline curl",
         "tricep", "triceps", "extension", "pushdown", "skull crusher",
+        "jm press", "tricep kickback",
     ],
-    "core_compound": [
+    "core_posterior_chain": [
         "nordic", "nordic curl", "hip thrust", "glute bridge",
-        "lunges", "lunge", "bulgarian", "split squat",
+        "lunges", "lunge", "bulgarian", "split squat", "walking lunge",
+        "reverse hyper", "back extension",
     ],
+}
+
+# ---------------------------------------------------------------------------
+# Lift correlation tiers — encodes coach domain knowledge about expected
+# correlation strength WITHIN each family.
+# Tier 1: highly correlated (> 0.75 expected r) — same motor pattern, same muscles
+# Tier 2: moderately correlated (0.45-0.75 expected r) — related but diverge
+# Tier 3: weakly correlated (< 0.45 expected r) — family members, different feel
+#
+# These tiers are used to:
+# 1. Generate insight text that correctly characterizes the relationship
+# 2. Set lower thresholds for "surprising" vs "expected" correlations
+# ---------------------------------------------------------------------------
+
+LIFT_CORRELATION_TIERS: dict[str, dict[str, list]] = {
+    "horizontal_push": {
+        # bench and incline bench are nearly the same movement — very high correlation expected
+        "tier_1": ["bench", "bench press", "incline bench", "incline press",
+                   "dumbbell bench", "db bench", "close grip bench"],
+        # dips similar angle but different grip, more shoulder — moderate correlation
+        "tier_2": ["dips", "weighted dips", "chest dips", "chest press"],
+    },
+    "vertical_push": {
+        # strict press vs push press — very similar
+        "tier_1": ["overhead press", "ohp", "military press", "seated overhead press"],
+        # push press involves leg drive — still correlated but different stimulus
+        "tier_2": ["push press", "dumbbell press", "arnold press"],
+    },
+    "squat_pattern": {
+        # back squat variants correlate very tightly
+        "tier_1": ["squat", "back squat", "box squat", "pause squat", "tempo squat",
+                   "safety bar squat"],
+        # front squat differs in torso angle and quad demand
+        "tier_2": ["front squat", "goblet squat"],
+        # leg press is machine-based — lower transfer
+        "tier_3": ["leg press"],
+    },
+    "hip_hinge": {
+        # conventional vs sumo — same category, moderate correlation (different leverages)
+        "tier_1": ["deadlift", "conventional deadlift", "sumo deadlift", "trap bar deadlift"],
+        # RDL is more of a stretch exercise — related but not the same as max pull
+        "tier_2": ["rdl", "romanian deadlift", "stiff leg", "stiff leg deadlift"],
+        "tier_3": ["good morning"],
+    },
+    "vertical_pull": {
+        # pullup and lat pulldown — same pattern, excellent correlation
+        "tier_1": ["pullup", "pull-up", "chin-up", "chinup", "weighted pullup",
+                   "lat pulldown", "pulldown", "cable pulldown", "assisted pullup"],
+    },
+    "horizontal_pull": {
+        # rows are all very similar — barbell, cable, dumbbell
+        "tier_1": ["barbell row", "bent over row", "cable row", "seated row",
+                   "t-bar row", "chest supported row", "pendlay row", "dumbbell row",
+                   "db row", "meadows row"],
+    },
+    "accessory_arm": {
+        # bicep curl variants — high correlation
+        "tier_1": ["curl", "bicep curl", "barbell curl", "hammer curl", "ez curl",
+                   "preacher curl", "incline curl"],
+        # tricep movements — high internal correlation
+        "tier_2": ["tricep", "triceps", "extension", "pushdown", "skull crusher",
+                   "jm press", "tricep kickback"],
+        # Note: bicep ↔ tricep correlation is LOW (antagonists, not synergists)
+    },
 }
 
 
@@ -91,7 +166,7 @@ LIFT_FAMILIES = {
 # Daily readiness signal
 # ---------------------------------------------------------------------------
 
-def compute_daily_readiness(health_log: list, lift_history: list = None,
+def compute_daily_readiness(health_log: list, lift_history: list = None,  # noqa: ARG001
                              insights: dict = None) -> dict:
     """
     Compute today's HEALTH_READINESS signal from recent health data.
@@ -144,7 +219,6 @@ def compute_daily_readiness(health_log: list, lift_history: list = None,
     sleep_score = 75  # default
     if sleep_values:
         recent_sleep = sleep_values[-1] if sleep_values else SLEEP_TARGET_HRS
-        avg_sleep_7d = stats_lib.mean(sleep_values[-7:]) if len(sleep_values) >= 2 else recent_sleep
         sleep_debt_week = max(0.0, SLEEP_TARGET_HRS * min(len(sleep_values), 7) - sum(sleep_values[-7:]))
 
         if recent_sleep >= 8.0:
@@ -508,6 +582,17 @@ def _build_weekly_exercise_data(lift_history: list) -> dict:
     return weekly
 
 
+def _get_correlation_tier(family: str, exercise: str) -> Optional[str]:
+    """Return the correlation tier ('tier_1', 'tier_2', 'tier_3') for an exercise
+    within a given family, based on LIFT_CORRELATION_TIERS. Returns None if not found."""
+    tiers = LIFT_CORRELATION_TIERS.get(family, {})
+    for tier_name, members in tiers.items():
+        for member in members:
+            if member in exercise or exercise in member:
+                return tier_name
+    return None
+
+
 def _compute_lift_family_correlations(lift_history: list) -> dict:
     """
     For each lift family with 2+ exercises present, compute week-over-week
@@ -568,16 +653,33 @@ def _compute_lift_family_correlations(lift_history: list) -> dict:
         if best_pair and best_pair[3] >= R2_MIN_LIFT:
             ex_a, ex_b, r, r2, n = best_pair
             direction = "together" if r > 0 else "inversely"
+
+            # Use LIFT_CORRELATION_TIERS to characterize how expected this correlation is
+            tier_a = _get_correlation_tier(family, ex_a)
+            tier_b = _get_correlation_tier(family, ex_b)
+            same_tier = (tier_a is not None and tier_a == tier_b)
+
+            if same_tier and tier_a == "tier_1":
+                expectation = "expected — they share the same primary motor pattern"
+            elif same_tier and tier_a == "tier_2":
+                expectation = "moderate — related movement, different stimulus"
+            elif tier_a != tier_b and tier_a is not None and tier_b is not None:
+                expectation = "noteworthy — these exercises differ more than typical family members"
+            else:
+                expectation = "observed"
+
             lag_note = ""
             if r > 0.6:
                 lag_note = f" When {ex_a} stalls, {ex_b} typically follows within 1-2 weeks."
+
             results[family] = {
                 "exercises": [ex_a, ex_b],
                 "r": round(r, 3),
                 "r2": round(r2, 3),
                 "n": n,
+                "correlation_tier": tier_a,
                 "insight_text": (
-                    f"Your {ex_a} and {ex_b} move {direction} (r={r:.2f}, N={n})."
+                    f"Your {ex_a} and {ex_b} move {direction} (r={r:.2f}, N={n}) — {expectation}."
                     f"{lag_note}"
                     f" Programming one affects the other — don't treat them as independent."
                 ),
