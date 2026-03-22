@@ -38,6 +38,22 @@ import gspread
 
 from config import ANTHROPIC_API_KEY, ATHLETE_NAME, CLAUDE_MODEL, GMAIL_TO, PROGRAM_SHEET_ID
 
+try:
+    from build_strength_program import BUILDER_TOOL_MANIFEST, MODIFIER_TOOL_MANIFEST
+    _BUILDER_CONTEXT = (
+        "\n\n--- AVAILABLE PROGRAM BUILDER TOOLS ---\n"
+        f"ProgramBuilder: {BUILDER_TOOL_MANIFEST['description']}\n"
+        f"  progressions: {', '.join(BUILDER_TOOL_MANIFEST['available_progressions'])}\n"
+        f"  themes: {', '.join(BUILDER_TOOL_MANIFEST['available_themes'])}\n"
+        f"  when_to_use: {BUILDER_TOOL_MANIFEST['when_to_use']}\n\n"
+        f"ProgramModifier: {MODIFIER_TOOL_MANIFEST['description']}\n"
+        f"  operations: {', '.join(MODIFIER_TOOL_MANIFEST['operations'])}\n"
+        f"  when_to_use: {MODIFIER_TOOL_MANIFEST['when_to_use']}\n"
+        "--- END BUILDER TOOLS ---"
+    )
+except ImportError:
+    _BUILDER_CONTEXT = ""
+
 # Extended thinking needs sufficient tokens
 REASONING_MODEL = CLAUDE_MODEL          # claude-sonnet-4-6 (or override with opus)
 THINKING_BUDGET  = 16000                # tokens for internal reasoning
@@ -170,7 +186,7 @@ Notes:
 - For WEIGHT_SCALE: scale_pct is a percentage of current weight (85 = 85% = 15% reduction). Always include weeks_affected.
 - For specific weights: be precise (use athlete's current weights from context, round to nearest 2.5kg).
 - Standard 4-day split unless requested otherwise: Upper/Lower or Push/Pull/Legs/Full.
-"""
+""" + _BUILDER_CONTEXT
 
 
 # ---------------------------------------------------------------------------
