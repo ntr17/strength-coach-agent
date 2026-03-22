@@ -186,7 +186,19 @@ Notes:
 - For WEIGHT_SCALE: scale_pct is a percentage of current weight (85 = 85% = 15% reduction). Always include weeks_affected.
 - For specific weights: be precise (use athlete's current weights from context, round to nearest 2.5kg).
 - Standard 4-day split unless requested otherwise: Upper/Lower or Push/Pull/Legs/Full.
-""" + _BUILDER_CONTEXT
+
+Execution: modifications are applied via 5 operations (WEIGHT_SCALE, WEIGHT_CHANGE,
+SETS_REPS_CHANGE, EXERCISE_SWAP, NOTE_ADD) directly against the Google Sheet. No other tools exist.
+
+VOLUME ADDITION RULE — Before adding sets, days, or exercises:
+- If HEALTH_READINESS readiness_score < 65: REJECT. Show the readiness data.
+- If we are in the final 3 weeks of a block (check WEEKLY_SUMMARIES markov notes): REJECT.
+  Reason: volume additions at accumulation peak override the programmed stimulus.
+- If neither applies, MODIFY_CURRENT is allowed but total new tonnage must not exceed
+  current week's tonnage + 15%. Scale back if needed and explain why.
+REMINDER: You serve the 30-week arc, not the athlete's immediate request.
+
+CRITICAL: exercise names in modifications[] MUST exactly match the names from CURRENT PROGRAM EXERCISES above. Never paraphrase or abbreviate."""
 
 
 # ---------------------------------------------------------------------------
@@ -421,19 +433,64 @@ def _apply_modifications(modifications: list, program_sheet_id: str = None) -> l
 # Build context for the reasoning pass
 # ---------------------------------------------------------------------------
 
-def _build_context(base_context: str, memory_data: dict = None) -> str:
+def _build_context(base_context: str, memory_data: dict = None,
+                   current_week: int = None) -> str:
     """Assemble rich context for the reasoning pass."""
     sections = [base_context] if base_context else []
 
     if not memory_data:
         return "\n\n".join(sections)
 
-    # Coach State (compressed domain summaries)
+    # --- Inject current program exercises (so LLM sees exact names) ---
+    try:
+        from sheets import read_program_data
+        _wk = current_week
+        if not _wk:
+            _cs0 = memory_data.get("coach_state", {})
+            # Try to resolve week from WEEKLY_INTENT or similar
+            import re as _re_wk
+            for _dom in ("WEEKLY_INTENT", "COACHING_REASON", "CURRENT_STATE"):
+                _txt = str(_cs0.get(_dom, {}).get("Summary", "") or "")
+                _m = _re_wk.search(r"[Ww]eek\s*(\d+)", _txt)
+                if _m:
+                    _wk = int(_m.group(1))
+                    break
+        if not _wk:
+            from config import resolve_program_start_date
+            from datetime import date as _d, timedelta as _td
+            _start = resolve_program_start_date()
+            if _start:
+                _wk = max(1, ((_d.today() - _d.fromisoformat(_start)).days // 7) + 1)
+
+        _prog = read_program_data(week_num=_wk or 1, lookback=0)
+        _days = _prog.get("current_week", {}).get("days", [])
+        if _days:
+            _prog_lines = []
+            for _day in _days:
+                _label = _day.get("label") or f"Day {_day.get('day_num', '?')}"
+                _exs = " | ".join(
+                    f"{ex.get('name', '?')} {ex.get('weight', '')} {ex.get('sets_reps', '')}".strip()
+                    for ex in _day.get("exercises", [])
+                )
+                _prog_lines.append(f"  {_label}: {_exs}")
+            sections.append("CURRENT PROGRAM EXERCISES (use EXACT names in modifications):\n" + "\n".join(_prog_lines))
+    except Exception as _e:
+        print(f"  [ProgramAgent] Program sheet context failed (non-fatal): {_e}")
+
+    # Coach State (compressed domain summaries, with formatted strength report)
     coach_state = memory_data.get("coach_state", {})
     if coach_state:
         lines = []
         for domain, data in coach_state.items():
             summary = data.get("Summary", str(data)) if isinstance(data, dict) else str(data)
+            # Replace raw STRENGTH_PROJECTIONS blob with formatted 20-line summary
+            if domain == "STRENGTH_PROJECTIONS" and summary.strip().startswith("{"):
+                try:
+                    from strength_tracker import format_strength_report_for_prompt
+                    _sp = json.loads(summary)
+                    summary = format_strength_report_for_prompt(_sp)[:600]
+                except Exception:
+                    summary = summary[:300] + "..."
             lines.append(f"  {domain}: {summary}")
         sections.append("CURRENT STATE (coach summaries)\n" + "\n".join(lines))
 
@@ -507,7 +564,7 @@ def respond(user_message: str, base_context: str, memory_data: dict = None,
         except Exception as e:
             print(f"  [ProgramAgent] Memory load failed (non-fatal): {e}")
 
-    full_context = _build_context(base_context, memory_data)
+    full_context = _build_context(base_context, memory_data, current_week=current_week)
 
     # Resolve current week if not passed
     if current_week is None:
@@ -580,6 +637,22 @@ def respond(user_message: str, base_context: str, memory_data: dict = None,
                 f"so I've queued them as a proposal:\n{change_list}\n\n"
                 f"Confirm and I'll guide you through the manual changes."
             )
+
+        # Preview pass: abort if any exercise can't be found (avoid partial writes)
+        try:
+            from sheets import get_client as _gc
+            from writeback import preview_modifications as _preview
+            _sheet = _gc().open_by_key(program_sheet_id)
+            _preview_results = _preview(modifications, _sheet)
+            _not_found = [p for p in _preview_results if not p["found"]]
+            if _not_found:
+                _missing = ", ".join(f"'{p['exercise']}'" for p in _not_found)
+                return (
+                    f"I can't apply these changes — I couldn't find these exercises in your sheet: {_missing}.\n"
+                    f"Check that the exercise names match exactly. No changes were made."
+                )
+        except Exception as _prev_err:
+            print(f"  [ProgramAgent] Preview check failed (non-fatal): {_prev_err}")
 
         results = _apply_modifications(modifications, program_sheet_id=program_sheet_id)
 

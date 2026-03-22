@@ -55,8 +55,9 @@ def generate_1rm_chart(lift_history: list[dict],
                 except (ValueError, TypeError):
                     pass
 
-    series = {k: v for k, v in lift_data.items() if len(v) >= 2}
+    series = {k: v for k, v in lift_data.items() if len(v) >= 3}
     if not series:
+        print(f"  [charts] generate_1rm_chart: skipped — need 3+ data points per lift (have: { {k: len(v) for k, v in lift_data.items()} })")
         return None
 
     plt = _get_plt()
@@ -64,16 +65,43 @@ def generate_1rm_chart(lift_history: list[dict],
 
     colors = ["#2563eb", "#dc2626", "#16a34a", "#d97706"]
     for (lift, points), color in zip(series.items(), colors):
-        dates = [p[0] for p in points]
-        values = [p[1] for p in points]
-        ax.plot(dates, values, marker="o", markersize=4, label=lift,
+        # Sort by date string (ISO dates sort lexicographically)
+        points_sorted = sorted(points, key=lambda p: p[0])
+
+        # Build a week-indexed dict so we can insert None for gaps
+        from datetime import datetime as _dt, timedelta as _td
+        try:
+            dates_parsed = [_dt.strptime(p[0][:10], "%Y-%m-%d").date() for p in points_sorted]
+            min_d, max_d = dates_parsed[0], dates_parsed[-1]
+            # Week-bucket: group by ISO week so gaps show as breaks
+            week_map: dict = {}
+            for d, p in zip(dates_parsed, points_sorted):
+                wk = d.isocalendar()[:2]  # (year, week)
+                week_map[wk] = max(week_map.get(wk, 0), p[1])
+
+            all_weeks = []
+            cur = min_d
+            while cur <= max_d:
+                all_weeks.append(cur.isocalendar()[:2])
+                cur += _td(weeks=1)
+            all_weeks = sorted(set(all_weeks))
+
+            plot_dates = [f"{yr}-W{wk:02d}" for yr, wk in all_weeks]
+            plot_values = [week_map.get(w) for w in all_weeks]  # None = gap
+        except Exception:
+            # Fallback: raw date strings, no gap handling
+            plot_dates = [p[0] for p in points_sorted]
+            plot_values = [p[1] for p in points_sorted]
+
+        ax.plot(plot_dates, plot_values, marker="o", markersize=4, label=lift,
                 color=color, linewidth=1.8)
 
-        # Only show a few x-axis labels to avoid clutter
-    step = max(1, len(next(iter(series.values()))) // 6)
-    sample_dates = next(iter(series.values()))[::step]
-    ax.set_xticks([p[0] for p in sample_dates])
-    ax.set_xticklabels([p[0][:10] for p in sample_dates], rotation=30, ha="right", fontsize=8)
+    # Only show a few x-axis labels to avoid clutter
+    all_plot_dates = plot_dates  # use last lift's date axis (same range)
+    step = max(1, len(all_plot_dates) // 6)
+    sample_dates = all_plot_dates[::step]
+    ax.set_xticks(sample_dates)
+    ax.set_xticklabels(sample_dates, rotation=30, ha="right", fontsize=8)
 
     ax.set_ylabel("Est. 1RM (kg)", fontsize=9)
     ax.set_title("Estimated 1RM Trajectory", fontsize=11, fontweight="bold")

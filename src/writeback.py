@@ -168,15 +168,46 @@ def _build_col_map_from_header(header_row: list) -> dict:
     return col_map
 
 
+def _match_exercise(target: str, candidate: str) -> float:
+    """
+    Fuzzy match between a target exercise name and a candidate from the sheet.
+    Returns a score in [0.0, 1.0]. Use threshold 0.65 to accept a match.
+    Tries: exact → bidirectional substring → word overlap → SequenceMatcher.
+    """
+    from difflib import SequenceMatcher
+    t = target.lower().strip()
+    c = candidate.lower().strip()
+    if not t or not c:
+        return 0.0
+    if t == c:
+        return 1.0
+    if t in c or c in t:
+        return 0.9
+    t_words = set(t.split())
+    c_words = set(c.split())
+    denom = max(len(t_words), len(c_words), 1)
+    overlap = len(t_words & c_words) / denom
+    if overlap >= 0.6:
+        return overlap
+    return SequenceMatcher(None, t, c).ratio()
+
+
+_MATCH_THRESHOLD = 0.65
+
+
 def _find_exercise_row(all_values: list, exercise_name: str, day_num: int = None) -> tuple:
     """
     Find the row index (1-based) and col_map for an exercise in a week tab.
     If day_num is specified, only match within that day's section.
     Returns (row_1based, col_map) or (None, None).
+
+    Matching uses multi-strategy fuzzy scoring via _match_exercise() with threshold 0.65.
     """
-    exercise_lower = exercise_name.lower().strip()
     current_day = None
     col_map = None
+    best_score = 0.0
+    best_row = None
+    best_col_map = None
 
     for i, row in enumerate(all_values):
         if not row:
@@ -208,11 +239,56 @@ def _find_exercise_row(all_values: list, exercise_name: str, day_num: int = None
         if col_map is None:
             continue
 
-        # Check if this row is the exercise we want
-        if col0_lower and exercise_lower in col0_lower:
-            return i + 1, col_map  # gspread 1-indexed row
+        # Score this row against the target exercise name
+        if col0_lower:
+            score = _match_exercise(exercise_name, col0)
+            if score > best_score:
+                best_score = score
+                best_row = i + 1  # gspread 1-indexed row
+                best_col_map = col_map
+
+    if best_score >= _MATCH_THRESHOLD:
+        return best_row, best_col_map
 
     return None, None
+
+
+def preview_modifications(modifications: list, sheet) -> list:
+    """
+    Dry-run check: for each modification op, determine whether the target exercise
+    can be found in the sheet without writing anything.
+
+    Returns a list of dicts:
+      {"op": str, "exercise": str|None, "found": bool, "matched_as": str|None}
+    """
+    results = []
+    for op in modifications:
+        op_type = op.get("operation", "UNKNOWN")
+        exercise = op.get("exercise")
+        week = op.get("week")
+        day = op.get("day")
+
+        if op_type == "WEIGHT_SCALE" or not exercise or not week:
+            # WEIGHT_SCALE affects all exercises — always "found" if week tab exists
+            results.append({"op": op_type, "exercise": exercise, "found": True, "matched_as": "(bulk)"})
+            continue
+
+        ws = _get_week_tab(sheet, week)
+        if not ws:
+            results.append({"op": op_type, "exercise": exercise, "found": False, "matched_as": None})
+            continue
+
+        all_values = ws.get_all_values()
+        row_idx, col_map = _find_exercise_row(all_values, exercise, day)
+
+        if row_idx:
+            # Find what it actually matched to
+            matched_name = all_values[row_idx - 1][0] if all_values[row_idx - 1] else exercise
+            results.append({"op": op_type, "exercise": exercise, "found": True, "matched_as": matched_name})
+        else:
+            results.append({"op": op_type, "exercise": exercise, "found": False, "matched_as": None})
+
+    return results
 
 
 # ---------------------------------------------------------------------------

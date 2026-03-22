@@ -168,10 +168,26 @@ def project_1rm(
     current_1rm = max(v for _, v in recent)
     latest_date = recent[-1][0]  # most recent date for projection anchor
 
+    # Cap slope at 1.5% of current e1RM per week (physiological limit for trained athletes)
+    MAX_WEEKLY_GAIN_PCT = 0.015
+    if slope > 0:
+        slope = min(slope, current_1rm * MAX_WEEKLY_GAIN_PCT)
+
+    # Physiological ceiling per lift
+    MAX_E1RM_KG = {
+        "squat": 200, "back squat": 200, "deadlift": 240,
+        "bench press": 150, "incline bench": 130,
+        "overhead press": 110, "ohp": 110, "barbell row": 130,
+    }
+    _ex_lower = exercise_name.lower()
+    _ceiling = next((v for k, v in MAX_E1RM_KG.items() if k in _ex_lower), None)
+
     projected_end = None
     if weeks_remaining is not None:
-        current_x = _weeks_since(reference_date, latest_date)
-        projected_end = round(slope * (current_x + weeks_remaining) + intercept, 1)
+        _current_x = _weeks_since(reference_date, latest_date)
+        projected_end = round(slope * (_current_x + weeks_remaining) + intercept, 1)
+        if _ceiling is not None:
+            projected_end = min(projected_end, _ceiling)
 
     on_track = None
     weeks_to_target = None
@@ -665,7 +681,11 @@ def format_projections_for_prompt(
             line += f" | target {proj['target_1rm']}kg"
 
         if reliable and proj.get("projected_end_1rm") is not None:
-            line += f" | projected at end: {proj['projected_end_1rm']}kg"
+            weeks_remaining_val = (program_projection or {}).get("weeks_remaining")
+            if weeks_remaining_val is not None and weeks_remaining_val > 4:
+                line += f" | projected at end: {proj['projected_end_1rm']}kg (low confidence — {weeks_remaining_val} weeks out)"
+            else:
+                line += f" | projected at end: {proj['projected_end_1rm']}kg"
 
         if reliable:
             if proj.get("on_track") is True:
@@ -743,9 +763,29 @@ def run_all_projections(
         if program_proj:
             weeks_remaining = program_proj["weeks_remaining"]
 
-    # Try to extract targets from long-term goals text
-    goals_text = memory_data.get("long_term_goals", "")
-    goal_map = _parse_lift_targets(goals_text)
+    # Read goals from ANNUAL_ARC structured domain (avoids false regex matches on free text)
+    goal_map: dict = {}
+    try:
+        import json as _json
+        _arc_raw = memory_data.get("coach_state", {}).get("ANNUAL_ARC", {})
+        _arc_summary = _arc_raw.get("Summary", _arc_raw.get("summary", "")) if isinstance(_arc_raw, dict) else str(_arc_raw)
+        if _arc_summary:
+            _arc = _json.loads(_arc_summary) if _arc_summary.strip().startswith("{") else {}
+            _medium = _arc.get("medium_goals", {})
+            _raw_goals = {
+                "squat": _medium.get("squat_goal_kg"),
+                "bench press": _medium.get("bench_goal_kg"),
+                "deadlift": _medium.get("deadlift_goal_kg"),
+                "overhead press": _medium.get("ohp_goal_kg"),
+            }
+            goal_map = {k: float(v) for k, v in _raw_goals.items() if v}
+    except Exception:
+        pass
+
+    # Fallback: parse from free-text goals if ANNUAL_ARC not populated
+    if not goal_map:
+        goals_text = memory_data.get("long_term_goals", "")
+        goal_map = _parse_lift_targets(goals_text)
 
     # Get tracked lifts from memory_data (dynamic registry) — MAIN lifts only for projections
     if tracked_lifts:

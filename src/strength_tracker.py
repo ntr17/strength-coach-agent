@@ -829,6 +829,11 @@ def predict_next_increase(weekly_e1rm: dict) -> dict:
         if slope <= 0:
             continue
 
+        # Cap slope at 1.5% of current e1RM per week (physiological limit for trained athletes)
+        MAX_WEEKLY_GAIN_PCT = 0.015
+        current_e1rm_val = values[-1] if values else 100.0
+        slope = min(slope, current_e1rm_val * MAX_WEEKLY_GAIN_PCT)
+
         # A meaningful increase = 2.5kg (smallest weight plate increment)
         weeks_to_increase = round(2.5 / slope, 1)
 
