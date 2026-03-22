@@ -1687,6 +1687,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                         _ucs_wp("WEEKLY_INTENT", _intent_wp, "HIGH")
                 _ucs_wp("CURRENT_FLOW", "", "LOW")
                 _ucs_wp("WEEKLY_PLAN_THREAD", "", "LOW")
+                # Clear PENDING_FLAGS that were surfaced (consumed by this planning session)
+                _ucs_wp("PENDING_FLAGS", "[]", "LOW")
                 await update.message.reply_text(_visible_wp or "Plan locked in. See you on the first session.")
                 _log_message("OUT", f"weekly_planning confirmed (week {_week_n_wp})")
             else:
@@ -1724,15 +1726,45 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             _dp_data = _json_dp.loads(_dp_raw) if _dp_raw and _dp_raw.strip().startswith("{") else {}
             _dp_date = _dp_data.get("date", "tomorrow")
             _dp_session = _dp_data.get("session", "session")
-            _dp_weekly_intent = _dp_data.get("weekly_intent", "")
+            _dp_weekly_intent = _dp_data.get("weekly_intent", "") or \
+                                coach_state.get("WEEKLY_INTENT", {}).get("summary", "") or \
+                                coach_state.get("WEEKLY_INTENT", {}).get("Summary", "")
             _dp_thread = _dp_data.get("thread", [])
 
+            # Surface next_session flags from PENDING_FLAGS (deferred from previous session)
+            _dp_pending_note = ""
+            try:
+                _pf_raw_dp = coach_state.get("PENDING_FLAGS", {}).get("summary", "") or \
+                             coach_state.get("PENDING_FLAGS", {}).get("Summary", "")
+                if _pf_raw_dp and _pf_raw_dp.strip().startswith("["):
+                    _pf_list_dp = _json_dp.loads(_pf_raw_dp)
+                    _next_sess_flags = [f for f in _pf_list_dp if f.get("type") == "next_session"]
+                    if _next_sess_flags:
+                        _dp_pending_note = "\nDEFERRED FROM LAST SESSION:\n" + "\n".join(
+                            f"  - {f.get('content', '')}" for f in _next_sess_flags[-3:]
+                        )
+            except Exception:
+                pass
+
             _dp_thread.append({"role": "user", "content": user_text})
+
+            # Deload coherence check — enforce load ceiling before generating
+            _dp_deload_constraint = ""
+            _dp_intent_lower = _dp_weekly_intent.lower() if _dp_weekly_intent else ""
+            if any(kw in _dp_intent_lower for kw in ("deload", "recovery week", "easy week", "reduced load")):
+                _dp_deload_constraint = (
+                    "\n\nDELOAD WEEK ACTIVE — HARD CONSTRAINT:\n"
+                    "Load must be ≤70% of normal working weights. Accessories cut by half. "
+                    "Do NOT propose working sets above 70% regardless of how the athlete feels or what they request. "
+                    "If athlete asks for more, explain why the deload serves next week's loading block."
+                )
 
             _dp_sys = (
                 f"You are a strength coach in a daily planning conversation with {ATHLETE_NAME}.\n\n"
                 f"TOMORROW ({_dp_date}): {_dp_session}\n"
-                f"WEEKLY INTENT: {_dp_weekly_intent or '(not set)'}\n\n"
+                f"WEEKLY INTENT: {_dp_weekly_intent or '(not set)'}"
+                f"{_dp_pending_note}"
+                f"{_dp_deload_constraint}\n\n"
                 "Handle whatever the athlete raises: fatigue, time constraints, wanting more/less volume, "
                 "swapping exercises, life happened. Reason concretely. Propose specific adjustments.\n\n"
                 "When athlete confirms (says ok/confirmed/looks good/let's do it/perfect), output:\n"

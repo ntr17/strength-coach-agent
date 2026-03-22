@@ -292,6 +292,43 @@ Rules:
         set_level_state("DAILY", "IDLE")
         return summary
 
+    # --- 3b. Harvest flags from DAILY_FOCUS into PENDING_FLAGS ---
+    # DAILY_FOCUS is written by daily_planning conversations. Any flags stored there
+    # (flag_for_weekly_review, program_change_request, flag_for_next_session) would
+    # otherwise die silently. close_day() reads them and appends to PENDING_FLAGS so
+    # weekly_eval() and the Sunday weekly planning pipeline can surface them.
+    try:
+        import json as _json_flags
+        _df_raw = coach_state.get("DAILY_FOCUS", {}).get("summary", "") or \
+                  coach_state.get("DAILY_FOCUS", {}).get("Summary", "")
+        if _df_raw and _df_raw.strip().startswith("{"):
+            _df = _json_flags.loads(_df_raw)
+            _flags_to_add = []
+            if _df.get("flag_for_weekly_review"):
+                _flags_to_add.append({
+                    "date": today_str, "type": "weekly_review",
+                    "content": _df["flag_for_weekly_review"],
+                })
+            if _df.get("flag_for_next_session"):
+                _flags_to_add.append({
+                    "date": today_str, "type": "next_session",
+                    "content": _df["flag_for_next_session"],
+                })
+            if _df.get("program_change_request"):
+                _flags_to_add.append({
+                    "date": today_str, "type": "program_change",
+                    "content": _df["program_change_request"],
+                })
+            if _flags_to_add:
+                _pf_raw = coach_state.get("PENDING_FLAGS", {}).get("summary", "") or \
+                          coach_state.get("PENDING_FLAGS", {}).get("Summary", "")
+                _existing = _json_flags.loads(_pf_raw) if _pf_raw and _pf_raw.strip().startswith("[") else []
+                _existing.extend(_flags_to_add)
+                upsert_coach_state("PENDING_FLAGS", _json_flags.dumps(_existing[-20:]), "MEDIUM")
+                print(f"  close_day(): {len(_flags_to_add)} flag(s) harvested from DAILY_FOCUS → PENDING_FLAGS.")
+    except Exception as _flag_err:
+        print(f"  close_day(): Flag harvest failed (non-fatal): {_flag_err}")
+
     # --- 4. Send end-of-day Telegram message ---
     if not dry_run:
         try:

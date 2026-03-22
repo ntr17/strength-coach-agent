@@ -3347,20 +3347,43 @@ def run(week_num: int = None, dry_run: bool = False, no_sync: bool = False,
                 _next_wk_str = "\n".join(_sess_lines) if _sess_lines else "  (no sessions found in sheet)"
 
                 # Build Sonnet prompt for planning opening
+                # Read PENDING_FLAGS — deferred items from daily planning that need to surface
+                _pending_flags_sun = []
+                try:
+                    import json as _json_pf
+                    _pf_raw = _cs_sun.get("PENDING_FLAGS", {}).get("summary", "") or \
+                              _cs_sun.get("PENDING_FLAGS", {}).get("Summary", "")
+                    if _pf_raw and _pf_raw.strip().startswith("["):
+                        _pending_flags_sun = _json_pf.loads(_pf_raw)
+                except Exception:
+                    pass
+                _pending_block = ""
+                if _pending_flags_sun:
+                    _pf_lines = []
+                    for _pf in _pending_flags_sun[-5:]:
+                        _pf_type = _pf.get("type", "?")
+                        _pf_content = _pf.get("content", "")
+                        if isinstance(_pf_content, dict):
+                            _pf_content = _json_pf.dumps(_pf_content, ensure_ascii=False)
+                        _pf_lines.append(f"  [{_pf.get('date','?')} / {_pf_type}] {_pf_content}"[:120])
+                    _pending_block = f"\nPENDING FLAGS (from daily planning — must address this week):\n" + "\n".join(_pf_lines) + "\n"
+
                 _open_prompt = (
                     f"You are a strength coach opening the weekly planning conversation with {ATHLETE_NAME}.\n\n"
                     f"LAST WEEK (Week {week_num}):\n"
                     f"  Days trained: {_days_trained}, exercises completed: {_done_exs}/{_total_exs}\n"
                     f"  Session quality: {_session_q_sun or 'no data'}\n"
                     f"  Health readiness: {_health_sun or 'no data'}\n"
-                    f"  Weekly intent was: {_weekly_intent or 'not set'}\n\n"
+                    f"  Weekly intent was: {_weekly_intent or 'not set'}\n"
+                    f"{_pending_block}\n"
                     f"NEXT WEEK PROGRAM (Week {week_num + 1}):\n{_next_wk_str}\n\n"
                     f"Write the opening message for this week's planning conversation.\n"
                     f"In 100-130 words:\n"
                     f"  1. One honest sentence on last week (no fluff).\n"
                     f"  2. Your recommendation for next week — which sessions, any adjustments, reasoning.\n"
                     f"     Include deload if warranted; challenge if athlete is thriving.\n"
-                    f"  3. Ask: what does the week look like schedule-wise? Any constraints?\n"
+                    f"  3. If there are PENDING FLAGS above, surface the most important one explicitly.\n"
+                    f"  4. Ask: what does the week look like schedule-wise? Any constraints?\n"
                     f"Do NOT use emojis. Do NOT add motivational filler."
                 )
                 _open_resp = _ant_sun.Anthropic(api_key=ANTHROPIC_API_KEY).messages.create(
