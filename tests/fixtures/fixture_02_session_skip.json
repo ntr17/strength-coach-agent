@@ -1,0 +1,49 @@
+{
+  "scenario_name": "fixture_02_session_skip",
+  "description": "Week 7, Monday 19:00. Athlete sends session skip message. NO confirmation follows. WEEKLY_INTENT must NOT be modified before user confirms the reschedule.",
+  "initial_state": {
+    "coach_state": {
+      "CASCADE_STATE": {
+        "DAILY": {"state": "IDLE", "locked_by": null, "context": {}},
+        "WEEKLY": {"state": "IDLE", "locked_by": null, "context": {}},
+        "MONTHLY": {"state": "IDLE", "locked_by": null, "context": {}},
+        "ANNUAL": {"state": "IDLE", "locked_by": null, "context": {}},
+        "LONGTERM": {"state": "IDLE", "locked_by": null, "context": {}}
+      },
+      "CURRENT_FLOW": "",
+      "WEEKLY_INTENT": "{\"week\": 7, \"sessions\": [\"Monday Day 1\", \"Wednesday Day 2\", \"Friday Day 3\", \"Saturday Day 4\"], \"focus\": \"Accumulation\"}",
+      "MONTHLY_INTENT": "{\"month\": \"2026-03\", \"focus\": \"Build squat to 105kg e1RM\"}",
+      "ANNUAL_ARC": "{\"year\": 2026, \"primary_goal\": \"120kg squat, 105kg bench by week 30\"}",
+      "DAILY_FOCUS": null,
+      "DAILY_SUMMARIES": [],
+      "PENDING_FLAGS": []
+    },
+    "lift_history": [],
+    "health_log": [],
+    "telegram_log": []
+  },
+  "events": [
+    {"type": "telegram_message", "text": "no puedo entrenar hoy, reunión hasta las 11", "time": "19:00"},
+    {"type": "close_day"}
+  ],
+  "mock_llm_responses": {
+    "close_day_0": "{\"date\": \"2026-03-23\", \"week\": 7, \"session\": {\"completed\": false, \"label\": \"Day 1\", \"rpe_avg\": null, \"effort_quality\": \"unknown\", \"notable\": \"Session skipped — late meeting\"}, \"health\": {\"sleep_hrs\": null, \"bw_kg\": null, \"steps\": null, \"readiness_score\": null}, \"events\": [{\"type\": \"note\", \"category\": \"SCHEDULE\", \"text\": \"Monday session skipped due to work meeting\"}], \"escalation_check\": \"none\", \"markov_note\": \"Pending reschedule for week 7\"}"
+  },
+  "assertions": [
+    {
+      "type": "assert_no_change",
+      "domains": ["WEEKLY_INTENT"],
+      "msg": "WEEKLY_INTENT must NOT be updated with rescheduled session before user confirms"
+    },
+    {
+      "type": "assert_state",
+      "domain": "CASCADE_STATE",
+      "check": "non_null",
+      "msg": "CASCADE_STATE must be set"
+    }
+  ],
+  "expected_flaws": [
+    "CASCADE_STATE.WEEKLY should be AWAITING_USER after skip message — system must not proceed without user confirmation of reschedule",
+    "If WEEKLY_INTENT was modified: system acted on reschedule before confirmation — pre-confirm guard missing"
+  ]
+}

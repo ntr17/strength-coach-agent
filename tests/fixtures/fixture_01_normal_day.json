@@ -1,0 +1,56 @@
+{
+  "scenario_name": "fixture_01_normal_day",
+  "description": "Week 7, Monday, Day 1 (Squat + Bench). No flags. Session completed, RPE logged, close_day clean. Expected: zero escalation, CASCADE_STATE.DAILY = IDLE after close.",
+  "initial_state": {
+    "coach_state": {
+      "CASCADE_STATE": {
+        "DAILY": {"state": "IDLE", "locked_by": null, "context": {}},
+        "WEEKLY": {"state": "IDLE", "locked_by": null, "context": {}},
+        "MONTHLY": {"state": "IDLE", "locked_by": null, "context": {}},
+        "ANNUAL": {"state": "IDLE", "locked_by": null, "context": {}},
+        "LONGTERM": {"state": "IDLE", "locked_by": null, "context": {}}
+      },
+      "CURRENT_FLOW": "",
+      "WEEKLY_INTENT": "{\"week\": 7, \"focus\": \"Accumulation block. Day 1: Squat + Bench. Day 3: Deadlift + OHP.\", \"deload\": false}",
+      "MONTHLY_INTENT": "{\"month\": \"2026-03\", \"focus\": \"Build squat to 105kg e1RM\"}",
+      "ANNUAL_ARC": "{\"year\": 2026, \"primary_goal\": \"120kg squat, 105kg bench by week 30\"}",
+      "DAILY_FOCUS": "{\"date\": \"2026-03-23\", \"session\": \"Day 1\", \"effort_level\": \"normal\", \"target_RPE\": 7.5, \"flag_for_weekly_review\": false}",
+      "DAILY_SUMMARIES": [],
+      "PENDING_FLAGS": []
+    },
+    "lift_history": [
+      {"Date": "2026-03-16", "Week": 6, "Day": "Day 1", "Exercise": "Squat", "Prescribed Weight": 100, "Actual": 100, "Completed": true, "Notes": "", "Est 1RM": 118},
+      {"Date": "2026-03-16", "Week": 6, "Day": "Day 1", "Exercise": "Bench Press", "Prescribed Weight": 85, "Actual": 85, "Completed": true, "Notes": "", "Est 1RM": 102}
+    ],
+    "health_log": [
+      {"Date": "2026-03-23", "Sleep_hrs": 7.5, "BW_kg": 85.2, "Steps": 8500, "HRV": null, "Readiness": 80}
+    ],
+    "telegram_log": []
+  },
+  "events": [
+    {"type": "morning_brief"},
+    {"type": "close_session", "lifts": [
+      {"Date": "2026-03-23", "Week": 7, "Day": "Day 1", "Exercise": "Squat", "Prescribed Weight": 102.5, "Actual": 102.5, "Completed": true, "Notes": "Good session", "Est 1RM": 121},
+      {"Date": "2026-03-23", "Week": 7, "Day": "Day 1", "Exercise": "Bench Press", "Prescribed Weight": 87.5, "Actual": 87.5, "Completed": true, "Notes": "", "Est 1RM": 104}
+    ], "flags": {}},
+    {"type": "close_day"}
+  ],
+  "mock_llm_responses": {
+    "morning_brief_0": "Today is Day 1 — Squat + Bench. Target RPE 7.5. Drive out of the hole on squats.",
+    "close_day_0": "{\"date\": \"2026-03-23\", \"week\": 7, \"session\": {\"completed\": true, \"label\": \"Day 1\", \"rpe_avg\": 7.5, \"effort_quality\": \"strong\", \"notable\": \"Squat 102.5kg, +2.5kg from last week\"}, \"health\": {\"sleep_hrs\": 7.5, \"bw_kg\": 85.2, \"steps\": 8500, \"readiness_score\": 80}, \"events\": [], \"escalation_check\": \"none\", \"markov_note\": \"Clean session, progression on track\"}"
+  },
+  "assertions": [
+    {
+      "type": "assert_no_change",
+      "domains": ["WEEKLY_INTENT", "MONTHLY_INTENT", "ANNUAL_ARC"],
+      "msg": "No cascade-level state should change on a normal day"
+    },
+    {
+      "type": "assert_state",
+      "domain": "DAILY_SUMMARIES",
+      "check": "non_empty",
+      "msg": "close_day() must write a DAILY_SUMMARY entry"
+    }
+  ],
+  "expected_flaws": []
+}

@@ -1,0 +1,75 @@
+{
+  "scenario_name": "fixture_03_elbow_pain",
+  "description": "Week 7. close_session flags elbow_pain=6. Week 5 already had elbow flag in DAILY_SUMMARIES. Tests full escalation chain: close_day detects injury → weekly_eval propagates → monthly_eval catches cross-week pattern.",
+  "initial_state": {
+    "coach_state": {
+      "CASCADE_STATE": {
+        "DAILY": {"state": "IDLE", "locked_by": null, "context": {}},
+        "WEEKLY": {"state": "IDLE", "locked_by": null, "context": {}},
+        "MONTHLY": {"state": "IDLE", "locked_by": null, "context": {}},
+        "ANNUAL": {"state": "IDLE", "locked_by": null, "context": {}},
+        "LONGTERM": {"state": "IDLE", "locked_by": null, "context": {}}
+      },
+      "CURRENT_FLOW": "",
+      "WEEKLY_INTENT": "{\"week\": 7, \"focus\": \"Accumulation. Pull volume normal.\"}",
+      "MONTHLY_INTENT": "{\"month\": \"2026-03\", \"focus\": \"Strength progression\"}",
+      "ANNUAL_ARC": "{\"year\": 2026, \"primary_goal\": \"120kg squat by week 30\"}",
+      "DAILY_FOCUS": "{\"date\": \"2026-03-23\", \"session\": \"Day 2\", \"effort_level\": \"normal\"}",
+      "DAILY_SUMMARIES": [
+        {"date": "2026-03-09", "week": 5, "session": {"completed": true, "label": "Day 2", "effort_quality": "moderate", "notable": "Elbow niggle during chin-ups"}, "escalation_check": "injury", "events": [{"type": "concern", "category": "INJURY", "text": "Elbow pain 4/10 during pull work"}]},
+        {"date": "2026-03-10", "week": 5, "session": {"completed": true, "label": "Day 3", "effort_quality": "strong", "notable": "Good deadlift session"}, "escalation_check": "none", "events": []},
+        {"date": "2026-03-16", "week": 6, "session": {"completed": true, "label": "Day 1", "effort_quality": "strong", "notable": "Squat solid"}, "escalation_check": "none", "events": []},
+        {"date": "2026-03-17", "week": 6, "session": {"completed": true, "label": "Day 2", "effort_quality": "moderate", "notable": "Elbow still tender post chin-ups"}, "escalation_check": "none", "events": [{"type": "note", "category": "INJURY", "text": "Elbow tender but below threshold"}]}
+      ],
+      "WEEKLY_SUMMARIES": [
+        {"week": 5, "closed": "2026-03-09", "training": {"sessions_done": 3}, "escalations": ["elbow_pain_flag"], "patterns": {"recurring_concern": "Elbow pain during pull work"}, "markov_note_for_next_week": "Watch elbow volume", "to_monthly": "Elbow flag week 5"}
+      ],
+      "MONTHLY_SUMMARIES": []
+    },
+    "lift_history": [
+      {"Date": "2026-03-23", "Week": 7, "Day": "Day 2", "Exercise": "Chin-up", "Completed": true, "Notes": "Elbow pain 6/10 during sets", "Est 1RM": null}
+    ],
+    "health_log": [
+      {"Date": "2026-03-23", "Sleep_hrs": 7.0, "BW_kg": 85.0}
+    ],
+    "telegram_log": []
+  },
+  "events": [
+    {"type": "close_session", "lifts": [
+      {"Date": "2026-03-23", "Week": 7, "Day": "Day 2", "Exercise": "Chin-up", "Completed": true, "Notes": "Elbow pain 6/10"}
+    ], "flags": {"elbow_pain": 6}},
+    {"type": "close_day"},
+    {"type": "weekly_eval"},
+    {"type": "monthly_eval"}
+  ],
+  "mock_llm_responses": {
+    "close_day_0": "{\"date\": \"2026-03-23\", \"week\": 7, \"session\": {\"completed\": true, \"label\": \"Day 2\", \"rpe_avg\": 8.0, \"effort_quality\": \"moderate\", \"notable\": \"Elbow pain 6/10 during chin-ups — flagged\"}, \"health\": {\"sleep_hrs\": 7.0, \"bw_kg\": 85.0, \"steps\": null, \"readiness_score\": 65}, \"events\": [{\"type\": \"concern\", \"category\": \"INJURY\", \"text\": \"Elbow pain 6/10 — above threshold, injury escalation required\"}], \"escalation_check\": \"injury\", \"markov_note\": \"Elbow pain recurrence — second flag this month\"}",
+    "weekly_eval_0": "{\"week\": 7, \"closed\": \"2026-03-23\", \"training\": {\"sessions_done\": 1, \"avg_effort_quality\": \"moderate\", \"volume_achieved\": \"partial\", \"primary_lift_progress\": {}, \"notable\": \"Week closed early due to elbow injury flag\"}, \"health\": {\"avg_sleep\": 7.0, \"avg_readiness\": 65, \"bw_trend\": \"stable\"}, \"escalations\": [\"elbow_pain_flag\"], \"patterns\": {\"recurring_concern\": \"Elbow pain 6/10 — second occurrence this month (weeks 5 and 7)\", \"behavioral_notes\": \"\"}, \"markov_note_for_next_week\": \"Elbow pain pattern: reduce pull volume, replace chin-ups with face pulls\", \"to_monthly\": \"Elbow pain flagged twice in month (week 5 + week 7) — pattern requires monthly attention\"}",
+    "monthly_eval_0": "{\"month\": \"2026-03\", \"closed\": \"2026-03-23\", \"training\": {\"weeks_completed\": 2, \"overall_quality\": \"moderate\", \"volume_trend\": \"stable\", \"strength_progress\": {\"Squat\": \"on track\", \"Bench\": \"on track\"}, \"notable\": \"Elbow issue emerging\"}, \"health\": {\"sleep_trend\": \"stable\", \"bw_trend\": \"stable\", \"readiness_trend\": \"stable\"}, \"escalations_handled\": [\"elbow_pain_flag_w5\", \"elbow_pain_flag_w7\"], \"patterns\": {\"key_insight\": \"Squat progression on target\", \"risk_flags\": \"Elbow pain flagged twice this month (weeks 5 and 7) — pattern emerging, recommend reducing pull volume by 20%\"}, \"markov_note_for_next_month\": \"Monitor elbow through April\", \"to_annual\": \"Elbow flags in weeks 5 and 7 of March — golfer's elbow pattern developing. Recommend annual arc review of pull volume.\", \"escalation_recommendation\": \"Reduce chin-up and pull-up volume by 20% for weeks 8-10. Replace with face pulls and band pull-aparts.\", \"escalation_adjustments\": [\"reduce_pull_volume_20pct\"]}"
+  },
+  "assertions": [
+    {
+      "type": "assert_state",
+      "domain": "DAILY_SUMMARIES",
+      "check": "non_empty",
+      "msg": "close_day() must produce a DAILY_SUMMARY"
+    },
+    {
+      "type": "assert_state",
+      "domain": "WEEKLY_SUMMARIES",
+      "check": "non_empty",
+      "msg": "weekly_eval() must produce a WEEKLY_SUMMARY"
+    },
+    {
+      "type": "assert_state",
+      "domain": "MONTHLY_SUMMARIES",
+      "check": "non_empty",
+      "msg": "monthly_eval() must produce a MONTHLY_SUMMARY"
+    }
+  ],
+  "expected_flaws": [
+    "If close_day() escalation_check is not 'injury' despite elbow_pain=6 flag: deterministic injury check in Python is missing or not reading SESSION_FLAGS",
+    "If WEEKLY_SUMMARIES[-1].escalations does not contain 'elbow_pain_flag': weekly_eval failed to propagate the injury flag from daily summaries to weekly escalations field",
+    "If MONTHLY_SUMMARIES[-1].patterns.risk_flags does not mention elbow: monthly_eval failed to detect cross-week elbow pattern from two WEEKLY_SUMMARIES with escalations"
+  ]
+}

@@ -241,6 +241,7 @@ Rules:
             model=CLAUDE_HAIKU,
             max_tokens=600,
             messages=[{"role": "user", "content": prompt}],
+            metadata={"mode": "close_day"},
         )
         raw = result.content[0].text.strip()
 
@@ -451,6 +452,7 @@ Rules:
             model=CLAUDE_HAIKU,
             max_tokens=700,
             messages=[{"role": "user", "content": prompt}],
+            metadata={"mode": "weekly_eval"},
         )
         raw = result.content[0].text.strip()
         if raw.startswith("```"):
@@ -569,6 +571,7 @@ Return ONLY the JSON object."""
             model=CLAUDE_MODEL,
             max_tokens=1000,
             messages=[{"role": "user", "content": prompt}],
+            metadata={"mode": "monthly_eval"},
         )
         raw = result.content[0].text.strip()
         if raw.startswith("```"):
@@ -631,6 +634,7 @@ Return ONLY the JSON object."""
             _open_resp_mp = _ant_mp.Anthropic(api_key=_ak_mp).messages.create(
                 model=_model_mp, max_tokens=250,
                 messages=[{"role": "user", "content": _open_prompt_mp}],
+                metadata={"mode": "monthly_planning_open"},
             )
             _opening_mp = _open_resp_mp.content[0].text.strip()
             _thread_mp = {"month": str(today)[:7], "thread": [{"role": "assistant", "content": _opening_mp}]}
@@ -770,6 +774,7 @@ Return ONLY the JSON object."""
             model=CLAUDE_MODEL,
             max_tokens=1400,
             messages=[{"role": "user", "content": prompt}],
+            metadata={"mode": "annual_eval"},
         )
         raw = result.content[0].text.strip()
         if raw.startswith("```"):
@@ -833,6 +838,7 @@ Return ONLY the JSON object."""
             _open_resp_ap = _ant_ap.Anthropic(api_key=_ak_ap).messages.create(
                 model=_model_ap, max_tokens=280,
                 messages=[{"role": "user", "content": _open_prompt_ap}],
+                metadata={"mode": "annual_planning_open"},
             )
             _opening_ap = _open_resp_ap.content[0].text.strip()
             _thread_ap = {"year": today.year, "thread": [{"role": "assistant", "content": _opening_ap}]}
@@ -939,6 +945,7 @@ Return ONLY the JSON object."""
             model=CLAUDE_MODEL,
             max_tokens=1500,
             messages=[{"role": "user", "content": prompt}],
+            metadata={"mode": "longterm_eval"},
         )
         raw = result.content[0].text.strip()
         if raw.startswith("```"):

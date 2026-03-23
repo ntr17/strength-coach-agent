@@ -1,0 +1,55 @@
+{
+  "scenario_name": "fixture_07_weekly_close",
+  "description": "Sunday. Week 6 complete. Squat fell forward in 3/4 sessions. Thursday session skipped for the 4th consecutive week. Tests: does weekly_eval detect the Thursday pattern and carry it forward?",
+  "initial_state": {
+    "coach_state": {
+      "CASCADE_STATE": {
+        "DAILY": {"state": "IDLE", "locked_by": null, "context": {}},
+        "WEEKLY": {"state": "IDLE", "locked_by": null, "context": {}},
+        "MONTHLY": {"state": "IDLE", "locked_by": null, "context": {}},
+        "ANNUAL": {"state": "IDLE", "locked_by": null, "context": {}},
+        "LONGTERM": {"state": "IDLE", "locked_by": null, "context": {}}
+      },
+      "CURRENT_FLOW": "",
+      "WEEKLY_INTENT": "{\"week\": 6, \"focus\": \"Accumulation block. Thursday is Day 3.\"}",
+      "MONTHLY_INTENT": "{\"month\": \"2026-03\", \"focus\": \"Build squat\"}",
+      "ANNUAL_ARC": "{\"year\": 2026, \"primary_goal\": \"120kg squat\"}",
+      "DAILY_SUMMARIES": [
+        {"date": "2026-03-16", "week": 6, "day": "Monday", "session": {"completed": true, "label": "Day 1", "effort_quality": "strong", "notable": "Squat bar forward on 2/3 sets"}, "escalation_check": "none"},
+        {"date": "2026-03-17", "week": 6, "day": "Tuesday", "session": {"completed": true, "label": "Day 2", "effort_quality": "strong", "notable": "Good bench session"}, "escalation_check": "none"},
+        {"date": "2026-03-19", "week": 6, "day": "Thursday", "session": {"completed": false, "label": "Day 3", "effort_quality": "unknown", "notable": "Session skipped — 4th Thursday skip in a row (weeks 3,4,5,6)"}, "escalation_check": "none"},
+        {"date": "2026-03-21", "week": 6, "day": "Saturday", "session": {"completed": true, "label": "Day 4", "effort_quality": "moderate", "notable": "Deadlift ok, squat bar forward again"}, "escalation_check": "none"},
+        {"date": "2026-03-19", "week": 3, "day": "Thursday", "session": {"completed": false, "label": "Day 3", "effort_quality": "unknown", "notable": "Thursday skipped"}, "escalation_check": "none"},
+        {"date": "2026-03-12", "week": 4, "day": "Thursday", "session": {"completed": false, "label": "Day 3", "effort_quality": "unknown", "notable": "Thursday skipped again"}, "escalation_check": "none"},
+        {"date": "2026-03-05", "week": 5, "day": "Thursday", "session": {"completed": false, "label": "Day 3", "effort_quality": "unknown", "notable": "Thursday skipped — work pattern"}, "escalation_check": "none"}
+      ],
+      "WEEKLY_SUMMARIES": []
+    },
+    "lift_history": [
+      {"Date": "2026-03-16", "Week": 6, "Day": "Day 1", "Exercise": "Squat", "Completed": true, "Notes": "Bar forward on 2 sets", "Est 1RM": 117},
+      {"Date": "2026-03-21", "Week": 6, "Day": "Day 4", "Exercise": "Squat", "Completed": true, "Notes": "Bar forward again", "Est 1RM": 116}
+    ],
+    "health_log": [],
+    "telegram_log": []
+  },
+  "events": [
+    {"type": "close_day"},
+    {"type": "weekly_eval"}
+  ],
+  "mock_llm_responses": {
+    "close_day_0": "{\"date\": \"2026-03-22\", \"week\": 6, \"session\": {\"completed\": false, \"label\": \"Rest/Sunday\", \"effort_quality\": \"rest_day\", \"notable\": \"Week 6 closed\"}, \"health\": {\"sleep_hrs\": null, \"bw_kg\": null, \"steps\": null, \"readiness_score\": null}, \"events\": [], \"escalation_check\": \"none\", \"markov_note\": \"Week 6 close\"}",
+    "weekly_eval_0": "{\"week\": 6, \"closed\": \"2026-03-22\", \"training\": {\"sessions_done\": 3, \"avg_effort_quality\": \"moderate\", \"volume_achieved\": \"partial\", \"primary_lift_progress\": {\"Squat\": \"e1RM flat — technique issue (bar forward) limiting load\"}, \"notable\": \"Squat bar forward pattern persists. Thursday skipped again.\"}, \"health\": {\"avg_sleep\": null, \"avg_readiness\": null, \"bw_trend\": \"stable\"}, \"escalations\": [], \"patterns\": {\"recurring_concern\": \"Squat bar forward in 3/4 sessions this week\", \"behavioral_notes\": \"Thursday skipped 4 consecutive weeks (weeks 3, 4, 5, 6) — consider removing Thursday from schedule or making it optional\"}, \"markov_note_for_next_week\": \"Thursday pattern active — carry forward: either remove or make optional for week 7+. Squat technique cue needed.\", \"to_monthly\": \"Thursday skip pattern: 4 consecutive weeks. Squat bar forward: technique bottleneck.\"}"
+  },
+  "assertions": [
+    {
+      "type": "assert_state",
+      "domain": "WEEKLY_SUMMARIES",
+      "check": "non_empty",
+      "msg": "weekly_eval() must produce a WEEKLY_SUMMARY"
+    }
+  ],
+  "expected_flaws": [
+    "ARCHITECTURE RISK: thursday_skip_count detection is LLM-only (no code counter). The mock LLM response includes the pattern because we wrote it that way. In production, if the LLM omits the Thursday note from its summary, the pattern is permanently lost — no code fallback exists.",
+    "RECOMMENDATION: Add deterministic code counter for recurring day-skips in PENDING_FLAGS domain (Phase 3 work)."
+  ]
+}

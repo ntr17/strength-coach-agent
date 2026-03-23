@@ -1,0 +1,53 @@
+{
+  "scenario_name": "fixture_09_annual_arc",
+  "description": "annual_eval() called with 2 monthly summaries. Program is week 7 of 30. Critical: annual_eval must NOT modify WEEKLY_INTENT or MONTHLY_INTENT or call writeback. Must note 'trigger program_builder at week 25'.",
+  "initial_state": {
+    "coach_state": {
+      "CASCADE_STATE": {
+        "DAILY": {"state": "IDLE", "locked_by": null, "context": {}},
+        "WEEKLY": {"state": "IDLE", "locked_by": null, "context": {}},
+        "MONTHLY": {"state": "IDLE", "locked_by": null, "context": {}},
+        "ANNUAL": {"state": "IDLE", "locked_by": null, "context": {}},
+        "LONGTERM": {"state": "IDLE", "locked_by": null, "context": {}}
+      },
+      "CURRENT_FLOW": "",
+      "WEEKLY_INTENT": "{\"week\": 7, \"focus\": \"Accumulation — do not modify this\"}",
+      "MONTHLY_INTENT": "{\"month\": \"2026-03\", \"focus\": \"March objectives — do not modify this\"}",
+      "ANNUAL_ARC": "{\"year\": 2026, \"program\": \"30-week strength (started 2026-01-13)\", \"goal\": \"120kg squat by week 30\", \"program_end_week\": 30}",
+      "GOLDEN_RULES": "{\"rules\": [\"Build strength and muscle\", \"Health and longevity\", \"No injury grinding\"], \"override_log\": []}",
+      "MONTHLY_SUMMARIES": [
+        {"month": "2026-01", "closed": "2026-01-31", "training": {"weeks_completed": 3, "overall_quality": "strong"}, "escalations_handled": [], "patterns": {"key_insight": "Strong start", "risk_flags": ""}, "to_annual": "Month 1: clean start, squat +5kg"},
+        {"month": "2026-02", "closed": "2026-02-28", "training": {"weeks_completed": 4, "overall_quality": "strong"}, "escalations_handled": [], "patterns": {"key_insight": "Bench plateauing slightly", "risk_flags": "Minor elbow niggle once"}, "to_annual": "Month 2: bench slightly behind target, elbow one flag"}
+      ],
+      "ANNUAL_SUMMARY": null,
+      "DAILY_SUMMARIES": [],
+      "WEEKLY_SUMMARIES": []
+    },
+    "lift_history": [],
+    "health_log": [],
+    "telegram_log": []
+  },
+  "events": [
+    {"type": "annual_eval"}
+  ],
+  "mock_llm_responses": {
+    "annual_eval_0": "{\"year\": 2026, \"evaluated_at\": \"2026-03-23\", \"training\": {\"months_evaluated\": 2, \"trend\": \"ascending\", \"primary_achievements\": [\"Squat e1RM +5kg in January\", \"Bench steady\"], \"primary_gaps\": [\"Bench slightly behind target\", \"One elbow flag in February\"]}, \"health\": {\"sleep_trend\": \"stable\", \"recovery_baseline\": \"good\", \"health_risks\": [\"Golfer's elbow — one flag, monitor\"]}, \"goal_alignment\": {\"on_track\": true, \"gap_to_medium_goals\": \"On track for 120kg squat. Bench may need attention in month 4+.\", \"program_adjustments_needed\": \"None needed now. Re-evaluate at week 20.\"}, \"golden_rules_compliance\": {\"violations\": [], \"notes\": \"No violations detected\"}, \"next_12_months\": {\"primary_focus\": \"Complete 30-week strength program, then plan next phase\", \"monthly_objectives\": [\"March: accumulation\", \"April: intensification\", \"May-June: peak + test\"], \"risks_to_watch\": [\"Golfer's elbow reoccurrence\", \"Bench plateau\"]}, \"program_lifecycle\": {\"current_week\": 7, \"total_weeks\": 30, \"weeks_remaining\": 23, \"trigger_program_builder_at_week\": 25, \"note\": \"At week 25, initiate program_builder to plan next block before current program ends\"}, \"markov_note\": \"Program on track. No arc changes needed mid-program.\", \"escalation_recommendation\": null, \"escalation_adjustments\": []}"
+  },
+  "assertions": [
+    {
+      "type": "assert_no_change",
+      "domains": ["WEEKLY_INTENT", "MONTHLY_INTENT"],
+      "msg": "annual_eval() must NOT modify WEEKLY_INTENT or MONTHLY_INTENT — it only reads summaries and writes ANNUAL_SUMMARY"
+    },
+    {
+      "type": "assert_state",
+      "domain": "ANNUAL_SUMMARY",
+      "check": "non_null",
+      "msg": "annual_eval() must write ANNUAL_SUMMARY"
+    }
+  ],
+  "expected_flaws": [
+    "If WEEKLY_INTENT or MONTHLY_INTENT was mutated: annual_eval() incorrectly modified active planning domains mid-program",
+    "If annual_eval() calls writeback.py: annual layer must never directly modify the program sheet — only close_session and confirmed program_agent decisions should do that"
+  ]
+}

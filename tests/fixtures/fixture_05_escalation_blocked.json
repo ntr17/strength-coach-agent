@@ -1,0 +1,47 @@
+{
+  "scenario_name": "fixture_05_escalation_blocked",
+  "description": "Three rounds: athlete insists on quitting strength training to only run. Agent must push back on golden rule conflict. Must NOT fold after single insistence (round 2). Requires 2x explicit confirmation before adapting. If it adapts, override must be logged.",
+  "initial_state": {
+    "coach_state": {
+      "CASCADE_STATE": {
+        "DAILY": {"state": "IDLE", "locked_by": null, "context": {}},
+        "WEEKLY": {"state": "IDLE", "locked_by": null, "context": {}},
+        "MONTHLY": {"state": "IDLE", "locked_by": null, "context": {}},
+        "ANNUAL": {"state": "IDLE", "locked_by": null, "context": {}},
+        "LONGTERM": {"state": "IDLE", "locked_by": null, "context": {}}
+      },
+      "CURRENT_FLOW": "",
+      "WEEKLY_INTENT": "{\"week\": 7, \"focus\": \"Strength accumulation\"}",
+      "ANNUAL_ARC": "{\"year\": 2026, \"program\": \"30-week strength\", \"goal\": \"120kg squat\"}",
+      "LONGTERM_PLAN": "{\"vision\": \"Strength + aesthetics. Compete in powerlifting.\", \"phases\": [{\"name\": \"Strength foundation\", \"status\": \"active\"}]}",
+      "GOLDEN_RULES": "{\"rules\": [\"Build strength and muscle\", \"Health and longevity — no injury grinding\", \"Maintain aesthetic physique\"], \"override_log\": []}",
+      "MONTHLY_INTENT": "{\"month\": \"2026-03\", \"focus\": \"Squat to 105kg e1RM\"}",
+      "DAILY_SUMMARIES": []
+    },
+    "lift_history": [],
+    "health_log": [],
+    "telegram_log": []
+  },
+  "events": [
+    {"type": "telegram_message", "text": "quiero dejar de hacer fuerza y solo correr", "time": "20:00"},
+    {"type": "telegram_message", "text": "en serio, quiero correr solo", "time": "20:05"},
+    {"type": "telegram_message", "text": "es lo que quiero hacer", "time": "20:10"}
+  ],
+  "mock_llm_responses": {
+    "program_agent_0": "{\"decision\": \"REJECT\", \"reasoning\": \"Running-only conflicts with golden rules: Build strength and muscle, Maintain aesthetic physique. Running-only body loses muscle mass and conflicts with stated long-term goals.\", \"response_to_athlete\": \"Entiendo que quieres más cardio, pero dejar la fuerza completamente conflicta con tus objetivos declarados: 120kg squat y mantener masa muscular. Un programa solo de running te llevaría a perder músculo. Propuesta: mantener 2 días de fuerza y añadir 2 días de carrera — ¿funciona eso?\"}",
+    "program_agent_1": "{\"decision\": \"REJECT\", \"reasoning\": \"User insisting. Still conflicts with golden rules. Proposing minimum viable compromise before accepting.\", \"response_to_athlete\": \"Escucha, entiendo la insistencia. Antes de cambiar algo: ¿estás dispuesto a considerar 2 días de fuerza + carrera? Si realmente quieres solo running, necesito que lo confirmes explícitamente porque va contra lo que acordamos en tu plan anual.\"}",
+    "program_agent_2": "{\"decision\": \"CONDITIONAL_ACCEPT\", \"reasoning\": \"User has confirmed twice. Accepting with logged golden rule override. Minimum viable: 1 strength day maintained.\", \"response_to_athlete\": \"De acuerdo, lo apunto. Esto va contra tu plan original de fuerza. Lo registro como override explícito. Propongo mantener al menos 1 día de sentadilla para no perder todo el trabajo del año. ¿Confirmas?\", \"golden_rule_override\": {\"rule\": \"Build strength and muscle\", \"reason\": \"User explicit 2x override\", \"date\": \"2026-03-23\"}}"
+  },
+  "assertions": [
+    {
+      "type": "assert_no_change",
+      "domains": ["LONGTERM_PLAN", "ANNUAL_ARC"],
+      "msg": "After round 2 (single insistence), LONGTERM_PLAN and ANNUAL_ARC must NOT have been modified"
+    }
+  ],
+  "expected_flaws": [
+    "BUG: _check_golden_rules() not built — agent has no mechanism to check golden rules before accepting changes",
+    "BUG: No 2x-confirm mechanism — agent may accept goal change after single insistence (round 2) without requiring explicit second confirmation",
+    "If LONGTERM_PLAN or ANNUAL_ARC mutated after event 2 (round 2): single-insistence fold detected — 2x-confirm gate is missing"
+  ]
+}

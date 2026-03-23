@@ -1609,6 +1609,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     except Exception as _iz_err:
         print(f"  [IterationZero] Non-fatal: {_iz_err}")
 
+    # BUG-01 FIX: load coach_state and _cf_raw here so all CURRENT_FLOW intercepts below can use them
+    from memory import read_coach_state as _rcs_cf
+    coach_state = _rcs_cf()
+    _cf_raw = coach_state.get("CURRENT_FLOW", {}).get("Summary", "") or \
+              coach_state.get("CURRENT_FLOW", {}).get("summary", "") or ""
+
     # weekly_planning CURRENT_FLOW — multi-turn collaborative planning conversation (Sonnet)
     # Also handles legacy weekly_schedule_input / weekly_plan_confirm states from older deploys.
     if _cf_raw.startswith("weekly_planning") or _cf_raw.startswith("weekly_schedule_input") or _cf_raw.startswith("weekly_plan_confirm"):

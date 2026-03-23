@@ -1,0 +1,51 @@
+{
+  "scenario_name": "fixture_08_monthly_close",
+  "description": "End of month. 4 WEEKLY_SUMMARIES pre-loaded. Weeks 2 and 4 both have escalations: [elbow_pain_flag]. monthly_eval must detect the cross-week pattern and escalate to annual level.",
+  "initial_state": {
+    "coach_state": {
+      "CASCADE_STATE": {
+        "DAILY": {"state": "IDLE", "locked_by": null, "context": {}},
+        "WEEKLY": {"state": "IDLE", "locked_by": null, "context": {}},
+        "MONTHLY": {"state": "IDLE", "locked_by": null, "context": {}},
+        "ANNUAL": {"state": "IDLE", "locked_by": null, "context": {}},
+        "LONGTERM": {"state": "IDLE", "locked_by": null, "context": {}}
+      },
+      "CURRENT_FLOW": "",
+      "WEEKLY_INTENT": "{\"week\": 8, \"focus\": \"New month starting\"}",
+      "MONTHLY_INTENT": "{\"month\": \"2026-03\", \"focus\": \"Squat progression\"}",
+      "ANNUAL_ARC": "{\"year\": 2026, \"primary_goal\": \"120kg squat\"}",
+      "ANNUAL_SUMMARY": "{\"year\": 2026, \"evaluated_at\": \"2026-02-01\", \"goal_alignment\": {\"on_track\": true}}",
+      "WEEKLY_SUMMARIES": [
+        {"week": 1, "closed": "2026-03-01", "training": {"sessions_done": 4, "avg_effort_quality": "strong", "volume_achieved": "full"}, "escalations": [], "patterns": {"recurring_concern": "", "behavioral_notes": ""}, "markov_note_for_next_week": "Good start", "to_monthly": "W1: clean"},
+        {"week": 2, "closed": "2026-03-08", "training": {"sessions_done": 3, "avg_effort_quality": "moderate", "volume_achieved": "partial"}, "escalations": ["elbow_pain_flag"], "patterns": {"recurring_concern": "Elbow pain during pull work", "behavioral_notes": ""}, "markov_note_for_next_week": "Watch elbow", "to_monthly": "W2: elbow flag — pull volume concern"},
+        {"week": 3, "closed": "2026-03-15", "training": {"sessions_done": 4, "avg_effort_quality": "strong", "volume_achieved": "full"}, "escalations": [], "patterns": {"recurring_concern": "", "behavioral_notes": ""}, "markov_note_for_next_week": "Strong week, elbow ok", "to_monthly": "W3: clean"},
+        {"week": 4, "closed": "2026-03-22", "training": {"sessions_done": 3, "avg_effort_quality": "moderate", "volume_achieved": "partial"}, "escalations": ["elbow_pain_flag"], "patterns": {"recurring_concern": "Elbow pain returned week 4", "behavioral_notes": ""}, "markov_note_for_next_week": "Elbow pattern: reduce pull volume", "to_monthly": "W4: elbow flag again — 2nd occurrence this month"}
+      ],
+      "MONTHLY_SUMMARIES": [],
+      "DAILY_SUMMARIES": []
+    },
+    "lift_history": [],
+    "health_log": [],
+    "telegram_log": []
+  },
+  "events": [
+    {"type": "monthly_eval"}
+  ],
+  "mock_llm_responses": {
+    "monthly_eval_0": "{\"month\": \"2026-03\", \"closed\": \"2026-03-31\", \"training\": {\"weeks_completed\": 4, \"overall_quality\": \"moderate\", \"volume_trend\": \"stable\", \"strength_progress\": {\"Squat\": \"+3kg e1RM over month\", \"Bench\": \"stable\"}, \"notable\": \"Good squat progression but elbow issue recurring\"}, \"health\": {\"sleep_trend\": \"stable\", \"bw_trend\": \"stable\", \"readiness_trend\": \"stable\"}, \"escalations_handled\": [\"elbow_pain_flag_w2\", \"elbow_pain_flag_w4\"], \"patterns\": {\"key_insight\": \"Squat e1RM +3kg — on track for targets\", \"risk_flags\": \"Elbow pain flagged twice this month (weeks 2 and 4) — pattern emerging, golfer's elbow risk. Recommend reducing pull volume by 20% for next month.\"}, \"markov_note_for_next_month\": \"April: maintain squat trajectory, reduce pull volume, monitor elbow\", \"to_annual\": \"Elbow flags in weeks 2 and 4 of March. Pattern crosses month boundary. Annual arc should note ongoing pull volume risk and elbow health monitoring.\", \"escalation_recommendation\": \"Reduce chin-up/pull-up volume by 20% for April. Replace with face pulls and band work. If elbow flags continue in April, escalate to annual for program restructure.\", \"escalation_adjustments\": [\"reduce_pull_volume_20pct_april\"]}"
+  },
+  "assertions": [
+    {
+      "type": "assert_state",
+      "domain": "MONTHLY_SUMMARIES",
+      "check": "non_empty",
+      "msg": "monthly_eval() must produce a MONTHLY_SUMMARY"
+    }
+  ],
+  "expected_flaws": [
+    "If MONTHLY_SUMMARIES[-1].patterns.risk_flags does not contain 'elbow': monthly_eval failed to synthesize the cross-week elbow pattern from two WEEKLY_SUMMARIES with escalations=[elbow_pain_flag]",
+    "If MONTHLY_SUMMARIES[-1].to_annual is empty: monthly_eval did not generate the annual escalation note despite two elbow flags",
+    "If MONTHLY_SUMMARIES[-1].escalation_recommendation is null: monthly_eval produced no actionable recommendation despite a cross-week injury pattern",
+    "NOTE: This test depends on weekly_eval having correctly populated the escalations field in WEEKLY_SUMMARIES. If weekly_eval doesn't write escalations properly, the monthly pattern detection fails upstream."
+  ]
+}

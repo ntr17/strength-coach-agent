@@ -3815,5 +3815,86 @@ class TestHealthReadinessRpeOverride:
         assert "RPE" in text
 
 
+# ===========================================================================
+# BUG-01 regression: telegram_bot.py coach_state/_cf_raw init order
+# ===========================================================================
+
+class TestBug01CoachStateInit:
+    """
+    Regression test for BUG-01: coach_state and _cf_raw must be initialized
+    BEFORE the CURRENT_FLOW intercept chain in handle_message().
+
+    The fix was to add initialization immediately after the iteration_zero block
+    (around line 1612), before any _cf_raw.startswith(...) checks.
+
+    This test verifies the fix by scanning the source code for the critical
+    ordering constraint: the init assignment must appear before the first use.
+    """
+
+    def _get_handle_message_lines(self):
+        import ast, os, tokenize, io
+        bot_path = os.path.join(os.path.dirname(__file__), "..", "src", "telegram_bot.py")
+        with open(bot_path, encoding="utf-8") as f:
+            lines = f.readlines()
+        return lines
+
+    def test_cf_raw_initialized_before_first_use(self):
+        lines = self._get_handle_message_lines()
+        # Find the line where _cf_raw is first ASSIGNED (not used)
+        # and the line where _cf_raw is first USED in a startswith() check
+        first_assign = None
+        first_use = None
+        in_handle_message = False
+        for i, line in enumerate(lines, 1):
+            stripped = line.strip()
+            if "async def handle_message(" in stripped:
+                in_handle_message = True
+            if not in_handle_message:
+                continue
+            # Next function definition ends the scope
+            if in_handle_message and i > 1558 and stripped.startswith("async def ") and "handle_message" not in stripped:
+                break
+            # Assignment: _cf_raw = ...
+            if first_assign is None and "_cf_raw =" in stripped and "startswith" not in stripped:
+                first_assign = i
+            # First use in a condition
+            if first_use is None and "_cf_raw.startswith(" in stripped:
+                first_use = i
+
+        assert first_assign is not None, "_cf_raw assignment not found in handle_message()"
+        assert first_use is not None, "_cf_raw.startswith() use not found in handle_message()"
+        assert first_assign < first_use, (
+            f"BUG-01: _cf_raw first assigned at line {first_assign} but first used at line {first_use}. "
+            f"Assignment must come before first use."
+        )
+
+    def test_coach_state_initialized_before_weekly_plan_thread_access(self):
+        lines = self._get_handle_message_lines()
+        # Find: coach_state = _rcs_cf() or coach_state = read_coach_state()
+        # and: coach_state.get("WEEKLY_PLAN_THREAD"
+        first_cs_assign = None
+        first_cs_use = None
+        in_handle_message = False
+        for i, line in enumerate(lines, 1):
+            stripped = line.strip()
+            if "async def handle_message(" in stripped:
+                in_handle_message = True
+            if not in_handle_message:
+                continue
+            if in_handle_message and i > 1558 and stripped.startswith("async def ") and "handle_message" not in stripped:
+                break
+            if first_cs_assign is None and "coach_state = " in stripped and ("read_coach_state" in stripped or "_rcs_cf()" in stripped):
+                first_cs_assign = i
+            if first_cs_use is None and 'coach_state.get("WEEKLY_PLAN_THREAD"' in stripped:
+                first_cs_use = i
+
+        assert first_cs_assign is not None, "coach_state assignment not found in handle_message()"
+        assert first_cs_use is not None, "coach_state.get(WEEKLY_PLAN_THREAD) not found in handle_message()"
+        assert first_cs_assign < first_cs_use, (
+            f"BUG-01: coach_state first assigned at line {first_cs_assign} but first used "
+            f"(WEEKLY_PLAN_THREAD access) at line {first_cs_use}. Assignment must come before use."
+        )
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

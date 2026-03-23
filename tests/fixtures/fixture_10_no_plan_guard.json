@@ -1,0 +1,51 @@
+{
+  "scenario_name": "fixture_10_no_plan_guard",
+  "description": "15:00, DAILY_FOCUS is null (morning plan was never confirmed). CURRENT_FLOW is empty. Athlete asks workout question. EXPECTED TO FAIL: system should detect missing plan and send catch-up prompt, but BUG-02 means it routes to WorkoutAdvisorAgent instead.",
+  "initial_state": {
+    "coach_state": {
+      "CASCADE_STATE": {
+        "DAILY": {"state": "IDLE", "locked_by": null, "context": {}},
+        "WEEKLY": {"state": "IDLE", "locked_by": null, "context": {}},
+        "MONTHLY": {"state": "IDLE", "locked_by": null, "context": {}},
+        "ANNUAL": {"state": "IDLE", "locked_by": null, "context": {}},
+        "LONGTERM": {"state": "IDLE", "locked_by": null, "context": {}}
+      },
+      "CURRENT_FLOW": "",
+      "WEEKLY_INTENT": "{\"week\": 7, \"focus\": \"Accumulation\"}",
+      "MONTHLY_INTENT": "{\"month\": \"2026-03\", \"focus\": \"Build squat\"}",
+      "DAILY_FOCUS": null,
+      "LAST_BRIEF": "2026-03-22",
+      "DAILY_SUMMARIES": []
+    },
+    "lift_history": [
+      {"Date": "2026-03-16", "Week": 6, "Day": "Day 1", "Exercise": "Squat", "Prescribed Weight": 100, "Actual": 100, "Completed": true, "Notes": "", "Est 1RM": 118}
+    ],
+    "health_log": [],
+    "telegram_log": []
+  },
+  "events": [
+    {"type": "telegram_message", "text": "¿cuántos sets de squat hago hoy?", "time": "15:00"}
+  ],
+  "mock_llm_responses": {
+    "workout_agent_0": "Hoy es Day 1. Para squat: 4x4 @ 102.5kg según tu programa. ¿Vas al gym?",
+    "catch_up_0": "Parece que no confirmamos el plan esta mañana. ¿Vas a entrenar hoy? [Sí/No]"
+  },
+  "assertions": [
+    {
+      "type": "assert_no_change",
+      "domains": ["CASCADE_STATE", "WEEKLY_INTENT", "MONTHLY_INTENT"],
+      "msg": "A workout question with no confirmed day plan should not mutate any cascade domains"
+    },
+    {
+      "type": "assert_state",
+      "domain": "__last_route__",
+      "check": "catch_up_handler",
+      "msg": "BUG-02: DAILY_FOCUS is null — message should route to catch_up_handler, not workout_agent. Guard is missing."
+    }
+  ],
+  "expected_flaws": [
+    "BUG-02: System routes to WorkoutAdvisorAgent and gives squat advice ('cuántos sets de squat') without checking if DAILY_FOCUS exists for today. DAILY_FOCUS is null — no morning plan was confirmed. The system should detect the missing plan and send a catch-up message ('Missed morning check-in. Are you training today?') instead of giving workout advice.",
+    "The guard does not exist yet — this is Phase 2 work. This fixture WILL FAIL with current code and that is correct and expected.",
+    "Proof: if llm.call_log contains a call to workout_agent (workout_agent_0) with squat advice content, the guard is missing."
+  ]
+}

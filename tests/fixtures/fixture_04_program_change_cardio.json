@@ -1,0 +1,46 @@
+{
+  "scenario_name": "fixture_04_program_change_cardio",
+  "description": "Intraday message: 'quiero añadir cardio al programa'. Then next-day morning brief. Critical: WEEKLY_INTENT/ANNUAL_ARC must NOT change before user confirms. Morning brief must NOT mention cardio.",
+  "initial_state": {
+    "coach_state": {
+      "CASCADE_STATE": {
+        "DAILY": {"state": "IDLE", "locked_by": null, "context": {}},
+        "WEEKLY": {"state": "IDLE", "locked_by": null, "context": {}},
+        "MONTHLY": {"state": "IDLE", "locked_by": null, "context": {}},
+        "ANNUAL": {"state": "IDLE", "locked_by": null, "context": {}},
+        "LONGTERM": {"state": "IDLE", "locked_by": null, "context": {}}
+      },
+      "CURRENT_FLOW": "",
+      "WEEKLY_INTENT": "{\"week\": 7, \"focus\": \"Strength accumulation. No cardio currently.\"}",
+      "MONTHLY_INTENT": "{\"month\": \"2026-03\", \"focus\": \"Build squat to 105kg e1RM\"}",
+      "ANNUAL_ARC": "{\"year\": 2026, \"primary_goal\": \"120kg squat. No explicit cardio plan.\"}",
+      "LONGTERM_PLAN": "{\"vision\": \"Compete in powerlifting at 120kg squat\"}",
+      "GOLDEN_RULES": "{\"rules\": [\"Build strength and muscle\", \"Health and longevity\", \"No injury grinding\"], \"override_log\": []}",
+      "DAILY_FOCUS": "{\"date\": \"2026-03-23\", \"session\": \"Day 1\", \"effort_level\": \"normal\"}",
+      "DAILY_SUMMARIES": []
+    },
+    "commands": [],
+    "lift_history": [],
+    "health_log": [],
+    "telegram_log": []
+  },
+  "events": [
+    {"type": "telegram_message", "text": "quiero añadir cardio al programa", "time": "15:00"},
+    {"type": "morning_brief"}
+  ],
+  "mock_llm_responses": {
+    "program_agent_0": "{\"decision\": \"PENDING_USER_CLARIFICATION\", \"reasoning\": \"Cardio addition could align with health/longevity rule but needs specifics. Zone 2 2x/week is different from daily running. Asking for clarification before any program change.\", \"response_to_athlete\": \"Interesante. ¿Estás pensando en Zone 2 (2x/semana, 30min) o algo más intenso como correr daily? Antes de modificar el programa necesito entender el volumen.\", \"pending_proposal\": {\"type\": \"cardio_addition\", \"status\": \"AWAITING_USER_CLARIFICATION\", \"details\": \"User wants to add cardio — type and volume TBD\"}}",
+    "morning_brief_0": "Today is Day 2 — Deadlift + OHP. Target RPE 7.5. Focus on hip hinge on deadlifts."
+  },
+  "assertions": [
+    {
+      "type": "assert_no_change",
+      "domains": ["WEEKLY_INTENT", "ANNUAL_ARC", "LONGTERM_PLAN"],
+      "msg": "No program-level domains should change before user confirms cardio addition"
+    }
+  ],
+  "expected_flaws": [
+    "If ANNUAL_ARC or WEEKLY_INTENT was modified: agent auto-approved cardio without user confirmation — pre-confirm guard for program changes is missing",
+    "If morning_brief LLM call (morning_brief_0) system_preview contains 'cardio': pending cardio request leaked into morning brief context — context isolation failure in _build_bot_context()"
+  ]
+}
