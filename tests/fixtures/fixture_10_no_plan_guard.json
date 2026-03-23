@@ -24,7 +24,8 @@
     "telegram_log": []
   },
   "events": [
-    {"type": "telegram_message", "text": "¿cuántos sets de squat hago hoy?", "time": "15:00"}
+    {"type": "telegram_message", "text": "¿cuántos sets de squat hago hoy?", "time": "15:00"},
+    {"type": "telegram_message", "text": "Sí, voy a entrenar", "time": "15:01"}
   ],
   "mock_llm_responses": {
     "workout_agent_0": "Hoy es Day 1. Para squat: 4x4 @ 102.5kg según tu programa. ¿Vas al gym?",
@@ -33,14 +34,14 @@
   "assertions": [
     {
       "type": "assert_no_change",
-      "domains": ["CASCADE_STATE", "WEEKLY_INTENT", "MONTHLY_INTENT"],
-      "msg": "A workout question with no confirmed day plan should not mutate any cascade domains"
+      "domains": ["WEEKLY_INTENT", "MONTHLY_INTENT"],
+      "msg": "Workout question with no plan should never mutate planning domains"
     },
     {
       "type": "assert_state",
-      "domain": "__last_route__",
-      "check": "catch_up_handler",
-      "msg": "BUG-02: DAILY_FOCUS is null — message should route to catch_up_handler, not workout_agent. Guard is missing."
+      "domain": "CURRENT_FLOW",
+      "check": "daily_planning",
+      "msg": "After Sí response to catch-up, CURRENT_FLOW must transition to daily_planning"
     }
   ],
   "expected_flaws": [

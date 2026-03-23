@@ -206,7 +206,7 @@ def run_all(verbose: bool = True) -> list:
             "fixture_07_weekly_close": "PASS",       # weekly close produces patterned summary
             "fixture_08_monthly_close": "PASS",      # monthly_eval writes MONTHLY_SUMMARY
             "fixture_09_annual_arc": "PASS",         # annual_eval writes ANNUAL_SUMMARY without mutating MONTHLY_INTENT
-            "fixture_10_no_plan_guard": "FAIL",      # BUG-02: routes to workout_agent with no DAILY_FOCUS guard (Phase 2 fix)
+            "fixture_10_no_plan_guard": "PASS",      # BUG-02 fixed: DAILY_FOCUS guard routes to catch_up_handler, transitions to daily_planning
         }
         print("\nExpected vs actual:")
         for r in results:
@@ -257,7 +257,7 @@ test_fixture_06_false_escalation = _make_test("fixture_06_false_escalation", "PA
 test_fixture_07_weekly_close = _make_test("fixture_07_weekly_close", "PASS")
 test_fixture_08_monthly_close = _make_test("fixture_08_monthly_close", "FAIL")
 test_fixture_09_annual_arc = _make_test("fixture_09_annual_arc", "PASS")
-test_fixture_10_no_plan_guard = _make_test("fixture_10_no_plan_guard", "FAIL")
+test_fixture_10_no_plan_guard = _make_test("fixture_10_no_plan_guard", "PASS")
 
 
 if __name__ == "__main__":

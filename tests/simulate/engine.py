@@ -178,7 +178,10 @@ class CoachSimulator:
         Simplified routing for simulation purposes.
         Mirrors the real telegram_bot.py routing logic without async/Telegram.
         """
+        import json as _json_r
+        from datetime import date as _date_r
         text_lower = text.lower()
+        _today_r = str(_date_r.today())
 
         # CURRENT_FLOW intercepts (check first)
         if current_flow.startswith("weekly_planning"):
@@ -192,6 +195,47 @@ class CoachSimulator:
         if current_flow.startswith("cascade_awaiting_confirm"):
             return "cascade_confirm_handler"
 
+        # daily_catchup intercept — response to the DAILY_FOCUS guard catch-up prompt
+        if current_flow == "daily_catchup":
+            _yes_r = {"sí", "si", "yes", "yep", "yeah", "claro", "voy"}
+            _no_r = {"no", "nope", "descanso", "rest", "skip", "hoy no"}
+            if any(w in text_lower for w in _yes_r) or text_lower.strip() in _yes_r:
+                # Transition to daily_planning flow
+                self.memory.upsert_coach_state(
+                    "CURRENT_FLOW",
+                    f"daily_planning | {_today_r} | catchup"
+                )
+                return "daily_catchup_yes"
+            elif any(w in text_lower for w in _no_r) or text_lower.strip() in _no_r:
+                # Rest day — log and close
+                self.memory.upsert_coach_state(
+                    "DAILY_FOCUS",
+                    _json_r.dumps({"date": _today_r, "session": "rest", "rest_day": True})
+                )
+                self.memory.upsert_coach_state("CURRENT_FLOW", "")
+                return "daily_catchup_no"
+            else:
+                return "daily_catchup_unclear"
+
+        # DAILY_FOCUS guard — Phase 2 fix for BUG-02
+        # When no CURRENT_FLOW is active and time >= 10:00, check if today's plan is confirmed.
+        if not current_flow:
+            _hour_r = int(self._current_time.split(":")[0])
+            if _hour_r >= 10:
+                _df_envelope_r = coach_state.get("DAILY_FOCUS") or {}
+                _df_raw_r = (_df_envelope_r.get("summary", "") or _df_envelope_r.get("Summary", "")
+                             if isinstance(_df_envelope_r, dict) else "")
+                _df_current_r = False
+                if _df_raw_r and _df_raw_r.strip().startswith("{"):
+                    try:
+                        _df_r = _json_r.loads(_df_raw_r)
+                        _df_current_r = (_df_r.get("date") == _today_r)
+                    except Exception:
+                        pass
+                if not _df_current_r:
+                    self.memory.upsert_coach_state("CURRENT_FLOW", "daily_catchup")
+                    return "catch_up_handler"
+
         # Simple keyword classification (mirrors Haiku classifier output for simulation)
         program_keywords = ("programa", "cardio", "nuevo programa", "dejar", "correr",
                             "deload", "bloque", "diseña")
@@ -203,7 +247,6 @@ class CoachSimulator:
                          "no puedo ir")
 
         if any(kw in text_lower for kw in skip_keywords):
-            # Trigger session skip escalation
             self._handle_session_skip(text, coach_state)
             return "session_skip_escalation"
 
@@ -214,7 +257,6 @@ class CoachSimulator:
             return "health_agent"
 
         if any(kw in text_lower for kw in workout_keywords):
-            # BUG-02: no DAILY_FOCUS guard here — routes regardless
             return "workout_agent"
 
         return "general_response"

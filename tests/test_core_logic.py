@@ -3896,5 +3896,103 @@ class TestBug01CoachStateInit:
         )
 
 
+# ---------------------------------------------------------------------------
+# BUG-02: DAILY_FOCUS guard (Phase 2)
+# ---------------------------------------------------------------------------
+
+class TestDailyFocusGuard:
+    """Verify the DAILY_FOCUS guard exists and is positioned correctly in telegram_bot.py."""
+
+    def _get_handle_message_lines(self):
+        tb_path = os.path.join(SRC_DIR, "telegram_bot.py")
+        with open(tb_path, encoding="utf-8") as f:
+            return f.readlines()
+
+    def test_daily_focus_guard_exists(self):
+        """Guard code must exist — checks for DAILY_FOCUS before routing to intent classifier."""
+        lines = self._get_handle_message_lines()
+        found = any("DailyFocusGuard" in line or "daily_catchup" in line for line in lines)
+        assert found, "BUG-02 guard not found: no 'DailyFocusGuard' or 'daily_catchup' reference in telegram_bot.py"
+
+    def test_daily_focus_guard_triggers_catchup_when_missing(self):
+        """
+        Guard must set CURRENT_FLOW to 'daily_catchup' when DAILY_FOCUS is absent/stale.
+        Verified via simulation fixture_10 (engine._classify_and_route mirrors production logic).
+        """
+        import json
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), "simulate"))
+        from simulate.mock_memory import MockMemory
+        from simulate.engine import CoachSimulator
+
+        initial_state = {
+            "coach_state": {
+                "CASCADE_STATE": {
+                    "DAILY": {"state": "IDLE", "locked_by": None, "context": {}},
+                    "WEEKLY": {"state": "IDLE", "locked_by": None, "context": {}},
+                    "MONTHLY": {"state": "IDLE", "locked_by": None, "context": {}},
+                    "ANNUAL": {"state": "IDLE", "locked_by": None, "context": {}},
+                    "LONGTERM": {"state": "IDLE", "locked_by": None, "context": {}}
+                },
+                "CURRENT_FLOW": "",
+                "DAILY_FOCUS": None,
+            }
+        }
+
+        class _DummyLLM:
+            def get_call_log(self): return []
+
+        fixture = {"scenario_name": "test_guard", "events": [], "assertions": []}
+        memory = MockMemory(initial_state)
+
+        class _MockLLM:
+            def get_call_log(self): return []
+
+        sim = CoachSimulator(fixture, memory, _MockLLM())
+        sim._current_time = "15:00"
+
+        # Simulate inbound message with no CURRENT_FLOW and no today's DAILY_FOCUS
+        coach_state = memory.read_coach_state()
+        cf_raw = ""
+        route = sim._classify_and_route("¿cuántos sets de squat hago hoy?", cf_raw, coach_state)
+
+        assert route == "catch_up_handler", (
+            f"BUG-02 guard failed: expected 'catch_up_handler' but got '{route}'. "
+            "Guard must intercept when DAILY_FOCUS is missing and time >= 10:00."
+        )
+        current_flow = memory.get_domain("CURRENT_FLOW")
+        assert current_flow == "daily_catchup", (
+            f"Guard must set CURRENT_FLOW to 'daily_catchup', got: '{current_flow}'"
+        )
+
+    def test_daily_focus_guard_skips_before_10am(self):
+        """Guard must NOT trigger before 10:00 — let morning brief run normally."""
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), "simulate"))
+        from simulate.mock_memory import MockMemory
+        from simulate.engine import CoachSimulator
+
+        initial_state = {
+            "coach_state": {
+                "CURRENT_FLOW": "",
+                "DAILY_FOCUS": None,
+            }
+        }
+        fixture = {"scenario_name": "test_guard_early", "events": [], "assertions": []}
+        memory = MockMemory(initial_state)
+
+        class _MockLLM:
+            def get_call_log(self): return []
+
+        sim = CoachSimulator(fixture, memory, _MockLLM())
+        sim._current_time = "08:00"  # before 10:00
+
+        coach_state = memory.read_coach_state()
+        route = sim._classify_and_route("¿cuántos sets de squat hago hoy?", "", coach_state)
+
+        # Should NOT route to catch_up_handler before 10:00
+        assert route != "catch_up_handler", (
+            "Guard must not trigger before 10:00 — morning brief period must be unblocked."
+        )
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

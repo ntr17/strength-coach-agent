@@ -1948,6 +1948,61 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             from memory import upsert_coach_state as _ucs_ap_err
             _ucs_ap_err("CURRENT_FLOW", "", "LOW")
 
+    # daily_catchup CURRENT_FLOW intercept — response to "are you training today?" catch-up prompt
+    # Opened by the DAILY_FOCUS guard below when no plan was confirmed this morning.
+    if _cf_raw == "daily_catchup":
+        try:
+            import json as _json_dc
+            from datetime import date as _date_dc
+            from memory import upsert_coach_state as _ucs_dc
+            _today_dc = str(_date_dc.today())
+            _lower_dc = user_text.lower().strip()
+            _yes_dc = {"sí", "si", "yes", "yep", "yeah", "claro", "voy", "voy a entrenar", "sí, voy", "si, voy"}
+            _no_dc = {"no", "nope", "no voy", "descanso", "rest", "skip", "hoy no"}
+            if any(w in _lower_dc for w in _yes_dc) or _lower_dc in _yes_dc:
+                # Open abbreviated daily_planning — existing handler takes over from here
+                import anthropic as _ant_dc
+                from config import ANTHROPIC_API_KEY as _ak_dc, CLAUDE_MODEL as _model_dc
+                _weekly_intent_dc = coach_state.get("WEEKLY_INTENT", {}).get("summary", "") or \
+                                    coach_state.get("WEEKLY_INTENT", {}).get("Summary", "")
+                _dp_open_dc = (
+                    f"You are a strength coach. The athlete confirmed they are training today "
+                    f"(they missed the morning check-in). Weekly intent: {_weekly_intent_dc or '(not set)'}.\n"
+                    f"Write a single-sentence message asking which session they're doing today "
+                    f"so you can log the plan. Under 25 words. No emojis."
+                )
+                _resp_dc = _ant_dc.Anthropic(api_key=_ak_dc).messages.create(
+                    model=_model_dc, max_tokens=80,
+                    messages=[{"role": "user", "content": "Sí, voy a entrenar hoy."}],
+                    system=_dp_open_dc,
+                    metadata={"mode": "daily_catchup_open"},
+                )
+                _msg_dc = _resp_dc.content[0].text.strip()
+                _thread_dc = {"date": _today_dc, "thread": [{"role": "assistant", "content": _msg_dc}]}
+                _ucs_dc("DAILY_PLAN_THREAD", _json_dc.dumps(_thread_dc), "MEDIUM")
+                _ucs_dc("CURRENT_FLOW", f"daily_planning | {_today_dc} | catchup", "MEDIUM")
+                await update.message.reply_text(_msg_dc)
+                _log_message("OUT", f"daily_catchup → daily_planning opened")
+            elif any(w in _lower_dc for w in _no_dc) or _lower_dc in _no_dc:
+                # Rest day — log minimal DAILY_FOCUS and close flow
+                _df_dc = {"date": _today_dc, "session": "rest", "rest_day": True}
+                _ucs_dc("DAILY_FOCUS", _json_dc.dumps(_df_dc), "LOW")
+                _ucs_dc("CURRENT_FLOW", "", "LOW")
+                _reply_dc = "Ok, rest day logged. Catch you tomorrow."
+                await update.message.reply_text(_reply_dc)
+                _log_message("OUT", _reply_dc)
+            else:
+                # Unclear — prompt again without resetting flow
+                _reply_dc = "Sólo dime sí o no — ¿vas a entrenar hoy?"
+                await update.message.reply_text(_reply_dc)
+                _log_message("OUT", _reply_dc)
+            return
+        except Exception as _dc_err:
+            print(f"  [daily_catchup] Error: {_dc_err}")
+            from memory import upsert_coach_state as _ucs_dc_err
+            _ucs_dc_err("CURRENT_FLOW", "", "LOW")
+            # Fall through to normal routing
+
     # weekly_confirm CURRENT_FLOW intercept — athlete confirming or changing next week's plan
     _cf_raw = coach_state.get("CURRENT_FLOW", {}).get("Summary", "") or coach_state.get("CURRENT_FLOW", {}).get("summary", "")
     if _cf_raw.startswith("weekly_confirm"):
@@ -2075,6 +2130,41 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             await update.message.reply_text("No monthly summary yet.")
         _log_message("OUT", "monthly summary shown")
         return
+
+    # DAILY_FOCUS guard — Phase 2 fix for BUG-02
+    # When no CURRENT_FLOW is active and the time is >= 10:00 UTC, verify that today's plan
+    # has been confirmed (DAILY_FOCUS exists for today). Without it, the intent classifier
+    # would route workout/health questions to specialized agents that have no plan context.
+    # Guard fires → send catch-up prompt → open daily_catchup flow (handled above on next reply).
+    if not _cf_raw:
+        try:
+            import json as _json_g
+            from datetime import date as _date_g, datetime as _datetime_g
+            _today_g = str(_date_g.today())
+            _hour_g = _datetime_g.utcnow().hour
+            if _hour_g >= 10:
+                _df_raw_g = coach_state.get("DAILY_FOCUS", {}).get("summary", "") or \
+                            coach_state.get("DAILY_FOCUS", {}).get("Summary", "")
+                _df_current_g = False
+                if _df_raw_g and _df_raw_g.strip().startswith("{"):
+                    try:
+                        _df_g = _json_g.loads(_df_raw_g)
+                        _df_current_g = (_df_g.get("date") == _today_g)
+                    except Exception:
+                        pass
+                if not _df_current_g:
+                    from memory import upsert_coach_state as _ucs_g
+                    _ucs_g("CURRENT_FLOW", "daily_catchup", "MEDIUM")
+                    _catchup_msg_g = (
+                        "Parece que no tuvimos check-in esta mañana. "
+                        "¿Vas a entrenar hoy? Responde Sí o No."
+                    )
+                    await update.message.reply_text(_catchup_msg_g)
+                    _log_message("OUT", _catchup_msg_g)
+                    print(f"  [DailyFocusGuard] No plan for {_today_g} — catch-up prompt sent.")
+                    return
+        except Exception as _g_err:
+            print(f"  [DailyFocusGuard] Non-fatal: {_g_err}")
 
     # Classify intent with Haiku — single fast call instead of cascading keyword checks
     intent = _classify_intent(user_text)
