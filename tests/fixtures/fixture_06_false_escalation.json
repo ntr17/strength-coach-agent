@@ -1,6 +1,6 @@
 {
   "scenario_name": "fixture_06_false_escalation",
-  "description": "Simple data query: '¿cuánto levanté en deadlift la semana pasada?' Must route to data lookup only. Zero escalation. Zero state mutations to cascade domains. Efficiency note: no QUESTION category in classifier.",
+  "description": "Simple data query: '¿cuánto levanté en deadlift la semana pasada?' Must route to QUESTION (question_lookup), NOT WORKOUT. Zero escalation. Zero state mutations to cascade domains.",
   "initial_state": {
     "coach_state": {
       "CASCADE_STATE": {
@@ -27,16 +27,22 @@
     {"type": "telegram_message", "text": "¿cuánto levanté en deadlift la semana pasada?", "time": "14:00"}
   ],
   "mock_llm_responses": {
-    "workout_agent_0": "La semana pasada (semana 6): Deadlift 3x3 @ 140kg. e1RM estimado: ~162kg."
+    "question_lookup_0": "La semana pasada (semana 6): Deadlift 3x3 @ 140kg. e1RM estimado: ~162kg."
   },
   "assertions": [
     {
       "type": "assert_no_change",
       "domains": ["CASCADE_STATE", "WEEKLY_INTENT", "MONTHLY_INTENT", "ANNUAL_ARC", "DAILY_FOCUS"],
       "msg": "Simple query must not mutate any cascade or planning domains"
+    },
+    {
+      "type": "assert_state",
+      "domain": "__last_route__",
+      "check": "question_lookup",
+      "msg": "Simple data query must route to question_lookup, not workout_agent"
     }
   ],
   "expected_flaws": [
-    "EFFICIENCY NOTE (not a correctness failure): No QUESTION category in Haiku intent classifier. Simple data query routes to WorkoutAdvisorAgent (Sonnet + sheet load) instead of a cheap targeted lookup. Phase 3 fix: add QUESTION category."
+    "ARCHITECTURE NOTE: In production, Haiku classifier uses 7 categories. Engine uses keyword matching — 'cuánto levanté' must be in question_keywords (checked before workout_keywords)."
   ]
 }

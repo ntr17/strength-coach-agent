@@ -10,7 +10,6 @@ Design:
 Injection strategy: monkeypatching (see runner.py).
 Production code is NOT modified — mocks are injected via unittest.mock.patch at test time.
 """
-import copy
 import sys
 import os
 from typing import Any
@@ -28,6 +27,7 @@ class CoachSimulator:
         self.trace = []
         self.flaws = []
         self._current_time = "12:00"
+        self._current_date = "2026-03-23"  # Simulation date — avoid real date.today() in guards
         self._last_route = None  # set by _run_telegram_message for routing assertions
 
     # -------------------------------------------------------------------------
@@ -179,11 +179,22 @@ class CoachSimulator:
         Mirrors the real telegram_bot.py routing logic without async/Telegram.
         """
         import json as _json_r
-        from datetime import date as _date_r
         text_lower = text.lower()
-        _today_r = str(_date_r.today())
+        _today_r = self._current_date  # use simulation date, not real date.today()
 
         # CURRENT_FLOW intercepts (check first)
+
+        # Dict-format CURRENT_FLOW — golden rule 2x confirm flow
+        if current_flow.strip().startswith("{"):
+            try:
+                _cf_data_r = _json_r.loads(current_flow)
+                if (_cf_data_r.get("flow") == "cascade_awaiting_confirm" and
+                        _cf_data_r.get("pending_golden_rule_confirm", False)):
+                    return self._handle_golden_rule_confirm(text, _cf_data_r)
+            except Exception:
+                pass
+
+        # String-format CURRENT_FLOW intercepts
         if current_flow.startswith("weekly_planning"):
             return "weekly_planning_handler"
         if current_flow.startswith("daily_planning"):
@@ -232,6 +243,12 @@ class CoachSimulator:
                         _df_current_r = (_df_r.get("date") == _today_r)
                     except Exception:
                         pass
+                elif isinstance(_df_envelope_r, str) and _df_envelope_r.strip().startswith("{"):
+                    try:
+                        _df_r = _json_r.loads(_df_envelope_r)
+                        _df_current_r = (_df_r.get("date") == _today_r)
+                    except Exception:
+                        pass
                 if not _df_current_r:
                     self.memory.upsert_coach_state("CURRENT_FLOW", "daily_catchup")
                     return "catch_up_handler"
@@ -239,6 +256,11 @@ class CoachSimulator:
         # Simple keyword classification (mirrors Haiku classifier output for simulation)
         program_keywords = ("programa", "cardio", "nuevo programa", "dejar", "correr",
                             "deload", "bloque", "diseña")
+        # QUESTION: specific data lookups — checked before workout to avoid WORKOUT mis-routing
+        question_keywords = ("cuánto levanté", "cuánto hice", "cuánto pesé", "qué peso usé",
+                             "cuál fue mi", "semana pasada", "la semana pasada", "cuándo fue",
+                             "mi último", "mis últimos", "cuánto deadlift", "cuánto squat",
+                             "cuánto bench", "último entreno")
         workout_keywords = ("squat", "bench", "deadlift", "sets", "entreno", "workout",
                             "levanté", "levante", "cuánto")
         health_keywords = ("codo", "dolor", "fatiga", "sueño", "sleep", "elbow", "pain",
@@ -251,7 +273,39 @@ class CoachSimulator:
             return "session_skip_escalation"
 
         if any(kw in text_lower for kw in program_keywords):
+            # Simulate program_agent LLM call and detect golden rule conflict
+            try:
+                response = self.llm.complete(
+                    mode="program_agent",
+                    system="program_agent",
+                    messages=[{"role": "user", "content": text}]
+                )
+                _gr_signals = ("golden_rule_conflict", "golden_rule_override",
+                               "golden rule", "constitutional")
+                if any(sig in response.lower() for sig in _gr_signals):
+                    _gr_flow = _json_r.dumps({
+                        "flow": "cascade_awaiting_confirm",
+                        "level": "PROGRAM",
+                        "pending_golden_rule_confirm": True,
+                        "confirm_count": 0,
+                        "proposal_summary": text[:100]
+                    })
+                    self.memory.upsert_coach_state("CURRENT_FLOW", _gr_flow)
+                    return "program_agent_golden_rule_conflict"
+            except Exception:
+                pass
             return "program_agent"
+
+        if any(kw in text_lower for kw in question_keywords):
+            try:
+                self.llm.complete(
+                    mode="question_lookup",
+                    system="question_lookup",
+                    messages=[{"role": "user", "content": text}]
+                )
+            except Exception:
+                pass
+            return "question_lookup"
 
         if any(kw in text_lower for kw in health_keywords):
             return "health_agent"
@@ -261,7 +315,52 @@ class CoachSimulator:
 
         return "general_response"
 
-    def _handle_session_skip(self, text: str, coach_state: dict):
+    def _handle_golden_rule_confirm(self, text: str, cf_data: dict) -> str:
+        """
+        Handle the 2x confirmation flow for golden rule overrides.
+        - First non-denial → confirm_count 0→1, update CURRENT_FLOW, return "golden_rule_first_confirm"
+        - Second non-denial → write override_log, clear CURRENT_FLOW, return "golden_rule_override_applied"
+        - Any explicit denial → clear CURRENT_FLOW, return "golden_rule_override_cancelled"
+        """
+        import json as _json_gr
+        text_lower = text.lower().strip()
+        _no_words = {"no", "cancel", "cancela", "cancelar"}
+
+        # Explicit denial
+        if any(w == text_lower or w in text_lower.split() for w in _no_words):
+            self.memory.upsert_coach_state("CURRENT_FLOW", "")
+            return "golden_rule_override_cancelled"
+
+        confirm_count = cf_data.get("confirm_count", 0)
+        if confirm_count < 1:
+            # First confirmation — increment and push back
+            cf_data["confirm_count"] = 1
+            self.memory.upsert_coach_state("CURRENT_FLOW", _json_gr.dumps(cf_data))
+            return "golden_rule_first_confirm"
+        else:
+            # Second confirmation — write override_log and clear flow
+            # get_domain() returns the already-parsed dict (MockMemory parses JSON on read)
+            gr_val = self.memory.get_domain("GOLDEN_RULES")
+            if isinstance(gr_val, dict):
+                gr_data = gr_val
+            elif isinstance(gr_val, str):
+                try:
+                    gr_data = _json_gr.loads(gr_val)
+                except Exception:
+                    gr_data = {"rules": [], "override_log": []}
+            else:
+                gr_data = {"rules": [], "override_log": []}
+            gr_data.setdefault("override_log", [])
+            gr_data["override_log"].append({
+                "rule_id": cf_data.get("proposal_summary", "unknown")[:50],
+                "date": self._current_date,
+                "reason": "2x athlete-confirmed override"
+            })
+            self.memory.upsert_coach_state("GOLDEN_RULES", _json_gr.dumps(gr_data))
+            self.memory.upsert_coach_state("CURRENT_FLOW", "")
+            return "golden_rule_override_applied"
+
+    def _handle_session_skip(self, text: str, coach_state: dict = None):  # noqa: ARG002
         """
         Simulate the escalation path for a session skip message.
         Sets CASCADE_STATE.WEEKLY to AWAITING_USER, DAILY to LOCKED.
@@ -365,6 +464,35 @@ class CoachSimulator:
                     })
                 return
         # Call not found — not necessarily a flaw (call may not have been made)
+
+    def assert_llm_call_message_contains(self, call_key: str, substring: str, msg: str = ""):
+        """
+        Assert that a specific LLM call's system prompt OR user message content contains substring.
+        Used to verify that code-generated signals (skip_patterns, golden_rules) reach the LLM.
+        """
+        for call in self.llm.get_call_log():
+            if call["key"] == call_key:
+                full_system = call.get("system", "")
+                last_msg = call.get("last_user_message", "")
+                if (substring.lower() in full_system.lower() or
+                        substring.lower() in last_msg.lower()):
+                    return
+                # Found the call but substring not in it
+                self.flaws.append({
+                    "type": "llm_call_content_mismatch",
+                    "call_key": call_key,
+                    "expected_substring": substring,
+                    "system_preview": full_system[:300],
+                    "msg": msg or f"LLM call '{call_key}' does not contain expected string '{substring}'"
+                })
+                return
+        # Call was never made — also a flaw
+        self.flaws.append({
+            "type": "llm_call_not_found",
+            "call_key": call_key,
+            "expected_substring": substring,
+            "msg": msg or f"LLM call '{call_key}' was never made"
+        })
 
     def _get_nested(self, domain_path: str) -> Any:
         """Support dot-notation for nested access: 'CASCADE_STATE.DAILY.state'

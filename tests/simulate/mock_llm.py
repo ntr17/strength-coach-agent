@@ -28,11 +28,14 @@ class MockLLM:
         count = self.call_counts.get(mode, 0)
         call_key = f"{mode}_{count}"
         self.call_counts[mode] = count + 1
+        last_msg_content = messages[-1]["content"] if messages else ""
         self.call_log.append({
             "key": call_key,
             "mode": mode,
+            "system": system or "",
             "system_preview": system[:150] if system else "",
-            "last_user_message": messages[-1]["content"][:200] if messages else ""
+            "last_user_message": last_msg_content,  # full, no truncation
+            "messages": messages,
         })
         if call_key not in self.responses:
             available = list(self.responses.keys())

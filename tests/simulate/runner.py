@@ -128,6 +128,12 @@ def run_fixture(fixture_name: str) -> dict:
                         assertion["substring"],
                         assertion.get("msg", "")
                     )
+                elif atype == "assert_llm_call_message_contains":
+                    sim.assert_llm_call_message_contains(
+                        assertion["call_key"],
+                        assertion["substring"],
+                        assertion.get("msg", "")
+                    )
     finally:
         for p in patch_contexts:
             try:
@@ -200,8 +206,8 @@ def run_all(verbose: bool = True) -> list:
             "fixture_01_normal_day": "PASS",        # normal day pipeline works end-to-end
             "fixture_02_session_skip": "PASS",       # cascade correctly routes skip → AWAITING_USER, no premature WEEKLY_INTENT update
             "fixture_03_elbow_pain": "PASS",         # elbow_pain flag propagates daily→weekly→monthly correctly
-            "fixture_04_program_change_cardio": "PASS",  # cardio request doesn't mutate program-level domains
-            "fixture_05_escalation_blocked": "PASS", # LONGTERM_PLAN/ANNUAL_ARC not modified without confirmation
+            "fixture_04_program_change_cardio": "PASS",  # golden rule 2x confirm: override_log written, program domains unchanged
+            "fixture_05_escalation_blocked": "PASS", # golden rule 2x confirm enforced: no fold before 2nd confirm, override_log written
             "fixture_06_false_escalation": "PASS",   # simple query causes no cascade mutation
             "fixture_07_weekly_close": "PASS",       # weekly close produces patterned summary
             "fixture_08_monthly_close": "PASS",      # monthly_eval writes MONTHLY_SUMMARY
@@ -251,8 +257,8 @@ def _make_test(fixture_name: str, expected_verdict: str):
 test_fixture_01_normal_day = _make_test("fixture_01_normal_day", "PASS")
 test_fixture_02_session_skip = _make_test("fixture_02_session_skip", "FAIL")
 test_fixture_03_elbow_pain = _make_test("fixture_03_elbow_pain", "FAIL")
-test_fixture_04_program_change_cardio = _make_test("fixture_04_program_change_cardio", "FAIL")
-test_fixture_05_escalation_blocked = _make_test("fixture_05_escalation_blocked", "FAIL")
+test_fixture_04_program_change_cardio = _make_test("fixture_04_program_change_cardio", "PASS")
+test_fixture_05_escalation_blocked = _make_test("fixture_05_escalation_blocked", "PASS")
 test_fixture_06_false_escalation = _make_test("fixture_06_false_escalation", "PASS")
 test_fixture_07_weekly_close = _make_test("fixture_07_weekly_close", "PASS")
 test_fixture_08_monthly_close = _make_test("fixture_08_monthly_close", "FAIL")

@@ -3994,5 +3994,187 @@ class TestDailyFocusGuard:
         )
 
 
+# =============================================================================
+# TestGoldenRules — Phase 3: _check_golden_rules() and 2x confirm mechanism
+# =============================================================================
+
+class TestGoldenRules:
+
+    def test_safe_defaults_when_no_golden_rules(self):
+        from unittest.mock import patch
+        import cascade_levels
+        with patch("memory.read_coach_state", return_value={}):
+            result = cascade_levels._check_golden_rules()
+        assert result["has_conflict"] is False
+        assert result["conflicted_rules"] == []
+        assert result["total_overrides"] == 0
+
+    def test_detects_conflict_at_3_overrides(self):
+        import json
+        from unittest.mock import patch
+        import cascade_levels
+        rules_data = {
+            "rules": ["Build strength"],
+            "override_log": [
+                {"rule_id": "Build strength", "date": "2026-03-01"},
+                {"rule_id": "Build strength", "date": "2026-03-02"},
+                {"rule_id": "Build strength", "date": "2026-03-03"},
+            ]
+        }
+        cs = {"GOLDEN_RULES": {"summary": json.dumps(rules_data)}}
+        with patch("memory.read_coach_state", return_value=cs):
+            result = cascade_levels._check_golden_rules()
+        assert result["has_conflict"] is True
+        assert "Build strength" in result["conflicted_rules"]
+
+    def test_first_confirm_does_not_write_override_log(self):
+        import json
+        from simulate.mock_memory import MockMemory
+        from simulate.engine import CoachSimulator
+        initial_state = {
+            "coach_state": {
+                "CURRENT_FLOW": json.dumps({
+                    "flow": "cascade_awaiting_confirm",
+                    "pending_golden_rule_confirm": True,
+                    "confirm_count": 0,
+                    "proposal_summary": "running only"
+                }),
+                "GOLDEN_RULES": json.dumps({"rules": ["Build strength"], "override_log": []}),
+            }
+        }
+        class _MockLLM:
+            def get_call_log(self): return []
+        memory = MockMemory(initial_state)
+        sim = CoachSimulator({"scenario_name": "t", "events": [], "assertions": []}, memory, _MockLLM())
+        sim.step({"type": "telegram_message", "text": "sí", "time": "12:00"})
+        gr = memory.get_domain("GOLDEN_RULES")
+        assert len(gr["override_log"]) == 0  # not yet applied
+        cf = memory.get_domain("CURRENT_FLOW")
+        assert cf["confirm_count"] == 1       # incremented
+
+    def test_second_confirm_writes_override_log(self):
+        import json
+        from simulate.mock_memory import MockMemory
+        from simulate.engine import CoachSimulator
+        initial_state = {
+            "coach_state": {
+                "CURRENT_FLOW": json.dumps({
+                    "flow": "cascade_awaiting_confirm",
+                    "pending_golden_rule_confirm": True,
+                    "confirm_count": 1,
+                    "proposal_summary": "running only"
+                }),
+                "GOLDEN_RULES": json.dumps({"rules": ["Build strength"], "override_log": []}),
+            }
+        }
+        class _MockLLM:
+            def get_call_log(self): return []
+        memory = MockMemory(initial_state)
+        sim = CoachSimulator({"scenario_name": "t", "events": [], "assertions": []}, memory, _MockLLM())
+        sim.step({"type": "telegram_message", "text": "confirmo", "time": "12:00"})
+        gr = memory.get_domain("GOLDEN_RULES")
+        assert len(gr["override_log"]) == 1         # applied
+        assert memory.get_domain("CURRENT_FLOW") is None  # cleared
+
+
+# =============================================================================
+# TestSkipCounter — Phase 3: skip_patterns deterministic counter
+# =============================================================================
+
+class TestSkipCounter:
+
+    def _make_sim(self, initial_state):
+        from simulate.mock_memory import MockMemory
+        from simulate.engine import CoachSimulator
+        class _MockLLM:
+            def get_call_log(self): return []
+        memory = MockMemory(initial_state)
+        sim = CoachSimulator({"scenario_name": "t", "events": [], "assertions": []}, memory, _MockLLM())
+        return sim, memory
+
+    def test_check_if_session_planned_today_true(self):
+        from unittest.mock import patch
+        import cascade_levels
+        weekly_state = {"sessions_planned": [{"day": "tuesday", "type": "strength"}]}
+        with patch("cascade_levels.datetime") as mock_dt:
+            mock_dt.utcnow.return_value.strftime.return_value = "Tuesday"
+            result = cascade_levels.check_if_session_planned_today(weekly_state)
+        assert result is True
+
+    def test_check_if_session_planned_today_false_when_rest(self):
+        from unittest.mock import patch
+        import cascade_levels
+        weekly_state = {"sessions_planned": [{"day": "tuesday", "type": "rest"}]}
+        with patch("cascade_levels.datetime") as mock_dt:
+            mock_dt.utcnow.return_value.strftime.return_value = "Tuesday"
+            result = cascade_levels.check_if_session_planned_today(weekly_state)
+        assert result is False
+
+    def test_question_routing_does_not_mutate_domains(self):
+        import json
+        initial_state = {
+            "coach_state": {
+                "CURRENT_FLOW": "",
+                "DAILY_FOCUS": json.dumps({"date": "2026-03-23", "session": "Day 1"}),
+                "WEEKLY_INTENT": json.dumps({"week": 7, "focus": "Accumulation"}),
+            }
+        }
+        sim, memory = self._make_sim(initial_state)
+        memory.reset_mutation_log()
+        coach_state = memory.read_coach_state()
+        route = sim._classify_and_route("¿cuánto levanté en deadlift la semana pasada?", "", coach_state)
+        assert "question" in route
+        assert not memory.was_mutated("WEEKLY_INTENT")
+        assert not memory.was_mutated("DAILY_FOCUS")
+
+
+# =============================================================================
+# TestQuestionIntent — Phase 3: QUESTION routing
+# =============================================================================
+
+class TestQuestionIntent:
+
+    def _make_sim_with_daily_focus(self):
+        import json
+        from simulate.mock_memory import MockMemory
+        from simulate.engine import CoachSimulator
+        from simulate.mock_llm import MockLLM
+        initial_state = {
+            "coach_state": {
+                "CURRENT_FLOW": "",
+                "DAILY_FOCUS": json.dumps({"date": "2026-03-23", "session": "Day 1"}),
+                "WEEKLY_INTENT": json.dumps({"week": 7}),
+            }
+        }
+        llm = MockLLM({"question_lookup_0": "Deadlift semana 6: 140kg 3x3."})
+        memory = MockMemory(initial_state)
+        sim = CoachSimulator({"scenario_name": "t", "events": [], "assertions": []}, memory, llm)
+        return sim, memory, llm
+
+    def test_question_routes_to_question_lookup_not_workout(self):
+        sim, memory, llm = self._make_sim_with_daily_focus()
+        coach_state = memory.read_coach_state()
+        route = sim._classify_and_route(
+            "¿cuánto levanté en deadlift la semana pasada?", "", coach_state
+        )
+        assert route == "question_lookup"
+
+    def test_question_lookup_uses_question_mode(self):
+        sim, memory, llm = self._make_sim_with_daily_focus()
+        coach_state = memory.read_coach_state()
+        sim._classify_and_route("¿cuánto levanté en deadlift la semana pasada?", "", coach_state)
+        assert llm.was_called_with_mode("question_lookup")
+        assert len(llm.get_calls_for_mode("workout_agent")) == 0
+
+    def test_question_does_not_mutate_cascade_domains(self):
+        sim, memory, llm = self._make_sim_with_daily_focus()
+        memory.reset_mutation_log()
+        coach_state = memory.read_coach_state()
+        sim._classify_and_route("¿cuánto levanté en deadlift la semana pasada?", "", coach_state)
+        assert not memory.was_mutated("WEEKLY_INTENT")
+        assert not memory.was_mutated("ANNUAL_ARC")
+        assert not memory.was_mutated("CURRENT_FLOW")
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

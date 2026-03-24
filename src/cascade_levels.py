@@ -56,6 +56,61 @@ SKIP_COUNT_FOR_MONTHLY_ESCALATION = 3  # skips in one week triggers MONTHLY esca
 
 
 # ---------------------------------------------------------------------------
+# Constitutional helpers (shared across all eval levels)
+# ---------------------------------------------------------------------------
+
+def _check_golden_rules() -> dict:
+    """
+    Reads GOLDEN_RULES from memory and checks for constitutional violations.
+
+    Returns:
+      - "has_conflict": bool — True if any rule_id overridden 3+ times
+      - "conflicted_rules": list of rule_ids overridden >= 3 times
+      - "override_log": the raw override log list
+      - "total_overrides": int — total entries in override_log
+    Never raises — returns safe defaults on any error.
+    """
+    _safe = {"has_conflict": False, "conflicted_rules": [], "override_log": [], "total_overrides": 0}
+    try:
+        from memory import read_coach_state as _rcs_gr
+        cs = _rcs_gr()
+        raw = (cs.get("GOLDEN_RULES", {}).get("summary", "") or
+               cs.get("GOLDEN_RULES", {}).get("Summary", ""))
+        if not raw:
+            return _safe
+        rules_data = json.loads(raw)
+        override_log = rules_data.get("override_log", [])
+        override_counts: dict = {}
+        for entry in override_log:
+            rule_id = entry.get("rule_id", "unknown")
+            override_counts[rule_id] = override_counts.get(rule_id, 0) + 1
+        conflicted = [rid for rid, cnt in override_counts.items() if cnt >= 3]
+        return {
+            "has_conflict": bool(conflicted),
+            "conflicted_rules": conflicted,
+            "override_log": override_log,
+            "total_overrides": len(override_log),
+        }
+    except Exception:
+        return _safe
+
+
+def check_if_session_planned_today(weekly_state: dict) -> bool:
+    """
+    Returns True if a training session was scheduled for today according to
+    WEEKLY_INTENT's sessions_planned field. Returns False for rest days,
+    travel days, or when sessions_planned is absent.
+    """
+    today_name = datetime.utcnow().strftime("%A").lower()
+    sessions = weekly_state.get("sessions_planned", [])
+    return any(
+        s.get("day", "").lower() == today_name and
+        s.get("type") not in ("rest", "travel", None)
+        for s in sessions
+    )
+
+
+# ---------------------------------------------------------------------------
 # close_day()
 # ---------------------------------------------------------------------------
 
@@ -76,6 +131,7 @@ def close_day(dry_run: bool = False) -> Optional[dict]:
         read_coach_state, upsert_coach_state,
         read_telegram_log, read_health_log, read_lift_history,
         read_summary_list, append_summary,
+        read_single_summary, write_single_summary,
     )
     from cascade_state import (
         set_level_state, initiate_escalation,
@@ -330,6 +386,31 @@ Rules:
     except Exception as _flag_err:
         print(f"  close_day(): Flag harvest failed (non-fatal): {_flag_err}")
 
+    # --- 3d. Update skip_patterns counter in WEEKLY_INTENT ---
+    # Deterministic redundancy layer for behavioral pattern detection (supplements LLM).
+    # Increments consecutive-skip counter for today's weekday if a session was planned
+    # but not completed. Resets to 0 when session is completed. weekly_eval() reads this
+    # and injects a code-verified signal into its LLM prompt when streak >= 3.
+    try:
+        _today_weekday_sp = datetime.utcnow().strftime("%A").lower()
+        _wi_sp = read_single_summary("WEEKLY_INTENT") or {}
+        if _wi_sp:
+            _session_planned_sp = check_if_session_planned_today(_wi_sp)
+            _session_completed_sp = summary.get("session", {}).get("completed", False)
+            if _session_planned_sp:
+                # Only touch skip_patterns when the day was in the schedule
+                _skip_patterns_sp = dict(_wi_sp.get("skip_patterns", {}))
+                if not _session_completed_sp:
+                    _skip_patterns_sp[_today_weekday_sp] = _skip_patterns_sp.get(_today_weekday_sp, 0) + 1
+                    print(f"  close_day(): {_today_weekday_sp} skip streak → "
+                          f"{_skip_patterns_sp[_today_weekday_sp]}")
+                else:
+                    _skip_patterns_sp[_today_weekday_sp] = 0
+                _wi_sp["skip_patterns"] = _skip_patterns_sp
+                write_single_summary("WEEKLY_INTENT", _wi_sp)
+    except Exception as _sp_err:
+        print(f"  close_day(): skip_patterns update failed (non-fatal): {_sp_err}")
+
     # --- 4. Send end-of-day Telegram message ---
     if not dry_run:
         try:
@@ -380,7 +461,7 @@ def weekly_eval(dry_run: bool = False) -> Optional[dict]:
     """
     import anthropic
     from config import ANTHROPIC_API_KEY, CLAUDE_HAIKU
-    from memory import read_summary_list, append_summary, read_coach_state
+    from memory import read_summary_list, append_summary, read_coach_state, read_single_summary, write_single_summary
     from cascade_state import set_level_state
 
     today = date.today()
@@ -401,6 +482,32 @@ def weekly_eval(dry_run: bool = False) -> Optional[dict]:
             break
 
     daily_json = json.dumps(daily_summaries, indent=2, ensure_ascii=False)
+
+    # --- Golden Rules alert (prompt decoration only — no gate) ---
+    _gr_weekly = _check_golden_rules()
+    _gr_warning_weekly = ""
+    if _gr_weekly["has_conflict"]:
+        _gr_warning_weekly = (
+            f"\nCONSTITUTIONAL ALERT: The following golden rules have been overridden "
+            f"3+ times: {', '.join(_gr_weekly['conflicted_rules'])}. "
+            f"Flag any patterns that conflict with these rules in your weekly summary.\n"
+        )
+
+    # --- Skip patterns signal (code-verified behavioral counter) ---
+    _skip_signal_weekly = ""
+    try:
+        _wi_sp_w = read_single_summary("WEEKLY_INTENT") or {}
+        _sp_w = _wi_sp_w.get("skip_patterns", {})
+        _flagged_w = [(day, cnt) for day, cnt in _sp_w.items() if cnt >= 3]
+        if _flagged_w:
+            _flag_lines_w = [f"  {day}: {cnt} consecutive skips" for day, cnt in _flagged_w]
+            _skip_signal_weekly = (
+                "\nBEHAVIORAL PATTERN DETECTED (code-verified):\n"
+                + "\n".join(_flag_lines_w)
+                + "\nRecommend flagging in weekly summary and markov_note_for_next_week.\n"
+            )
+    except Exception:
+        pass
 
     set_level_state("WEEKLY", "REASONING")
 
@@ -439,7 +546,7 @@ Rules:
 - avg_effort_quality: majority vote across days
 - Recurring concern: only if same issue appeared 3+ times in the week
 - markov_note_for_next_week must be specific and actionable — no generic summaries
-- Return ONLY the JSON object."""
+- Return ONLY the JSON object.""" + _gr_warning_weekly + _skip_signal_weekly
 
     if dry_run:
         print(f"  [DRY RUN] weekly_eval() would evaluate {len(daily_summaries)} daily summaries")
@@ -469,6 +576,15 @@ Rules:
     set_level_state("WEEKLY", "COMMITTING")
     append_summary("WEEKLY_SUMMARIES", summary, max_keep=8)
     print(f"  weekly_eval(): Week {week_num} summary committed — {summary.get('training', {}).get('sessions_done', '?')} sessions")
+
+    # Reset skip_patterns for the new week (consecutive counter resets at week boundary)
+    try:
+        _wi_reset = read_single_summary("WEEKLY_INTENT") or {}
+        if _wi_reset:
+            _wi_reset["skip_patterns"] = {}
+            write_single_summary("WEEKLY_INTENT", _wi_reset)
+    except Exception:
+        pass
 
     set_level_state("WEEKLY", "IDLE")
     return summary
@@ -505,6 +621,16 @@ def monthly_eval(dry_run: bool = False, escalation_context: Optional[dict] = Non
 
     annual = read_single_summary("ANNUAL_SUMMARY") or {}
     weekly_json = json.dumps(weekly_summaries, indent=2, ensure_ascii=False)
+
+    # --- Golden Rules alert (prompt decoration only) ---
+    _gr_monthly = _check_golden_rules()
+    _gr_warning_monthly = ""
+    if _gr_monthly["has_conflict"]:
+        _gr_warning_monthly = (
+            f"\nCONSTITUTIONAL ALERT: The following golden rules have been overridden "
+            f"3+ times: {', '.join(_gr_monthly['conflicted_rules'])}. "
+            f"Flag this in your monthly patterns summary.\n"
+        )
 
     set_level_state("MONTHLY", "REASONING")
 
@@ -558,7 +684,7 @@ Produce a JSON monthly summary:
   "escalation_adjustments": ["<list of specific program changes being proposed, or empty>"]
 }}
 
-Return ONLY the JSON object."""
+Return ONLY the JSON object.""" + _gr_warning_monthly
 
     if dry_run:
         print(f"  [DRY RUN] monthly_eval() would evaluate {len(weekly_summaries)} weekly summaries")
@@ -880,21 +1006,12 @@ def longterm_eval(dry_run: bool = False) -> Optional[dict]:
     existing_longterm = read_single_summary("LONGTERM_PLAN")
     athlete_goals = coach_state.get("ANNUAL_ARC", {}).get("summary", "")
 
-    # Check for constitutional violations
-    constitutional_issue = False
-    try:
-        rules_data = json.loads(golden_rules_raw) if golden_rules_raw else {}
-        override_log = rules_data.get("override_log", [])
-        # Count overrides per rule
-        override_counts: dict = {}
-        for override in override_log:
-            rule_id = override.get("rule_id", "unknown")
-            override_counts[rule_id] = override_counts.get(rule_id, 0) + 1
-        if any(count >= 3 for count in override_counts.values()):
-            constitutional_issue = True
-            print(f"  longterm_eval(): Constitutional issue — rule overridden 3+ times.")
-    except Exception:
-        pass
+    # Check for constitutional violations using shared helper
+    _gr_longterm = _check_golden_rules()
+    constitutional_issue = _gr_longterm["has_conflict"]
+    if constitutional_issue:
+        print(f"  longterm_eval(): Constitutional issue — rules overridden 3+ times: "
+              f"{_gr_longterm['conflicted_rules']}")
 
     set_level_state("LONGTERM", "REASONING")
 

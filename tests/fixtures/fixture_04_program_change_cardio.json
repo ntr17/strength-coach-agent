@@ -1,6 +1,6 @@
 {
   "scenario_name": "fixture_04_program_change_cardio",
-  "description": "Intraday message: 'quiero añadir cardio al programa'. Then next-day morning brief. Critical: WEEKLY_INTENT/ANNUAL_ARC must NOT change before user confirms. Morning brief must NOT mention cardio.",
+  "description": "Athlete wants to add cardio. program_agent flags golden rule conflict. Must NOT mutate program domains until 2x confirmed. Tests: dict CURRENT_FLOW, 2x confirm mechanism, override_log written on second confirm.",
   "initial_state": {
     "coach_state": {
       "CASCADE_STATE": {
@@ -26,21 +26,29 @@
   },
   "events": [
     {"type": "telegram_message", "text": "quiero añadir cardio al programa", "time": "15:00"},
+    {"type": "telegram_message", "text": "sí quiero", "time": "15:02"},
+    {"type": "telegram_message", "text": "confirmo", "time": "15:04"},
     {"type": "morning_brief"}
   ],
   "mock_llm_responses": {
-    "program_agent_0": "{\"decision\": \"PENDING_USER_CLARIFICATION\", \"reasoning\": \"Cardio addition could align with health/longevity rule but needs specifics. Zone 2 2x/week is different from daily running. Asking for clarification before any program change.\", \"response_to_athlete\": \"Interesante. ¿Estás pensando en Zone 2 (2x/semana, 30min) o algo más intenso como correr daily? Antes de modificar el programa necesito entender el volumen.\", \"pending_proposal\": {\"type\": \"cardio_addition\", \"status\": \"AWAITING_USER_CLARIFICATION\", \"details\": \"User wants to add cardio — type and volume TBD\"}}",
+    "program_agent_0": "{\"decision\": \"GOLDEN_RULE_CONFLICT\", \"golden_rule_conflict\": true, \"conflicted_rule\": \"Build strength and muscle\", \"reasoning\": \"Adding significant cardio volume reduces strength gains and conflicts with primary goal. Requires explicit confirmation.\", \"response_to_athlete\": \"Añadir cardio puede impactar tu progresión de fuerza y va contra tu objetivo primario de 120kg squat. Confirmas que quieres proceder?\"}",
     "morning_brief_0": "Today is Day 2 — Deadlift + OHP. Target RPE 7.5. Focus on hip hinge on deadlifts."
   },
   "assertions": [
     {
       "type": "assert_no_change",
       "domains": ["WEEKLY_INTENT", "ANNUAL_ARC", "LONGTERM_PLAN"],
-      "msg": "No program-level domains should change before user confirms cardio addition"
+      "msg": "No program-level domains should change — only GOLDEN_RULES.override_log should be written"
+    },
+    {
+      "type": "assert_state",
+      "domain": "GOLDEN_RULES.override_log",
+      "check": "non_empty",
+      "msg": "After 2x confirm, GOLDEN_RULES.override_log must contain at least one entry"
     }
   ],
   "expected_flaws": [
-    "If ANNUAL_ARC or WEEKLY_INTENT was modified: agent auto-approved cardio without user confirmation — pre-confirm guard for program changes is missing",
-    "If morning_brief LLM call (morning_brief_0) system_preview contains 'cardio': pending cardio request leaked into morning brief context — context isolation failure in _build_bot_context()"
+    "If ANNUAL_ARC or WEEKLY_INTENT was modified: agent auto-approved cardio without 2x confirmation",
+    "If GOLDEN_RULES.override_log is empty after 2x confirm: 2x confirm mechanism failed to write override_log"
   ]
 }

@@ -11,7 +11,7 @@
         "LONGTERM": {"state": "IDLE", "locked_by": null, "context": {}}
       },
       "CURRENT_FLOW": "",
-      "WEEKLY_INTENT": "{\"week\": 6, \"focus\": \"Accumulation block. Thursday is Day 3.\"}",
+      "WEEKLY_INTENT": "{\"week\": 6, \"focus\": \"Accumulation block. Thursday is Day 3.\", \"skip_patterns\": {\"thursday\": 3}, \"sessions_planned\": [{\"day\": \"thursday\", \"type\": \"strength\"}]}",
       "MONTHLY_INTENT": "{\"month\": \"2026-03\", \"focus\": \"Build squat\"}",
       "ANNUAL_ARC": "{\"year\": 2026, \"primary_goal\": \"120kg squat\"}",
       "DAILY_SUMMARIES": [
@@ -46,10 +46,15 @@
       "domain": "WEEKLY_SUMMARIES",
       "check": "non_empty",
       "msg": "weekly_eval() must produce a WEEKLY_SUMMARY"
+    },
+    {
+      "type": "assert_llm_call_message_contains",
+      "call_key": "weekly_eval_0",
+      "substring": "BEHAVIORAL PATTERN DETECTED",
+      "msg": "weekly_eval prompt must contain the code-verified skip signal when thursday skip_patterns >= 3"
     }
   ],
   "expected_flaws": [
-    "ARCHITECTURE RISK: thursday_skip_count detection is LLM-only (no code counter). The mock LLM response includes the pattern because we wrote it that way. In production, if the LLM omits the Thursday note from its summary, the pattern is permanently lost — no code fallback exists.",
-    "RECOMMENDATION: Add deterministic code counter for recurring day-skips in PENDING_FLAGS domain (Phase 3 work)."
+    "ARCHITECTURE NOTE: skip_patterns counter is now code-verified (deterministic). Pattern will persist even if LLM omits it from narrative. Code counter + LLM narrative = dual redundancy."
   ]
 }

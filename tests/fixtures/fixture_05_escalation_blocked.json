@@ -1,6 +1,6 @@
 {
   "scenario_name": "fixture_05_escalation_blocked",
-  "description": "Three rounds: athlete insists on quitting strength training to only run. Agent must push back on golden rule conflict. Must NOT fold after single insistence (round 2). Requires 2x explicit confirmation before adapting. If it adapts, override must be logged.",
+  "description": "Three rounds: athlete insists on quitting strength training to only run. Event 2: program_agent flags golden rule conflict → sets dict CURRENT_FLOW. Event 3: first confirm (confirm_count 0→1). Event 4: second confirm → override_log written. Tests: 2x confirm enforcement, LONGTERM_PLAN/ANNUAL_ARC never mutated, override_log written only after 2nd confirm.",
   "initial_state": {
     "coach_state": {
       "CASCADE_STATE": {
@@ -16,6 +16,7 @@
       "LONGTERM_PLAN": "{\"vision\": \"Strength + aesthetics. Compete in powerlifting.\", \"phases\": [{\"name\": \"Strength foundation\", \"status\": \"active\"}]}",
       "GOLDEN_RULES": "{\"rules\": [\"Build strength and muscle\", \"Health and longevity — no injury grinding\", \"Maintain aesthetic physique\"], \"override_log\": []}",
       "MONTHLY_INTENT": "{\"month\": \"2026-03\", \"focus\": \"Squat to 105kg e1RM\"}",
+      "DAILY_FOCUS": "{\"date\": \"2026-03-23\", \"session\": \"Day 1\", \"effort_level\": \"normal\"}",
       "DAILY_SUMMARIES": []
     },
     "lift_history": [],
@@ -25,23 +26,27 @@
   "events": [
     {"type": "telegram_message", "text": "quiero dejar de hacer fuerza y solo correr", "time": "20:00"},
     {"type": "telegram_message", "text": "en serio, quiero correr solo", "time": "20:05"},
-    {"type": "telegram_message", "text": "es lo que quiero hacer", "time": "20:10"}
+    {"type": "telegram_message", "text": "es lo que quiero hacer", "time": "20:10"},
+    {"type": "telegram_message", "text": "confirmo", "time": "20:12"}
   ],
   "mock_llm_responses": {
     "program_agent_0": "{\"decision\": \"REJECT\", \"reasoning\": \"Running-only conflicts with golden rules: Build strength and muscle, Maintain aesthetic physique. Running-only body loses muscle mass and conflicts with stated long-term goals.\", \"response_to_athlete\": \"Entiendo que quieres más cardio, pero dejar la fuerza completamente conflicta con tus objetivos declarados: 120kg squat y mantener masa muscular. Un programa solo de running te llevaría a perder músculo. Propuesta: mantener 2 días de fuerza y añadir 2 días de carrera — ¿funciona eso?\"}",
-    "program_agent_1": "{\"decision\": \"REJECT\", \"reasoning\": \"User insisting. Still conflicts with golden rules. Proposing minimum viable compromise before accepting.\", \"response_to_athlete\": \"Escucha, entiendo la insistencia. Antes de cambiar algo: ¿estás dispuesto a considerar 2 días de fuerza + carrera? Si realmente quieres solo running, necesito que lo confirmes explícitamente porque va contra lo que acordamos en tu plan anual.\"}",
-    "program_agent_2": "{\"decision\": \"CONDITIONAL_ACCEPT\", \"reasoning\": \"User has confirmed twice. Accepting with logged golden rule override. Minimum viable: 1 strength day maintained.\", \"response_to_athlete\": \"De acuerdo, lo apunto. Esto va contra tu plan original de fuerza. Lo registro como override explícito. Propongo mantener al menos 1 día de sentadilla para no perder todo el trabajo del año. ¿Confirmas?\", \"golden_rule_override\": {\"rule\": \"Build strength and muscle\", \"reason\": \"User explicit 2x override\", \"date\": \"2026-03-23\"}}"
+    "program_agent_1": "{\"decision\": \"REJECT\", \"golden_rule_conflict\": true, \"conflicted_rule\": \"Build strength and muscle\", \"reasoning\": \"User insisting. Still conflicts with golden rules. Flagging for explicit 2x confirmation before any change is accepted.\", \"response_to_athlete\": \"Escucha, entiendo la insistencia. Esto va directamente contra tu regla de oro: Build strength and muscle. Para cambiar algo así necesito que lo confirmes dos veces. ¿Confirmas que quieres abandonar el entrenamiento de fuerza?\"}"
   },
   "assertions": [
     {
       "type": "assert_no_change",
       "domains": ["LONGTERM_PLAN", "ANNUAL_ARC"],
-      "msg": "After round 2 (single insistence), LONGTERM_PLAN and ANNUAL_ARC must NOT have been modified"
+      "msg": "LONGTERM_PLAN and ANNUAL_ARC must NEVER be modified — only GOLDEN_RULES.override_log is written"
+    },
+    {
+      "type": "assert_state",
+      "domain": "GOLDEN_RULES.override_log",
+      "check": "non_empty",
+      "msg": "After 2x confirm, GOLDEN_RULES.override_log must contain at least one entry"
     }
   ],
   "expected_flaws": [
-    "BUG: _check_golden_rules() not built — agent has no mechanism to check golden rules before accepting changes",
-    "BUG: No 2x-confirm mechanism — agent may accept goal change after single insistence (round 2) without requiring explicit second confirmation",
-    "If LONGTERM_PLAN or ANNUAL_ARC mutated after event 2 (round 2): single-insistence fold detected — 2x-confirm gate is missing"
+    "If LONGTERM_PLAN or ANNUAL_ARC was mutated: agent folded without 2x confirmation — golden rule guard insufficient"
   ]
 }

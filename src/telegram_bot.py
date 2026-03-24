@@ -1444,6 +1444,11 @@ def _classify_intent(message: str) -> str:
                 "'workout done', 'just got done', 'finished my workout', 'salí del gym', "
                 "'terminé el entreno', 'acabo de entrenar', 'terminé de entrenar', "
                 "'acabo de salir', 'terminé la sesión'\n"
+                "QUESTION — athlete asking for a specific historical data point or fact: "
+                "lift history, PRs, weights used on a date, e1RM values, program details, schedule info. "
+                "Key signals: 'cuánto', 'cuándo', 'qué peso', 'cuál fue', 'último', "
+                "'la semana pasada', 'hace X semanas', 'cuántas series', 'qué hice', 'mi récord'. "
+                "NOT advice about what to do, substitutions, or session planning — those are WORKOUT.\n"
                 "WORKOUT — questions about today's session, exercise substitutions, sets/reps/weights, "
                 "fatigue during training, skipping/modifying a session\n"
                 "HEALTH — nutrition, recovery, sleep, blood tests, HRV, injury/pain management, supplements\n"
@@ -1456,17 +1461,56 @@ def _classify_intent(message: str) -> str:
                 "GENERAL — everything else: progress updates, checking in, motivation, life context, "
                 "adding notes or comments to the sheet, simple weight/reps tweaks, anything that is NOT "
                 "a full program redesign\n\n"
-                "Reply with exactly one word: ENDSESSION, WORKOUT, HEALTH, PROGRAM, META, or GENERAL."
+                "Reply with exactly one word: ENDSESSION, QUESTION, WORKOUT, HEALTH, PROGRAM, META, or GENERAL."
             ),
             messages=[{"role": "user", "content": message}],
         )
         intent = result.content[0].text.strip().upper()
-        if intent in ("ENDSESSION", "WORKOUT", "HEALTH", "PROGRAM", "META", "GENERAL"):
+        if intent in ("ENDSESSION", "QUESTION", "WORKOUT", "HEALTH", "PROGRAM", "META", "GENERAL"):
             return intent
         return "GENERAL"
     except Exception as e:
         print(f"[Router] Classification failed (defaulting to GENERAL): {e}")
         return "GENERAL"
+
+
+async def _handle_data_query(user_message: str, coach_state: dict) -> str:
+    """
+    Lightweight data lookup for QUESTION intent.
+    Uses Haiku only — no tool-use loop, no Google Sheets direct read.
+    Answers from in-memory summaries only. If data is absent, says so explicitly.
+    """
+    import json as _json_dq
+    from memory import read_summary_list as _rsl_dq, read_single_summary as _rss_dq
+
+    weekly_summaries = _rsl_dq("WEEKLY_SUMMARIES", limit=4)
+    monthly_summaries = _rsl_dq("MONTHLY_SUMMARIES", limit=1)
+    strength_proj = _rss_dq("STRENGTH_PROJECTIONS")
+    weekly_intent_raw = (coach_state.get("WEEKLY_INTENT", {}).get("summary", "") or
+                         coach_state.get("WEEKLY_INTENT", {}).get("Summary", ""))
+
+    context_text = _json_dq.dumps({
+        "weekly_summaries_last4": weekly_summaries,
+        "monthly_summary_last1": monthly_summaries[-1] if monthly_summaries else {},
+        "strength_projections": strength_proj,
+        "current_week_intent": weekly_intent_raw,
+    }, indent=2, ensure_ascii=False)[:3000]
+
+    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+    result = client.messages.create(
+        model=HAIKU_MODEL,
+        max_tokens=200,
+        system=(
+            "You are a data lookup assistant for a strength coach system. "
+            "The athlete asked a specific factual question. Answer it directly from the "
+            "context provided. If the data is not in the context, say so explicitly and "
+            "suggest where to find it. Do not give training advice. Do not suggest program "
+            "changes. Answer the question only. Keep answer under 80 words."
+        ),
+        messages=[{"role": "user", "content": f"Context:\n{context_text}\n\nQuestion: {user_message}"}],
+        metadata={"mode": "question_lookup"},
+    )
+    return result.content[0].text.strip()
 
 
 def _parse_rpe_reply(text: str, exercises: list) -> dict:
@@ -2171,12 +2215,55 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     print(f"[Router] Intent: {intent} | Message: {user_text[:60]}")
 
     if intent == "PROGRAM":
+        # Constitutional check — prepend warning to context if rules have been overridden
+        try:
+            from cascade_levels import _check_golden_rules as _cgr_p
+            _gr_p = _cgr_p()
+            _gr_note_p = ""
+            if _gr_p["has_conflict"]:
+                _gr_note_p = (
+                    f"CONSTITUTIONAL ALERT: The following golden rules have been overridden "
+                    f"{_gr_p['total_overrides']} times: {', '.join(_gr_p['conflicted_rules'])}. "
+                    f"Flag any proposal that conflicts with these rules and require explicit "
+                    f"confirmation before applying.\n\n"
+                )
+        except Exception:
+            _gr_note_p = ""
+
         ctx = _build_bot_context()
+        if _gr_note_p:
+            ctx = _gr_note_p + ctx
         try:
             from program_agent import respond as program_respond
             await update.message.reply_text("Thinking about your program... give me 30 seconds.")
             await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
             response = program_respond(user_text, ctx)
+
+            # Detect golden rule conflict flag in response → require 2x confirmation
+            _gr_conflict_p = (
+                "golden rule" in response.lower() or
+                "constitutional" in response.lower() or
+                '"golden_rule_conflict"' in response or
+                '"golden_rule_override"' in response
+            )
+            if _gr_conflict_p:
+                try:
+                    import json as _json_grp
+                    from datetime import datetime as _dt_grp
+                    from memory import upsert_coach_state as _ucs_grp
+                    _gr_flow_p = _json_grp.dumps({
+                        "flow": "cascade_awaiting_confirm",
+                        "level": "PROGRAM",
+                        "pending_golden_rule_confirm": True,
+                        "confirm_count": 0,
+                        "proposal_summary": user_text[:80],
+                        "timestamp": _dt_grp.utcnow().isoformat(),
+                    })
+                    _ucs_grp("CURRENT_FLOW", _gr_flow_p, "HIGH")
+                    print(f"  [GoldenRuleConflict] Program proposal conflicts — 2x confirm required.")
+                except Exception as _grp_err:
+                    print(f"  [GoldenRuleConflict] Failed to set flow: {_grp_err}")
+
             if len(response) > 4000:
                 await update.message.reply_text(response[:4000])
                 await update.message.reply_text(response[4000:])
@@ -2197,6 +2284,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             return
         except Exception as e:
             print(f"[HealthToolUse] Failed (falling back): {e}")
+
+    elif intent == "QUESTION":
+        try:
+            response = await _handle_data_query(user_text, coach_state)
+            await update.message.reply_text(response)
+            _log_message("OUT", response)
+            return
+        except Exception as e:
+            print(f"[QuestionLookup] Failed (falling back to GENERAL): {e}")
 
     elif intent == "WORKOUT":
         try:
@@ -2258,14 +2354,81 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         print(f"  [RPE intercept] Non-fatal: {_rpe_err}")
 
     # Fix C: Cascade confirmation routing
-    # If CURRENT_FLOW = "cascade_awaiting_confirm | LEVEL | DATE | type"
-    # and athlete says "confirm" / "yes" / "ok" → cascade down + execute
+    # Handles two shapes:
+    #   1. String: "cascade_awaiting_confirm | LEVEL | DATE | type"
+    #   2. Dict JSON: {"flow": "cascade_awaiting_confirm", "pending_golden_rule_confirm": true, ...}
     try:
         from datetime import date as _date2
         _today_str2 = str(_date2.today())
         from memory import read_coach_state as _rcs2, upsert_coach_state as _ucs2
         _cs2 = _rcs2()
         _flow2 = _cs2.get("CURRENT_FLOW", {}).get("Summary", "") or _cs2.get("CURRENT_FLOW", {}).get("summary", "")
+        # Case A: dict format — golden rule 2x confirm flow
+        if _flow2 and _flow2.strip().startswith("{"):
+            try:
+                import json as _json_gr_detect
+                _gr_cf_data = _json_gr_detect.loads(_flow2)
+                if (_gr_cf_data.get("flow") == "cascade_awaiting_confirm" and
+                        _gr_cf_data.get("pending_golden_rule_confirm", False)):
+                    import json as _json_gr2
+                    from memory import upsert_coach_state as _ucs_gr2, read_coach_state as _rcs_gr2
+                    _confirm_count_gr2 = _gr_cf_data.get("confirm_count", 0)
+                    _proposal_gr2 = _gr_cf_data.get("proposal_summary", "unknown")
+                    _yes_gr2 = {"sí", "si", "yes", "ok", "confirmo", "adelante"}
+                    _no_gr2 = {"no", "cancel", "cancela", "cancelar"}
+                    _lower_gr2 = user_text.lower().strip()
+                    if any(w in _lower_gr2 for w in _no_gr2) or _lower_gr2 in _no_gr2:
+                        _ucs_gr2("CURRENT_FLOW", "", "LOW")
+                        await update.message.reply_text("Ok, cambio cancelado. El plan original se mantiene.")
+                        _log_message("OUT", "golden rule override cancelled")
+                        return
+                    if any(w in _lower_gr2 for w in _yes_gr2) or _lower_gr2 in _yes_gr2:
+                        if _confirm_count_gr2 < 1:
+                            _gr_cf_data["confirm_count"] = 1
+                            _ucs_gr2("CURRENT_FLOW", _json_gr2.dumps(_gr_cf_data), "HIGH")
+                            _pushback_gr2 = (
+                                f"Esto entra en conflicto con tus golden rules. "
+                                f"Propuesta: '{_proposal_gr2}'. "
+                                f"¿Confirmas que quieres proceder igualmente? "
+                                f"Responde 'confirmo' para aplicar el cambio."
+                            )
+                            await update.message.reply_text(_pushback_gr2)
+                            _log_message("OUT", _pushback_gr2)
+                        else:
+                            # Second confirmation — write override_log, clear flow
+                            try:
+                                from memory import write_single_summary as _wss_gr2
+                                from datetime import datetime as _dt_gr2
+                                _cs_gr2 = _rcs_gr2()
+                                _gr_raw2 = (_cs_gr2.get("GOLDEN_RULES", {}).get("summary", "") or
+                                            _cs_gr2.get("GOLDEN_RULES", {}).get("Summary", ""))
+                                _gr_data2 = (_json_gr2.loads(_gr_raw2) if _gr_raw2
+                                             else {"rules": [], "override_log": []})
+                                _gr_data2.setdefault("override_log", []).append({
+                                    "rule_id": "user_confirmed_conflict",
+                                    "timestamp": _dt_gr2.utcnow().isoformat(),
+                                    "proposal_summary": _proposal_gr2,
+                                    "confirmed_by_user": True,
+                                })
+                                _wss_gr2("GOLDEN_RULES", _gr_data2)
+                            except Exception as _gr2_err:
+                                print(f"  [GoldenRuleConfirm] override_log write failed: {_gr2_err}")
+                            _ucs_gr2("CURRENT_FLOW", "", "LOW")
+                            await update.message.reply_text(
+                                "Confirmado. El cambio ha sido registrado y las golden rules actualizadas."
+                            )
+                            _log_message("OUT", "golden rule override confirmed and logged")
+                        return
+                    else:
+                        await update.message.reply_text(
+                            "Por favor responde 'confirmo' para aplicar el cambio o 'no' para cancelar."
+                        )
+                        _log_message("OUT", "golden rule confirm - unclear")
+                        return
+            except (json.JSONDecodeError if "json" in dir() else Exception):
+                pass
+
+        # Case B: string format — standard cascade confirmation
         if _flow2 and _flow2.startswith(f"cascade_awaiting_confirm | "):
             _confirm_words = {"confirm", "yes", "ok", "go ahead", "apply", "do it", "confirmed", "sí", "si", "adelante"}
             if any(w in user_text.lower() for w in _confirm_words):
