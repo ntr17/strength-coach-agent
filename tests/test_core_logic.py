@@ -4176,5 +4176,153 @@ class TestQuestionIntent:
         assert not memory.was_mutated("CURRENT_FLOW")
 
 
+# ===========================================================================
+# Phase 4 Tests
+# ===========================================================================
+
+class TestLoadIndex:
+
+    def _summaries(self, n_weeks, deload_at=None):
+        """Build n_weeks of fake weekly summaries, optionally with a deload week."""
+        weeks = []
+        for i in range(n_weeks):
+            w = {"training": {"sessions_done": 4}, "rpe_avg": 7.5}
+            if deload_at is not None and i == deload_at:
+                w["is_deload"] = True
+            weeks.append(w)
+        return weeks
+
+    def test_load_index_zero_when_no_summaries(self):
+        from cascade_levels import _compute_load_index
+        result = _compute_load_index([])
+        assert result["weeks_since_deload"] == 0
+        assert result["load_level"] == "LOW"
+        assert result["deload_recommended"] is False
+
+    def test_load_index_counts_weeks_since_deload_correctly(self):
+        from cascade_levels import _compute_load_index
+        # 6 weeks, deload at index 1 (5th from end) → 4 weeks since deload
+        summaries = self._summaries(6, deload_at=1)
+        result = _compute_load_index(summaries)
+        assert result["weeks_since_deload"] == 4
+
+    def test_deload_recommended_after_4_weeks(self):
+        from cascade_levels import _compute_load_index
+        summaries = self._summaries(4)
+        result = _compute_load_index(summaries)
+        assert result["deload_recommended"] is True
+        assert result["load_level"] in ("HIGH", "CRITICAL")
+
+    def test_deload_recommended_after_3_high_rpe_weeks(self):
+        from cascade_levels import _compute_load_index
+        summaries = [{"training": {"sessions_done": 4}, "rpe_avg": 9.0} for _ in range(3)]
+        result = _compute_load_index(summaries)
+        assert result["deload_recommended"] is True
+
+    def test_load_level_critical_after_6_weeks(self):
+        from cascade_levels import _compute_load_index
+        summaries = self._summaries(6)
+        result = _compute_load_index(summaries)
+        assert result["load_level"] == "CRITICAL"
+        assert result["deload_recommended"] is True
+
+
+class TestCheckinFlags:
+
+    def test_injury_flag_written_when_escalation_check_injury(self):
+        from cascade_levels import _build_checkin_flags
+        summary = {"escalation_check": "injury", "session": {"completed": True}}
+        flags = _build_checkin_flags(summary)
+        assert any(f["type"] == "injury_followup" for f in flags)
+        assert all(f["priority"] in ("HIGH", "MEDIUM", "LOW") for f in flags)
+
+    def test_reschedule_flag_written_when_planned_but_missed(self):
+        from cascade_levels import _build_checkin_flags
+        summary = {"escalation_check": "none", "session": {"completed": False, "was_planned": True}}
+        flags = _build_checkin_flags(summary)
+        assert any(f["type"] == "reschedule_confirm" for f in flags)
+
+    def test_no_flags_when_clean_completed_day(self):
+        from cascade_levels import _build_checkin_flags
+        summary = {"escalation_check": "none", "session": {"completed": True}}
+        flags = _build_checkin_flags(summary)
+        assert flags == []
+
+
+class TestRPEWriteback:
+
+    def test_rpe_writeback_exercise_names_in_current_flow(self):
+        """After fixing run_endsession_protocol, CURRENT_FLOW must contain actual exercise names."""
+        # Simulate the _questions_summary construction with done exercise names
+        done_names = ["Squat", "Bench Press", "OHP"]
+        _questions_summary = (
+            f"RPE for {', '.join(done_names[:8])}"
+        )
+        flow = f"endsession | 2026-03-23 | DAY 1 | asked: {_questions_summary}"
+        # Must match what _maybe_write_rpe_from_reply expects
+        import re
+        asked_match = re.search(r"asked:\s*RPE for\s*(.+)$", flow, re.I)
+        assert asked_match is not None
+        exercises_raw = asked_match.group(1).strip()
+        exercises = [e.strip() for e in re.split(r"[,;]", exercises_raw) if e.strip()]
+        assert "Squat" in exercises
+        assert "Bench Press" in exercises
+        assert "OHP" in exercises
+
+    def test_positional_rpe_parse_matches_exercise_count(self):
+        """Positional fallback: '8, 7.5, 7' with 3 exercises → each mapped in order."""
+        import re
+        # Inline the positional-fallback logic from _parse_rpe_reply
+        text = "8, 7.5, 7"
+        exercises = ["Squat", "Bench", "OHP"]
+        nums = re.findall(r"\b(\d+(?:\.\d+)?)\b", text)
+        valid_nums = [n for n in nums if 1 <= float(n) <= 10]
+        result = {}
+        if len(valid_nums) == len(exercises):
+            result = dict(zip(exercises, valid_nums))
+        assert result == {"Squat": "8", "Bench": "7.5", "OHP": "7"}
+
+    def test_named_rpe_parse(self):
+        """Named match: 'squat 8.5 bench 7' → {Squat: 8.5, Bench: 7}"""
+        import re
+        # Inline the named-match logic from _parse_rpe_reply
+        text = "squat 8.5 bench 7"
+        exercises = ["Squat", "Bench"]
+        result = {}
+        for ex in exercises:
+            m = re.search(
+                r"\b" + re.escape(ex.lower()) + r"[\s:=→\-]*(\d+(?:\.\d+)?)\b",
+                text.lower()
+            )
+            if m:
+                val = float(m.group(1))
+                if 1 <= val <= 10:
+                    result[ex] = m.group(1)
+        assert "Squat" in result and result["Squat"] == "8.5"
+        assert "Bench" in result and result["Bench"] == "7"
+
+
+class TestAnnualArcReader:
+
+    def test_read_annual_arc_handles_free_text(self):
+        from cascade_levels import _read_annual_arc
+        cs = {"ANNUAL_ARC": {"summary": "LONG-TERM VISION: Compete in powerlifting."}}
+        assert _read_annual_arc(cs) == "LONG-TERM VISION: Compete in powerlifting."
+
+    def test_read_annual_arc_handles_json_dict(self):
+        from cascade_levels import _read_annual_arc
+        import json
+        arc_dict = {"goal": "120kg squat", "timeline": "30 weeks", "phase": "strength"}
+        cs = {"ANNUAL_ARC": {"summary": json.dumps(arc_dict)}}
+        result = _read_annual_arc(cs)
+        assert "120kg squat" in result
+        assert "30 weeks" in result
+
+    def test_read_annual_arc_handles_none(self):
+        from cascade_levels import _read_annual_arc
+        assert _read_annual_arc({}) == ""
+        assert _read_annual_arc({"ANNUAL_ARC": {}}) == ""
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

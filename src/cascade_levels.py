@@ -24,7 +24,7 @@ close_day() also checks for escalation triggers (Python-side, deterministic):
 """
 
 import json
-from datetime import date, datetime, timezone, timedelta
+from datetime import date, datetime, timedelta
 from typing import Optional
 
 # ---------------------------------------------------------------------------
@@ -108,6 +108,121 @@ def check_if_session_planned_today(weekly_state: dict) -> bool:
         s.get("type") not in ("rest", "travel", None)
         for s in sessions
     )
+
+
+def _read_annual_arc(coach_state: dict) -> str:
+    """
+    Safely reads ANNUAL_ARC regardless of writer format.
+    iteration_zero and planner write free text; cascade annual_eval writes json.dumps(dict).
+    Always returns a plain string safe to embed in an LLM prompt.
+    """
+    raw = coach_state.get("ANNUAL_ARC", {})
+    if isinstance(raw, dict):
+        raw = raw.get("summary", "") or raw.get("Summary", "")
+    if not raw:
+        return ""
+    raw = str(raw).strip()
+    if raw.startswith("{") or raw.startswith("["):
+        try:
+            parsed = json.loads(raw)
+            if isinstance(parsed, dict):
+                # Flatten structured JSON to readable key: value lines
+                lines = [f"{k}: {v}" for k, v in parsed.items() if v]
+                return "\n".join(lines)
+        except (json.JSONDecodeError, TypeError):
+            pass
+    return raw
+
+
+def _build_checkin_flags(daily_summary: dict) -> list:
+    """
+    Returns a list of specific follow-up questions for tomorrow's brief.
+    Based on flags raised in today's close_day summary.
+
+    Only writes flags the brief should act on — clutter-free.
+    Each flag: {"type": str, "message": str, "priority": "HIGH|MEDIUM|LOW"}
+    """
+    flags = []
+    session = daily_summary.get("session", {})
+
+    if daily_summary.get("escalation_check") == "injury":
+        flags.append({
+            "type": "injury_followup",
+            "message": "Check in on injury — flagged yesterday",
+            "priority": "HIGH",
+        })
+    if not session.get("completed") and session.get("was_planned"):
+        flags.append({
+            "type": "reschedule_confirm",
+            "message": "Confirm if missed session is being rescheduled",
+            "priority": "MEDIUM",
+        })
+    if session.get("pr_achieved"):
+        flags.append({
+            "type": "pr_acknowledge",
+            "message": f"Acknowledge PR: {session.get('pr_lift', 'lift')}",
+            "priority": "LOW",
+        })
+    return flags
+
+
+def _compute_load_index(weekly_summaries: list) -> dict:
+    """
+    Scans WEEKLY_SUMMARIES backwards from most recent.
+    Counts weeks since last deload and accumulates sessions + RPE.
+
+    Returns:
+    {
+        "weeks_since_deload": int,
+        "accumulated_sessions": int,
+        "avg_rpe_since_deload": float,
+        "load_level": "LOW|MODERATE|HIGH|CRITICAL",
+        "deload_recommended": bool
+    }
+    """
+    _safe = {"weeks_since_deload": 0, "accumulated_sessions": 0,
+              "avg_rpe_since_deload": 0.0, "load_level": "LOW", "deload_recommended": False}
+    if not weekly_summaries:
+        return _safe
+
+    weeks_since_deload = 0
+    accumulated_sessions = 0
+    rpe_values = []
+
+    for week in reversed(weekly_summaries):
+        if week.get("is_deload") or week.get("status") == "deload":
+            break
+        weeks_since_deload += 1
+        accumulated_sessions += week.get("training", {}).get("sessions_done", 0)
+        rpe_avg = (week.get("rpe_avg") or
+                   week.get("training", {}).get("avg_rpe") or
+                   week.get("session", {}).get("rpe_avg"))
+        if rpe_avg:
+            try:
+                rpe_values.append(float(rpe_avg))
+            except (TypeError, ValueError):
+                pass
+
+    avg_rpe = round(sum(rpe_values) / len(rpe_values), 2) if rpe_values else 0.0
+    high_rpe_weeks = sum(1 for r in rpe_values[-3:] if r > 8.5)
+    deload_recommended = weeks_since_deload >= 4 or high_rpe_weeks >= 3
+
+    if weeks_since_deload <= 1:
+        load_level = "LOW"
+    elif weeks_since_deload <= 3:
+        load_level = "MODERATE"
+    elif weeks_since_deload <= 5:
+        load_level = "HIGH"
+    else:
+        load_level = "CRITICAL"
+
+    return {
+        "weeks_since_deload": weeks_since_deload,
+        "accumulated_sessions": accumulated_sessions,
+        "avg_rpe_since_deload": avg_rpe,
+        "load_level": load_level,
+        "deload_recommended": deload_recommended,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -411,6 +526,26 @@ Rules:
     except Exception as _sp_err:
         print(f"  close_day(): skip_patterns update failed (non-fatal): {_sp_err}")
 
+    # --- 3e. Write CONDITIONAL_CHECKINS to DAILY_FOCUS for next morning's brief ---
+    # Carries specific follow-up questions from today's events into tomorrow's brief.
+    # Only HIGH priority flags appear in the brief; cleared after brief consumes them.
+    try:
+        _checkin_flags = _build_checkin_flags(summary)
+        if _checkin_flags:
+            import json as _json_cf
+            _df_cf_raw = coach_state.get("DAILY_FOCUS", {}).get("summary", "") or \
+                         coach_state.get("DAILY_FOCUS", {}).get("Summary", "")
+            _df_cf: dict
+            if _df_cf_raw and _df_cf_raw.strip().startswith("{"):
+                _df_cf = _json_cf.loads(_df_cf_raw)
+            else:
+                _df_cf = {"content": _df_cf_raw} if _df_cf_raw else {}
+            _df_cf["checkin_flags"] = _checkin_flags
+            write_single_summary("DAILY_FOCUS", _df_cf)
+            print(f"  close_day(): {len(_checkin_flags)} checkin flag(s) written to DAILY_FOCUS.")
+    except Exception as _cf_err:
+        print(f"  close_day(): checkin_flags write failed (non-fatal): {_cf_err}")
+
     # --- 4. Send end-of-day Telegram message ---
     if not dry_run:
         try:
@@ -461,7 +596,7 @@ def weekly_eval(dry_run: bool = False) -> Optional[dict]:
     """
     import anthropic
     from config import ANTHROPIC_API_KEY, CLAUDE_HAIKU
-    from memory import read_summary_list, append_summary, read_coach_state, read_single_summary, write_single_summary
+    from memory import read_summary_list, append_summary, read_single_summary, write_single_summary
     from cascade_state import set_level_state
 
     today = date.today()
@@ -474,12 +609,31 @@ def weekly_eval(dry_run: bool = False) -> Optional[dict]:
         set_level_state("WEEKLY", "IDLE")
         return None
 
-    coach_state = read_coach_state()
     week_num = None
     for ds in reversed(daily_summaries):
         if ds.get("week"):
             week_num = ds["week"]
             break
+
+    # --- Load index (computed before prompt build, written to WEEKLY_INTENT) ---
+    _weekly_summaries_li = read_summary_list("WEEKLY_SUMMARIES", limit=8)
+    _load_index = _compute_load_index(_weekly_summaries_li)
+    try:
+        _wi_li = read_single_summary("WEEKLY_INTENT") or {}
+        if isinstance(_wi_li, str):
+            _wi_li = {"raw": _wi_li}
+        _wi_li["load_index"] = _load_index
+        write_single_summary("WEEKLY_INTENT", _wi_li)
+    except Exception:
+        pass
+
+    _load_alert_weekly = ""
+    if _load_index.get("deload_recommended"):
+        _load_alert_weekly = (
+            f"\nLOAD INDEX ALERT: {_load_index['weeks_since_deload']} weeks since last deload, "
+            f"load_level={_load_index['load_level']}. "
+            f"Consider recommending deload in weekly summary and markov_note_for_next_week.\n"
+        )
 
     daily_json = json.dumps(daily_summaries, indent=2, ensure_ascii=False)
 
@@ -546,7 +700,7 @@ Rules:
 - avg_effort_quality: majority vote across days
 - Recurring concern: only if same issue appeared 3+ times in the week
 - markov_note_for_next_week must be specific and actionable — no generic summaries
-- Return ONLY the JSON object.""" + _gr_warning_weekly + _skip_signal_weekly
+- Return ONLY the JSON object.""" + _gr_warning_weekly + _skip_signal_weekly + _load_alert_weekly
 
     if dry_run:
         print(f"  [DRY RUN] weekly_eval() would evaluate {len(daily_summaries)} daily summaries")
@@ -817,7 +971,7 @@ def annual_eval(dry_run: bool = False, escalation_context: Optional[dict] = None
     except Exception:
         pass
 
-    athlete_goals = coach_state.get("ANNUAL_ARC", {}).get("summary", "")
+    athlete_goals = _read_annual_arc(coach_state)
     monthly_json = json.dumps(monthly_summaries, indent=2, ensure_ascii=False)
     rules_text = json.dumps(golden_rules, indent=2, ensure_ascii=False) if golden_rules else "(not yet set)"
 
@@ -1004,7 +1158,7 @@ def longterm_eval(dry_run: bool = False) -> Optional[dict]:
     coach_state = read_coach_state()
     golden_rules_raw = coach_state.get("GOLDEN_RULES", {}).get("summary", "")
     existing_longterm = read_single_summary("LONGTERM_PLAN")
-    athlete_goals = coach_state.get("ANNUAL_ARC", {}).get("summary", "")
+    athlete_goals = _read_annual_arc(coach_state)
 
     # Check for constitutional violations using shared helper
     _gr_longterm = _check_golden_rules()

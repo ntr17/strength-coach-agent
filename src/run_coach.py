@@ -1006,8 +1006,15 @@ def _update_athlete_model(memory_data: dict, dry_run: bool = False) -> None:
     from memory import read_coach_state, upsert_coach_state
 
     coach_state = memory_data.get("coach_state") or read_coach_state()
-    existing_model = coach_state.get("ATHLETE_MODEL", {}).get("summary", "")
-    last_updated = coach_state.get("ATHLETE_MODEL", {}).get("last_updated", "")
+    _am_entry = coach_state.get("ATHLETE_MODEL", {})
+    existing_model = _am_entry.get("summary", "")
+    last_updated = _am_entry.get("last_updated", "")
+    existing_confidence = _am_entry.get("confidence", _am_entry.get("Confidence", "")).upper()
+
+    # Guard: do not overwrite HIGH confidence data (e.g. from iteration_zero) with MEDIUM confidence
+    if existing_model and existing_confidence == "HIGH":
+        print("  ATHLETE_MODEL: existing HIGH confidence data — skipping MEDIUM confidence overwrite.")
+        return
 
     # Only update quarterly (every ~90 days) to save budget
     if last_updated:
@@ -2496,6 +2503,10 @@ def sync_garmin(days: int = 7, dry_run: bool = False) -> list:
     Returns list of synced metric dicts (empty on failure or missing credentials).
     Non-fatal: any error is caught and printed, coach continues normally.
     """
+    if not os.environ.get("GARMIN_EMAIL") or not os.environ.get("GARMIN_PASSWORD"):
+        print("  [Garmin] GARMIN_EMAIL or GARMIN_PASSWORD not set — skipping")
+        return []
+
     try:
         from garmin import GarminClient
     except ImportError:
@@ -3473,6 +3484,7 @@ def run_brief(dry_run: bool = False):
     _daily_focus_raw = coach_state.get("DAILY_FOCUS", {}).get("summary", "") or \
                        coach_state.get("DAILY_FOCUS", {}).get("Summary", "")
     _daily_focus = None
+    _checkin_flags: list = []
     if _daily_focus_raw:
         try:
             import json as _json_df
@@ -3480,6 +3492,10 @@ def run_brief(dry_run: bool = False):
             if _df.get("date") == str(today):
                 _daily_focus = _df
                 print(f"  Brief: DAILY_FOCUS found for today — {_df.get('session', '?')}")
+            # Consume checkin_flags regardless of date match (yesterday's flags carry over)
+            _checkin_flags = _df.get("checkin_flags", [])
+            if _checkin_flags:
+                print(f"  Brief: {len(_checkin_flags)} checkin flag(s) loaded from DAILY_FOCUS")
         except Exception:
             pass
 
@@ -3683,11 +3699,17 @@ def run_brief(dry_run: bool = False):
             f"Build on this — do NOT reopen scheduling or propose alternatives.\n"
         )
 
+    _high_priority_flags = [f for f in _checkin_flags if f.get("priority") == "HIGH"]
+    _checkin_block = ""
+    if _high_priority_flags:
+        _flag_lines = "\n".join(f"  - {f['message']}" for f in _high_priority_flags)
+        _checkin_block = f"\n=== FOLLOW-UP REQUIRED FROM YESTERDAY ===\n{_flag_lines}\nAddress these briefly before the session focus.\n"
+
     prompt = f"""You are {ATHLETE_NAME}'s strength coach. Write a pre-session brief for today's training.
 
 === COACHING CONTEXT — WORK THROUGH ALL 4 LAYERS BEFORE WRITING ===
 {cascade}
-{_agreed_plan_block}
+{_agreed_plan_block}{_checkin_block}
 === TODAY'S SESSION ===
 Exercises:
 {session_text}
@@ -3766,6 +3788,20 @@ You have the schedule — make a decision and tell the athlete what to do. Propo
                 f"intent:{brief_msg[:150].replace(chr(10), ' ')}"
             )
             upsert_coach_state("DAILY_FOCUS", daily_focus, "HIGH")
+            # Clear consumed checkin_flags so they don't repeat tomorrow
+            if _checkin_flags:
+                try:
+                    import json as _json_cf_clear
+                    _df_cf_clear_raw = coach_state.get("DAILY_FOCUS", {}).get("summary", "") or \
+                                      coach_state.get("DAILY_FOCUS", {}).get("Summary", "")
+                    if _df_cf_clear_raw and _df_cf_clear_raw.strip().startswith("{"):
+                        _df_cf_clear = _json_cf_clear.loads(_df_cf_clear_raw)
+                        _df_cf_clear.pop("checkin_flags", None)
+                        from memory import write_single_summary as _wss_cf
+                        _wss_cf("DAILY_FOCUS", _df_cf_clear)
+                        print("  Brief: checkin_flags cleared from DAILY_FOCUS.")
+                except Exception:
+                    pass
         else:
             print("  Brief: Telegram send failed.")
     except Exception as e:
@@ -4205,9 +4241,13 @@ SESSION ORDER (fatigue accumulates top to bottom — use this to interpret perfo
             # Track what was asked so the bot can continue this conversation if athlete replies
             _skipped = [ex['name'] for ex in exercises if ex.get('done') is False and ex.get('name')]
             _retro = session_delta.get("retroactive_changes", [])
+            _done_names = [ex['name'] for ex in done_exs if ex.get('name')]
             _questions_summary = (
-                f"RPE for completed lifts in {session_label}"
-                + (f"; skip reasons for {', '.join(_skipped)[:60]}" if _skipped else "")
+                f"RPE for {', '.join(_done_names[:8])}" if _done_names
+                else f"RPE for completed lifts in {session_label}"
+            )
+            _questions_summary += (
+                (f"; skip reasons for {', '.join(_skipped)[:60]}" if _skipped else "")
                 + (f"; retroactive changes: {len(_retro)}" if _retro else "")
                 + ("; delta shown to athlete" if delta_display else "")
             )

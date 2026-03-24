@@ -1232,7 +1232,22 @@ def build_prompt(program_data: dict, memory_data: dict,
     coach_state = memory_data.get("coach_state", {})
 
     # --- Annual arc (12-month roadmap — weekly email only, so the athlete sees the bigger picture) ---
-    annual_arc = coach_state.get("ANNUAL_ARC", {}).get("summary", "") if coach_state else ""
+    # _read_annual_arc handles free-text (iteration_zero/planner) and JSON (cascade annual_eval) formats
+    def _read_annual_arc_local(cs: dict) -> str:
+        raw = cs.get("ANNUAL_ARC", {})
+        if isinstance(raw, dict):
+            raw = raw.get("summary", "") or raw.get("Summary", "")
+        raw = str(raw or "").strip()
+        if raw.startswith("{") or raw.startswith("["):
+            try:
+                import json as _j
+                parsed = _j.loads(raw)
+                if isinstance(parsed, dict):
+                    return "\n".join(f"{k}: {v}" for k, v in parsed.items() if v)
+            except Exception:
+                pass
+        return raw
+    annual_arc = _read_annual_arc_local(coach_state) if coach_state else ""
     if annual_arc and is_weekly_summary:
         # First 3 sentences — enough for context without bloating the prompt
         arc_snippet = ". ".join(annual_arc.split(". ")[:3]).strip()
