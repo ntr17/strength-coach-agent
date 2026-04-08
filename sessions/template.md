@@ -29,4 +29,9 @@ Field reference:
   count  : no = exclude from strength estimates (e.g. warmup, reps dropped, bad form day)
   rpe    : 1-10, optional — how hard was the set?
   notes  : anything about that specific set
+  
+  BODYWEIGHT EXERCISES (pull-ups, dips, etc.):
+  Use your bodyweight as the kg value. If you added weight (e.g. 10kg belt),
+  log bodyweight + added weight. Example: 82kg person + 10kg belt = kg: 92.
+  This is required for e1RM estimates to work correctly.
 -->

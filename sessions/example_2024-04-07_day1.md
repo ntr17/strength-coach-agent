@@ -37,8 +37,8 @@ I lost tightness and the bar path was ugly — not a useful data point.
 | 6   | 4    | 85   | no    | no    | 9   | reps dropped — not counting  |
 
 ### Dips
-| set | reps | kg   | amrap | count | rpe | notes            |
-|-----|------|------|-------|-------|-----|------------------|
-| 1   | 10   | 0    | no    | yes   | 7   | bodyweight       |
-| 2   | 10   | 0    | no    | yes   | 8   |                  |
-| 3   | 12   | 0    | yes   | yes   | 9   | amrap, bodyweight|
+| set | reps | kg    | amrap | count | rpe | notes                        |
+|-----|------|-------|-------|-------|-----|------------------------------|
+| 1   | 10   | 82    | no    | yes   | 7   | bw only (bodyweight=82kg)    |
+| 2   | 10   | 82    | no    | yes   | 8   |                              |
+| 3   | 12   | 82    | yes   | yes   | 9   | amrap                        |

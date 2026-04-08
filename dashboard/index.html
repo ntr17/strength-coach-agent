@@ -1,0 +1,385 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Strength Dashboard</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #0f1117;
+      color: #e2e8f0;
+      min-height: 100vh;
+      padding: 24px;
+    }
+    h1 { font-size: 1.4rem; font-weight: 600; color: #f8fafc; margin-bottom: 6px; }
+    .subtitle { font-size: 0.82rem; color: #64748b; margin-bottom: 28px; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 16px; }
+    .card {
+      background: #1e2330;
+      border: 1px solid #2d3446;
+      border-radius: 10px;
+      padding: 20px;
+    }
+    .card h2 { font-size: 0.78rem; text-transform: uppercase; letter-spacing: .08em; color: #64748b; margin-bottom: 14px; }
+    .card.wide { grid-column: 1 / -1; }
+
+    /* Strength table */
+    table { width: 100%; border-collapse: collapse; font-size: 0.84rem; }
+    th { text-align: left; color: #64748b; font-weight: 500; padding: 4px 8px 8px 0; border-bottom: 1px solid #2d3446; }
+    td { padding: 6px 8px 6px 0; border-bottom: 1px solid #1a2030; }
+    tr:last-child td { border-bottom: none; }
+    .e1rm { font-weight: 600; color: #f8fafc; }
+    .range { color: #64748b; font-size: 0.78rem; }
+    .conf-high   { color: #22c55e; }
+    .conf-medium { color: #f59e0b; }
+    .conf-low, .conf-very { color: #ef4444; }
+
+    /* Sessions list */
+    .session-row { display: flex; gap: 12px; align-items: baseline; padding: 8px 0; border-bottom: 1px solid #1a2030; font-size: 0.83rem; }
+    .session-row:last-child { border-bottom: none; }
+    .session-date { color: #94a3b8; min-width: 90px; }
+    .session-meta { color: #64748b; font-size: 0.76rem; }
+    .session-exs  { color: #e2e8f0; flex: 1; }
+
+    /* Health bars */
+    .health-grid { display: grid; grid-template-columns: 90px 1fr 42px; gap: 6px 10px; align-items: center; font-size: 0.82rem; }
+    .health-label { color: #94a3b8; }
+    .health-bar-wrap { background: #0f1117; border-radius: 4px; height: 6px; overflow: hidden; }
+    .health-bar { height: 6px; border-radius: 4px; }
+    .health-val { color: #e2e8f0; text-align: right; font-variant-numeric: tabular-nums; }
+
+    /* Chart container */
+    .chart-wrap { position: relative; height: 220px; }
+
+    /* Injuries */
+    .injury { background: #2d1a1a; border: 1px solid #7f1d1d; border-radius: 6px; padding: 10px 14px; font-size: 0.83rem; }
+    .injury-name { font-weight: 600; color: #fca5a5; }
+    .injury-meta { color: #94a3b8; font-size: 0.76rem; margin-top: 2px; }
+
+    /* Error */
+    .error { color: #ef4444; font-size: 0.82rem; }
+    .empty { color: #64748b; font-size: 0.82rem; font-style: italic; }
+
+    /* Exercise selector */
+    select {
+      background: #0f1117; border: 1px solid #2d3446; color: #e2e8f0;
+      border-radius: 6px; padding: 4px 8px; font-size: 0.82rem; margin-bottom: 14px;
+    }
+  </style>
+</head>
+<body>
+
+<h1>Strength Dashboard</h1>
+<p class="subtitle" id="subtitle">Loading…</p>
+
+<div class="grid">
+
+  <!-- Current e1RM / e5RM estimates -->
+  <div class="card">
+    <h2>Current Strength Estimates</h2>
+    <div id="strength-table"><span class="empty">No estimates yet. Run: python scripts/estimate_strength.py --write</span></div>
+  </div>
+
+  <!-- e1RM trend chart -->
+  <div class="card">
+    <h2>e1RM Trend</h2>
+    <select id="lift-select" onchange="loadTrend()">
+      <option value="">Select lift…</option>
+    </select>
+    <div class="chart-wrap">
+      <canvas id="trend-chart"></canvas>
+    </div>
+  </div>
+
+  <!-- Recent sessions -->
+  <div class="card">
+    <h2>Recent Sessions</h2>
+    <div id="sessions-list"><span class="empty">No sessions yet.</span></div>
+  </div>
+
+  <!-- Health trends -->
+  <div class="card">
+    <h2>Health (last 30 days)</h2>
+    <div class="chart-wrap" style="height:170px; margin-bottom:14px;">
+      <canvas id="weight-chart"></canvas>
+    </div>
+    <div class="chart-wrap" style="height:130px;">
+      <canvas id="sleep-chart"></canvas>
+    </div>
+  </div>
+
+  <!-- Health snapshot -->
+  <div class="card">
+    <h2>Health Averages (last 14 days)</h2>
+    <div id="health-snapshot"></div>
+  </div>
+
+  <!-- Active injuries -->
+  <div class="card">
+    <h2>Active Injuries</h2>
+    <div id="injuries-list"><span class="empty">None logged.</span></div>
+  </div>
+
+</div>
+
+<script>
+const API = '';  // same origin
+
+// ─── Helpers ──────────────────────────────────────────────────────────────
+
+async function fetchJSON(url) {
+  const r = await fetch(API + url);
+  if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
+  return r.json();
+}
+
+function esc(s) {
+  return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;');
+}
+
+function today() {
+  return new Date().toISOString().slice(0, 10);
+}
+
+// ─── Strength table ────────────────────────────────────────────────────────
+
+async function loadStrength() {
+  const el = document.getElementById('strength-table');
+  const liftSel = document.getElementById('lift-select');
+  try {
+    const data = await fetchJSON('/api/strength');
+    if (!data.length) return;
+
+    // Populate lift selector
+    data.forEach(d => {
+      const opt = document.createElement('option');
+      opt.value = d.exercise;
+      opt.textContent = d.exercise;
+      liftSel.appendChild(opt);
+    });
+
+    let html = `<table>
+      <tr><th>Exercise</th><th>e1RM</th><th>e5RM</th><th>Updated</th></tr>`;
+    data.forEach(d => {
+      const ci = d.confidence_low != null
+        ? `<br><span class="range">${d.confidence_low}–${d.confidence_high}kg</span>` : '';
+      html += `<tr>
+        <td>${esc(d.exercise)}</td>
+        <td class="e1rm">${d.e1rm_kg}kg${ci}</td>
+        <td class="e1rm">${d.e5rm_kg}kg</td>
+        <td class="range">${d.estimated_at}</td>
+      </tr>`;
+    });
+    html += '</table>';
+    el.innerHTML = html;
+  } catch(e) {
+    el.innerHTML = `<span class="error">Error: ${esc(e.message)}</span>`;
+  }
+}
+
+// ─── Trend chart ───────────────────────────────────────────────────────────
+
+let trendChart = null;
+
+async function loadTrend() {
+  const exercise = document.getElementById('lift-select').value;
+  if (!exercise) return;
+
+  const canvas = document.getElementById('trend-chart');
+  try {
+    const data = await fetchJSON(`/api/lifts/${encodeURIComponent(exercise)}`);
+    const labels = data.map(d => d.estimated_at);
+    const e1rms  = data.map(d => d.e1rm_kg);
+    const lows   = data.map(d => d.confidence_low  ?? d.e1rm_kg);
+    const highs  = data.map(d => d.confidence_high ?? d.e1rm_kg);
+
+    if (trendChart) trendChart.destroy();
+    trendChart = new Chart(canvas, {
+      type: 'line',
+      data: {
+        labels,
+        datasets: [
+          {
+            label: 'e1RM',
+            data: e1rms,
+            borderColor: '#6366f1',
+            backgroundColor: 'rgba(99,102,241,0.15)',
+            borderWidth: 2,
+            pointRadius: 4,
+            fill: false,
+            tension: 0.3,
+          },
+          {
+            label: 'CI High',
+            data: highs,
+            borderColor: 'rgba(99,102,241,0.3)',
+            borderWidth: 1,
+            borderDash: [4,4],
+            pointRadius: 0,
+            fill: '+1',
+            backgroundColor: 'rgba(99,102,241,0.07)',
+          },
+          {
+            label: 'CI Low',
+            data: lows,
+            borderColor: 'rgba(99,102,241,0.3)',
+            borderWidth: 1,
+            borderDash: [4,4],
+            pointRadius: 0,
+            fill: false,
+          },
+        ],
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: { legend: { display: false } },
+        scales: {
+          x: { ticks: { color: '#64748b', maxTicksLimit: 6 }, grid: { color: '#1a2030' } },
+          y: { ticks: { color: '#64748b', callback: v => v + 'kg' }, grid: { color: '#1a2030' } },
+        },
+      }
+    });
+  } catch(e) {
+    canvas.parentElement.innerHTML = `<span class="error">No trend data for ${esc(exercise)}</span>`;
+  }
+}
+
+// ─── Sessions ─────────────────────────────────────────────────────────────
+
+async function loadSessions() {
+  const el = document.getElementById('sessions-list');
+  try {
+    const data = await fetchJSON('/api/sessions?n=10');
+    if (!data.length) return;
+    el.innerHTML = data.map(s => `
+      <div class="session-row">
+        <span class="session-date">${s.session_date}</span>
+        <span class="session-meta">W${s.week_number} B${s.block_number} D${s.day_number} · ${s.counted_sets}/${s.total_sets} sets</span>
+        <span class="session-exs">${esc(s.exercises || '')}</span>
+      </div>
+    `).join('');
+  } catch(e) {
+    el.innerHTML = `<span class="error">${esc(e.message)}</span>`;
+  }
+}
+
+// ─── Health charts + snapshot ──────────────────────────────────────────────
+
+let weightChart = null, sleepChart = null;
+
+async function loadHealth() {
+  const snap = document.getElementById('health-snapshot');
+  try {
+    const data = await fetchJSON('/api/health?days=60');
+    if (!data.length) {
+      snap.innerHTML = '<span class="empty">No health data yet.</span>';
+      return;
+    }
+
+    const labels  = data.map(d => d.log_date);
+    const weights = data.map(d => d.body_weight_kg);
+    const sleeps  = data.map(d => d.sleep_hours);
+
+    const chartOpts = (yLabel, color) => ({
+      responsive: true, maintainAspectRatio: false,
+      plugins: { legend: { display: false } },
+      scales: {
+        x: { ticks: { color: '#64748b', maxTicksLimit: 6 }, grid: { color: '#1a2030' } },
+        y: { ticks: { color: '#64748b', callback: v => v + yLabel }, grid: { color: '#1a2030' } },
+      }
+    });
+
+    if (weightChart) weightChart.destroy();
+    weightChart = new Chart(document.getElementById('weight-chart'), {
+      type: 'line',
+      data: { labels, datasets: [{ data: weights, borderColor: '#22c55e', borderWidth: 2,
+        pointRadius: 2, fill: false, tension: 0.3, spanGaps: true }] },
+      options: chartOpts('kg', '#22c55e'),
+    });
+
+    if (sleepChart) sleepChart.destroy();
+    sleepChart = new Chart(document.getElementById('sleep-chart'), {
+      type: 'bar',
+      data: { labels, datasets: [{ data: sleeps, backgroundColor: 'rgba(99,102,241,0.5)',
+        borderColor: '#6366f1', borderWidth: 1 }] },
+      options: chartOpts('h', '#6366f1'),
+    });
+
+    // Snapshot: last 14 days
+    const recent = data.slice(-14);
+    const avg = (arr) => {
+      const v = arr.filter(x => x != null);
+      return v.length ? (v.reduce((a,b)=>a+b,0)/v.length) : null;
+    };
+    const fmt = (v, decimals, unit) => v != null ? `${v.toFixed(decimals)}${unit}` : '—';
+
+    snap.innerHTML = `
+      <div class="health-grid">
+        <span class="health-label">Avg weight</span>
+        <span></span>
+        <span class="health-val">${fmt(avg(recent.map(d=>d.body_weight_kg)), 1, 'kg')}</span>
+
+        <span class="health-label">Avg sleep</span>
+        <div class="health-bar-wrap">
+          <div class="health-bar" style="width:${Math.min(100,(avg(recent.map(d=>d.sleep_hours))??0)/9*100)}%; background:#6366f1;"></div>
+        </div>
+        <span class="health-val">${fmt(avg(recent.map(d=>d.sleep_hours)), 1, 'h')}</span>
+
+        <span class="health-label">Avg steps</span>
+        <div class="health-bar-wrap">
+          <div class="health-bar" style="width:${Math.min(100,(avg(recent.map(d=>d.steps))??0)/10000*100)}%; background:#f59e0b;"></div>
+        </div>
+        <span class="health-val">${avg(recent.map(d=>d.steps)) != null ? Math.round(avg(recent.map(d=>d.steps))).toLocaleString() : '—'}</span>
+
+        <span class="health-label">Avg HRV</span>
+        <div class="health-bar-wrap">
+          <div class="health-bar" style="width:${Math.min(100,(avg(recent.map(d=>d.hrv))??0)/100*100)}%; background:#22c55e;"></div>
+        </div>
+        <span class="health-val">${fmt(avg(recent.map(d=>d.hrv)), 0, 'ms')}</span>
+
+        <span class="health-label">Avg RHR</span>
+        <span></span>
+        <span class="health-val">${avg(recent.map(d=>d.resting_hr)) != null ? Math.round(avg(recent.map(d=>d.resting_hr)))+'bpm' : '—'}</span>
+      </div>
+    `;
+  } catch(e) {
+    snap.innerHTML = `<span class="error">${esc(e.message)}</span>`;
+  }
+}
+
+// ─── Injuries ──────────────────────────────────────────────────────────────
+
+async function loadInjuries() {
+  const el = document.getElementById('injuries-list');
+  try {
+    const data = await fetchJSON('/api/injuries');
+    if (!data.length) return;
+    el.innerHTML = data.map(inj => `
+      <div class="injury">
+        <div class="injury-name">${esc(inj.injury_name)}</div>
+        <div class="injury-meta">${esc(inj.body_part)} · since ${inj.start_date}${inj.severity ? ' · severity '+inj.severity+'/5' : ''}</div>
+        ${inj.notes ? `<div style="color:#94a3b8;font-size:.76rem;margin-top:4px">${esc(inj.notes)}</div>` : ''}
+      </div>
+    `).join('');
+  } catch(e) {
+    el.innerHTML = `<span class="error">${esc(e.message)}</span>`;
+  }
+}
+
+// ─── Init ──────────────────────────────────────────────────────────────────
+
+document.getElementById('subtitle').textContent = `Last updated: ${today()}`;
+
+Promise.allSettled([
+  loadStrength(),
+  loadSessions(),
+  loadHealth(),
+  loadInjuries(),
+]);
+</script>
+</body>
+</html>

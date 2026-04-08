@@ -1,0 +1,14 @@
+{
+  "_note": "This file is populated by the initialization conversation. Run the init prompt in a new Claude chat to generate the initial content.",
+  "last_updated": null,
+  "current_week": null,
+  "current_block": null,
+  "program_name": null,
+  "program_start_date": null,
+  "last_session_date": null,
+  "last_session_day": null,
+  "active_deload": false,
+  "travel_week": false,
+  "open_thread_count": 0,
+  "last_estimate_run": null
+}

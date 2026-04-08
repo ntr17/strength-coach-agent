@@ -1,0 +1,8 @@
+# Core
+anthropic>=0.18.0
+
+# Garmin sync (optional — install separately if needed)
+# pip install "garminconnect>=0.2.22"
+
+# Development / testing
+pytest>=7.4.0
