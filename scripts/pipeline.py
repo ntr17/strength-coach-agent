@@ -4,7 +4,8 @@ pipeline.py — Data pipeline: coach.db + Garmin -> markdown -> Google Drive.
 Source of truth: data/coach.db (SQLite)
 - lift_sets: populated by import_session.py after each training session
 - health_log: populated by garmin_sync.py (nightly)
-- strength_estimates: populated by estimate_strength.py --write
+- strength_estimates: populated by estimate_strength.py --write (auto-run each pipeline)
+- medical_records: populated by import_medical.py (manual)
 
 This script reads from coach.db, runs analysis, generates markdown summaries,
 and uploads them to Google Drive for the Claude Project to read.
@@ -20,6 +21,7 @@ Usage:
 import argparse
 import json
 import os
+import subprocess
 import sys
 from datetime import date
 from pathlib import Path
@@ -54,36 +56,56 @@ def main():
             print(f"[pipeline] Garmin sync failed (non-fatal): {e}")
 
     # ------------------------------------------------------------------
-    # 2. Read lift records from coach.db
+    # 2. Run estimate_strength (writes fresh e1RM/e5RM to strength_estimates)
     # ------------------------------------------------------------------
-    print("[pipeline] Reading lift records from DB...")
+    print("[pipeline] Running strength estimation...")
+    try:
+        result = subprocess.run(
+            [sys.executable, str(Path(__file__).parent / "estimate_strength.py"),
+             "--write", "--db-path", str(DB_PATH)],
+            capture_output=True, text=True, timeout=60,
+        )
+        if result.returncode == 0:
+            print("[pipeline] Strength estimates updated")
+        else:
+            print(f"[pipeline] estimate_strength warning: {result.stderr[:200]}")
+    except Exception as e:
+        print(f"[pipeline] estimate_strength failed (non-fatal): {e}")
+
+    # ------------------------------------------------------------------
+    # 3. Read data from coach.db
+    # ------------------------------------------------------------------
+    print("[pipeline] Reading data from DB...")
     from db_reader import (
         load_lift_records,
         compute_personal_records,
         load_health_records,
         load_latest_estimates,
+        load_latest_medical,
         load_state,
         load_profile,
         compute_progression_targets,
         compute_goals,
     )
 
-    records    = load_lift_records(DB_PATH)
-    prs        = compute_personal_records(records)
+    records     = load_lift_records(DB_PATH)
+    prs         = compute_personal_records(records)
     health_data = load_health_records(DB_PATH, days=args.days)
-    estimates  = load_latest_estimates(DB_PATH)
-    state      = load_state()
-    profile    = load_profile()
+    estimates   = load_latest_estimates(DB_PATH)
+    medical     = load_latest_medical(DB_PATH)
+    state       = load_state()
+    profile     = load_profile()
     progression = compute_progression_targets(profile, state)
-    goals      = compute_goals(profile)
+    goals       = compute_goals(profile)
 
     week_num    = state.get("current_week", 1)
     total_weeks = profile.get("current_program", {}).get("total_weeks", 30)
 
-    print(f"[pipeline] Week {week_num}/{total_weeks} | {len(records)} sets | {len(prs)} PRs | {len(health_data)} health records")
+    print(f"[pipeline] Week {week_num}/{total_weeks} | {len(records)} sets | {len(prs)} PRs | "
+          f"{len(health_data)} health records | {len(estimates)} estimates | {len(medical)} medical tests")
 
     # ------------------------------------------------------------------
-    # 3. Run analysis
+    # 4. Run analysis
     # ------------------------------------------------------------------
     print("[pipeline] Running analysis...")
     from analysis_engine import run_all
@@ -94,7 +116,7 @@ def main():
     print(f"[pipeline] Stalls: {stalled_count} | Load: {analysis.get('load_index', {}).get('signal', 'N/A')}")
 
     # ------------------------------------------------------------------
-    # 4. Generate markdown files
+    # 5. Generate markdown files
     # ------------------------------------------------------------------
     print("[pipeline] Generating markdown...")
     from drive_export import (
@@ -106,18 +128,21 @@ def main():
     )
 
     files = {
-        "training_log.md":   generate_training_log_md(records, prs),
+        "training_log.md":    generate_training_log_md(records, prs),
         "program_context.md": generate_program_context_md_from_db(state, profile, estimates, week_num, total_weeks),
         "health_recovery.md": generate_health_recovery_md(health_data, []),
-        "analysis.md":       generate_analysis_md(analysis),
-        "BRIEFING.md":       generate_briefing_md_from_db(state, profile, estimates, prs, health_data, analysis, week_num, total_weeks),
+        "analysis.md":        generate_analysis_md(analysis),
+        "BRIEFING.md":        generate_briefing_md_from_db(
+                                  state, profile, estimates, prs,
+                                  health_data, analysis, week_num, total_weeks,
+                                  medical=medical),
     }
 
     for name, content in files.items():
         print(f"[pipeline]   {name}: {len(content.split())} words")
 
     # ------------------------------------------------------------------
-    # 5. Write output
+    # 6. Write output
     # ------------------------------------------------------------------
     if args.dry_run:
         print("\n" + "=" * 60 + "\nDRY RUN — BRIEFING.md\n" + "=" * 60)

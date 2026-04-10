@@ -100,12 +100,31 @@ CREATE TABLE IF NOT EXISTS reasoning_log (
   created_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
+-- Medical records (blood work, body composition, fitness tests, etc.)
+CREATE TABLE IF NOT EXISTS medical_records (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  test_date   DATE NOT NULL,
+  category    TEXT NOT NULL,   -- blood_work | body_comp | fitness_test | hormone | imaging | other
+  test_name   TEXT NOT NULL,   -- e.g. 'Testosterone', 'HbA1c', 'VO2max', 'DEXA body fat %'
+  value       REAL,            -- numeric value (null if text-only)
+  value_text  TEXT,            -- for non-numeric results or free text
+  unit        TEXT,            -- 'ng/dL', '%', 'mL/kg/min', etc.
+  ref_low     REAL,            -- reference range low
+  ref_high    REAL,            -- reference range high
+  flag        TEXT,            -- 'LOW' | 'HIGH' | 'NORMAL' | null (computed if ref range given)
+  notes       TEXT,
+  source      TEXT,            -- 'lab' | 'garmin' | 'doctor' | 'manual'
+  created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
 -- Indexes for common queries
 CREATE INDEX IF NOT EXISTS idx_lift_sets_date        ON lift_sets(session_date);
 CREATE INDEX IF NOT EXISTS idx_lift_sets_exercise    ON lift_sets(exercise);
 CREATE INDEX IF NOT EXISTS idx_lift_sets_counted     ON lift_sets(exercise, should_count);
 CREATE INDEX IF NOT EXISTS idx_health_log_date       ON health_log(log_date);
 CREATE INDEX IF NOT EXISTS idx_strength_est_exercise ON strength_estimates(exercise, estimated_at);
+CREATE INDEX IF NOT EXISTS idx_medical_date         ON medical_records(test_date);
+CREATE INDEX IF NOT EXISTS idx_medical_name         ON medical_records(test_name, test_date);
 """
 
 

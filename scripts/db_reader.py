@@ -6,10 +6,8 @@ These functions produce the exact record shapes that analysis_engine.py and driv
 """
 
 import json
-import math
-import os
 import sqlite3
-from datetime import date, datetime
+from datetime import date
 from pathlib import Path
 
 DEFAULT_DB   = Path(__file__).parent.parent / "data" / "coach.db"
@@ -261,6 +259,68 @@ def load_profile() -> dict:
         return json.loads(PROFILE_PATH.read_text(encoding="utf-8"))
     except (FileNotFoundError, json.JSONDecodeError):
         return {}
+
+
+# ---------------------------------------------------------------------------
+# Function 6b — load_medical_records
+# ---------------------------------------------------------------------------
+
+def load_medical_records(db_path=DEFAULT_DB, days=365) -> list[dict]:
+    """
+    Read medical_records for the last N days, most recent first.
+
+    Returns latest value per test_name (for briefing) plus full history.
+    """
+    conn = _connect(db_path)
+    try:
+        rows = conn.execute(
+            """
+            SELECT test_date, category, test_name, value, value_text,
+                   unit, ref_low, ref_high, flag, notes, source
+            FROM medical_records
+            WHERE test_date >= date('now', ? || ' days')
+            ORDER BY test_date DESC
+            """,
+            (f"-{days}",),
+        ).fetchall()
+    except Exception:
+        # Table may not exist on old DBs
+        return []
+    finally:
+        conn.close()
+
+    return [
+        {
+            "test_date":  str(row["test_date"]),
+            "category":   row["category"],
+            "test_name":  row["test_name"],
+            "value":      row["value"],
+            "value_text": row["value_text"],
+            "unit":       row["unit"],
+            "ref_low":    row["ref_low"],
+            "ref_high":   row["ref_high"],
+            "flag":       row["flag"],
+            "notes":      row["notes"],
+            "source":     row["source"],
+        }
+        for row in rows
+    ]
+
+
+def load_latest_medical(db_path=DEFAULT_DB) -> dict:
+    """
+    Return the most recent record per test_name.
+
+    Returns:
+        {test_name: {test_date, category, value, value_text, unit, ref_low, ref_high, flag}}
+    """
+    records = load_medical_records(db_path, days=3650)  # all time
+    latest: dict[str, dict] = {}
+    for r in records:
+        name = r["test_name"]
+        if name not in latest:  # already sorted DESC, first = latest
+            latest[name] = r
+    return latest
 
 
 # ---------------------------------------------------------------------------

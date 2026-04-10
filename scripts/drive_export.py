@@ -702,6 +702,7 @@ def generate_briefing_md_from_db(
     analysis: dict,
     week_num: int,
     total_weeks: int,
+    medical: dict = None,
 ) -> str:
     """
     Generate a compact BRIEFING.md from DB data only (no Google Sheet).
@@ -855,7 +856,31 @@ def generate_briefing_md_from_db(
     lines.append("")
 
     # ------------------------------------------------------------------
-    # 5. Open Items
+    # 5. Medical (latest per test)
+    # ------------------------------------------------------------------
+    if medical:
+        lines += ["## Medical (latest values)", ""]
+        # Group by category
+        by_cat: dict = {}
+        for test_name, rec in sorted(medical.items()):
+            cat = rec.get("category", "other")
+            by_cat.setdefault(cat, []).append((test_name, rec))
+
+        for cat, items in sorted(by_cat.items()):
+            lines.append(f"**{cat.replace('_', ' ').title()}**")
+            lines.append("| Test | Value | Unit | Flag | Date |")
+            lines.append("|------|-------|------|------|------|")
+            for test_name, rec in items:
+                val   = str(rec["value"]) if rec.get("value") is not None else (rec.get("value_text") or "—")
+                unit  = rec.get("unit") or "—"
+                flag  = rec.get("flag") or "—"
+                dt    = rec.get("test_date", "—")
+                flag_marker = f"**{flag}**" if flag in ("LOW", "HIGH") else flag
+                lines.append(f"| {test_name} | {val} | {unit} | {flag_marker} | {dt} |")
+            lines.append("")
+
+    # ------------------------------------------------------------------
+    # 6. Open Items
     # ------------------------------------------------------------------
     lines += ["## Open Items", ""]
 
