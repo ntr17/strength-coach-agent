@@ -1,24 +1,24 @@
-# Credentials - NEVER commit
-config/
+# Secrets — NEVER commit
 .env
 *.key
-token.pickle
-
-# Keep .env.example (it's a template, no secrets)
-!.env.example
-
-# Program files (personal data)
-programs/
 
 # Python
 __pycache__/
 *.py[cod]
+*.pyo
 venv/
 .venv/
+
+# The database IS committed (it's the source of truth in this repo)
+# data/coach.db is tracked intentionally
+
+# OS
+.DS_Store
+Thumbs.db
 
 # IDE
 .vscode/
 .idea/
 
-# OS
-.DS_Store
+# Pytest cache
+.pytest_cache/

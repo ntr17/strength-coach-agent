@@ -1,0 +1,18 @@
+# Claude API
+ANTHROPIC_API_KEY=your_anthropic_api_key_here
+
+# Google Sheets
+PROGRAM_SHEET_ID=your_program_sheet_id_here
+MEMORY_SHEET_ID=your_coach_memory_sheet_id_here
+
+# Gmail
+GMAIL_FROM=your_email@gmail.com
+GMAIL_TO=your_email@gmail.com
+
+# Athlete
+ATHLETE_NAME=Nacho
+PROGRAM_START_DATE=2026-01-13
+# CURRENT_WEEK=8  # Optional override — normally auto-computed from PROGRAM_START_DATE + today
+
+# Email schedule (24h format, used by Task Scheduler / GitHub Actions cron)
+EMAIL_HOUR=22

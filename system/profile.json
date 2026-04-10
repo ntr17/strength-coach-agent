@@ -1,0 +1,31 @@
+{
+  "_note": "This file is populated by the initialization conversation. Run the init prompt in a new Claude chat to generate the initial content.",
+  "name": null,
+  "age": null,
+  "height_cm": null,
+  "location": null,
+  "languages": ["es", "en"],
+  "coaching_style": "direct",
+  "lifestyle": {
+    "job_intensity": null,
+    "travel_frequency": null,
+    "typical_training_days": null,
+    "notes": null
+  },
+  "goals": {
+    "short_term": [],
+    "long_term": [],
+    "target_lifts": {}
+  },
+  "golden_rules": [],
+  "active_injuries": [],
+  "health_context": {
+    "notes": null
+  },
+  "current_program": {
+    "name": null,
+    "structure": null,
+    "days_per_week": null,
+    "notes": null
+  }
+}
