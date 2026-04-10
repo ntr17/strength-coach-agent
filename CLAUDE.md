@@ -219,7 +219,7 @@ Elbow management:
 
 | Script | Purpose | When to use |
 |--------|---------|-------------|
-| scripts/pipeline.py | Full run: Sheet + Garmin → analysis → Drive | After session or on demand |
+| scripts/pipeline.py | Full run: coach.db + Garmin → analysis → Drive | After session or on demand |
 | scripts/estimate_strength.py | e1RM/e5RM estimation | When checking progress |
 | scripts/generate_program.py | Generate week/block/travel program | Program design |
 | scripts/import_session.py | Import session .md into DB | After every session |
