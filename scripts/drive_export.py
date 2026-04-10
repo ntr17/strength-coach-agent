@@ -8,7 +8,11 @@ Four detail files + one combined briefing:
   analysis.md        — stall detection, volume, load, trajectory, adherence, correlations
   BRIEFING.md        — compact combined briefing optimized for Claude to read at session start
 
-File writing and Drive upload are handled by pipeline.py and sheets_client.py.
+File writing and Drive upload are handled by pipeline.py and drive_client.py.
+
+DB-native variants (no Google Sheet dependency):
+  generate_program_context_md_from_db  — reads state.json + profile.json + strength_estimates
+  generate_briefing_md_from_db         — full briefing from DB data only
 """
 
 from datetime import date
@@ -574,6 +578,307 @@ def generate_briefing_md(
         "---",
         "",
         "*For full detail: training_log.md | program_context.md | health_recovery.md | analysis.md*",
+    ]
+
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# program_context.md — DB-native (no Google Sheet)
+# ---------------------------------------------------------------------------
+
+def generate_program_context_md_from_db(
+    state: dict,
+    profile: dict,
+    estimates: dict,
+    week_num: int,
+    total_weeks: int,
+) -> str:
+    """
+    Generate program_context.md from state.json + profile.json + latest estimates.
+    Does NOT read from Google Sheet.
+
+    Args:
+        state:       system/state.json contents
+        profile:     system/profile.json contents
+        estimates:   load_latest_estimates() output
+        week_num:    current week number
+        total_weeks: total program weeks
+    """
+    today        = date.today().isoformat()
+    pct_done     = round(week_num / total_weeks * 100) if total_weeks else 0
+    weeks_left   = total_weeks - week_num
+    block_num    = ((week_num - 1) // 5 + 1) if week_num else 1
+    program_name = profile.get("current_program", {}).get("name", "30-Week Strength")
+
+    lines = [
+        "# Program Context",
+        f"Generated: {today}",
+        f"Program: {program_name}",
+        f"Current Week: {week_num} of {total_weeks} (Block {block_num}) — {pct_done}% done, {weeks_left}w remaining",
+        "",
+    ]
+
+    # --- Goal lifts ---
+    goals_section = profile.get("goals", {})
+    current_e1rms = goals_section.get("current_e1rm", {})
+    target_e5rms  = goals_section.get("current_e5rm_targets", {})
+
+    if target_e5rms:
+        lines += ["## Goal Lifts", ""]
+        lines.append("| Lift | Current e1RM | Target e5RM | Gap | Estimated e1RM |")
+        lines.append("|------|-------------|-------------|-----|---------------|")
+        for lift, target in sorted(target_e5rms.items()):
+            current = current_e1rms.get(lift)
+            est     = estimates.get(lift, {})
+            est_e1rm = est.get("e1rm_kg")
+            est_date = est.get("estimated_at", "")
+
+            current_str = f"{current}kg" if current is not None else "—"
+            target_str  = f"{target}kg"  if target  is not None else "—"
+            est_str     = f"{est_e1rm}kg ({est_date[:10]})" if est_e1rm else "—"
+
+            if current is not None and target is not None:
+                try:
+                    gap     = round(float(target) - float(current), 1)
+                    gap_str = f"{gap:+.1f}kg"
+                except (TypeError, ValueError):
+                    gap_str = "—"
+            else:
+                gap_str = "—"
+
+            lines.append(f"| {lift} | {current_str} | {target_str} | {gap_str} | {est_str} |")
+        lines.append("")
+
+    # --- Latest strength estimates (full table) ---
+    if estimates:
+        lines += ["## Strength Estimates (latest)", ""]
+        lines.append("| Exercise | e1RM | e5RM | CI low | CI high | Date |")
+        lines.append("|----------|------|------|--------|---------|------|")
+        for ex, est in sorted(estimates.items()):
+            e1rm = f"{est['e1rm_kg']}kg" if est.get("e1rm_kg") is not None else "—"
+            e5rm = f"{est['e5rm_kg']}kg" if est.get("e5rm_kg") is not None else "—"
+            lo   = f"{est['confidence_low']}kg"  if est.get("confidence_low")  is not None else "—"
+            hi   = f"{est['confidence_high']}kg" if est.get("confidence_high") is not None else "—"
+            dt   = str(est.get("estimated_at", "—"))[:10]
+            lines.append(f"| {ex} | {e1rm} | {e5rm} | {lo} | {hi} | {dt} |")
+        lines.append("")
+    else:
+        lines += [
+            "## Strength Estimates",
+            "",
+            "*No estimates yet — run: `python scripts/estimate_strength.py --write`*",
+            "",
+        ]
+
+    # --- Active flags from state ---
+    flags = []
+    if state.get("deload_week"):
+        flags.append("DELOAD WEEK active")
+    if state.get("travel_week"):
+        flags.append("TRAVEL WEEK active")
+    if state.get("injury_flag"):
+        flags.append(f"INJURY FLAG: {state['injury_flag']}")
+
+    if flags:
+        lines += ["## Active Flags", ""]
+        for f in flags:
+            lines.append(f"- {f}")
+        lines.append("")
+
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# BRIEFING.md — DB-native (Claude reads this at the start of every conversation)
+# ---------------------------------------------------------------------------
+
+def generate_briefing_md_from_db(
+    state: dict,
+    profile: dict,
+    estimates: dict,
+    prs: dict,
+    health_data: list,
+    analysis: dict,
+    week_num: int,
+    total_weeks: int,
+) -> str:
+    """
+    Generate a compact BRIEFING.md from DB data only (no Google Sheet).
+
+    This is the main file Claude reads at the start of every conversation.
+    Compact, structured, and information-dense.
+
+    Args:
+        state:       system/state.json contents
+        profile:     system/profile.json contents
+        estimates:   load_latest_estimates() output  {exercise: {e1rm_kg, e5rm_kg, ...}}
+        prs:         compute_personal_records() output
+        health_data: load_health_records() output (sorted date desc)
+        analysis:    run_all() output
+        week_num:    current week number
+        total_weeks: total program weeks
+    """
+    today        = date.today().isoformat()
+    block_num    = ((week_num - 1) // 5 + 1) if week_num else 1
+    program_name = profile.get("current_program", {}).get("name", "30-Week Strength")
+
+    lines = [
+        f"# BRIEFING — {today}",
+        f"Generated: {today} | Week {week_num}/{total_weeks} (Block {block_num}) | Program: {program_name}",
+        "",
+    ]
+
+    # ------------------------------------------------------------------
+    # 1. Strength Estimates
+    # ------------------------------------------------------------------
+    lines += ["## Strength Estimates", ""]
+
+    if estimates:
+        lines.append("| Exercise | e1RM | e5RM | CI (low–high) | Date |")
+        lines.append("|----------|------|------|---------------|------|")
+        for ex, est in sorted(estimates.items()):
+            e1rm = f"{est['e1rm_kg']}kg" if est.get("e1rm_kg") is not None else "—"
+            e5rm = f"{est['e5rm_kg']}kg" if est.get("e5rm_kg") is not None else "—"
+            lo   = est.get("confidence_low")
+            hi   = est.get("confidence_high")
+            ci   = f"{lo}–{hi}kg" if (lo is not None and hi is not None) else "—"
+            dt   = str(est.get("estimated_at", "—"))[:10]
+            lines.append(f"| {ex} | {e1rm} | {e5rm} | {ci} | {dt} |")
+    else:
+        lines.append(
+            "*No estimates yet — run: `python scripts/estimate_strength.py --write`*"
+        )
+    lines.append("")
+
+    # ------------------------------------------------------------------
+    # 2. Personal Records (top 6 by e1RM)
+    # ------------------------------------------------------------------
+    lines += ["## Personal Records", ""]
+
+    if prs:
+        sorted_prs = sorted(
+            prs.items(),
+            key=lambda kv: kv[1].get("e1rm") or 0,
+            reverse=True,
+        )[:6]
+        lines.append("| Exercise | e1RM | Weight | Reps | Date | Week |")
+        lines.append("|----------|------|--------|------|------|------|")
+        for ex, pr in sorted_prs:
+            e1rm   = f"{pr['e1rm']}kg"      if pr.get("e1rm")       else "—"
+            weight = f"{pr['weight_kg']}kg"  if pr.get("weight_kg") else "—"
+            reps   = f"{pr['reps']:.0f}"     if pr.get("reps")       else "—"
+            dt     = str(pr["date"])         if pr.get("date")       else "—"
+            week   = f"W{pr['week']}"        if pr.get("week")       else "—"
+            lines.append(f"| {ex} | {e1rm} | {weight} | {reps} | {dt} | {week} |")
+    else:
+        lines.append("*No PR data yet.*")
+    lines.append("")
+
+    # ------------------------------------------------------------------
+    # 3. Health (7-day)
+    # ------------------------------------------------------------------
+    lines += ["## Health (7-day)", ""]
+
+    recent_7 = health_data[:7]  # already sorted date desc by load_health_records
+    if recent_7:
+        def _avg(key):
+            vals = [g[key] for g in recent_7 if g.get(key) is not None]
+            return round(sum(vals) / len(vals), 1) if vals else None
+
+        sleep_avg = _avg("sleep_hrs")
+        steps_avg = _avg("steps")
+        rhr_avg   = _avg("resting_hr")
+        hrv_avg   = _avg("hrv_ms")
+        bw_latest = next(
+            (g["body_weight_kg"] for g in recent_7 if g.get("body_weight_kg") is not None),
+            None,
+        )
+
+        lines.append("| Metric | Value |")
+        lines.append("|--------|-------|")
+        lines.append(f"| Sleep avg (h) | {sleep_avg or '—'} |")
+        lines.append(f"| Steps avg | {int(steps_avg) if steps_avg else '—'} |")
+        lines.append(f"| RHR avg (bpm) | {rhr_avg or '—'} |")
+        lines.append(f"| HRV avg (ms) | {hrv_avg or '—'} |")
+        lines.append(f"| Bodyweight (latest) | {f'{bw_latest}kg' if bw_latest else '—'} |")
+
+        if sleep_avg is not None and sleep_avg < 6.5:
+            lines.append("")
+            lines.append(
+                f"**FLAG: avg sleep {sleep_avg}h < 6.5h threshold — recovery risk**"
+            )
+    else:
+        lines.append("*No health data available.*")
+    lines.append("")
+
+    # ------------------------------------------------------------------
+    # 4. Analysis
+    # ------------------------------------------------------------------
+    lines += ["## Analysis", ""]
+
+    stalls      = analysis.get("stalls") or {}
+    stalled     = {k: v for k, v in stalls.items() if v["status"] == "STALL"}
+    progressing = {k: v for k, v in stalls.items() if v["status"] == "PROGRESSING"}
+    li          = analysis.get("load_index") or {}
+    load_signal = li.get("signal", "INSUFFICIENT_DATA")
+    load_ratio  = li.get("ratio")
+    adh         = analysis.get("adherence") or {}
+
+    if stalled:
+        lines.append(
+            f"**Stalls ({len(stalled)}):** "
+            + ", ".join(
+                f"{ex} ({v['recent_peak']}kg e1RM, {v['delta']:+.1f}kg)"
+                for ex, v in stalled.items()
+            )
+        )
+    else:
+        lines.append("Stalls: none detected")
+
+    if progressing:
+        lines.append(
+            f"**Progressing ({len(progressing)}):** "
+            + ", ".join(f"{ex} (+{v['delta']}kg)" for ex, v in progressing.items())
+        )
+
+    if load_ratio:
+        lines.append(f"Load index: {load_ratio} → **{load_signal}**")
+    else:
+        lines.append(f"Load index: {load_signal}")
+
+    if adh.get("last_4_weeks"):
+        r4 = adh["last_4_weeks"]
+        lines.append(
+            f"Adherence (last 4w): {r4['done']}/{r4['planned']} ({r4['rate'] * 100:.0f}%)"
+        )
+    lines.append("")
+
+    # ------------------------------------------------------------------
+    # 5. Open Items
+    # ------------------------------------------------------------------
+    lines += ["## Open Items", ""]
+
+    # Surface active state flags so Claude sees them immediately
+    if state.get("deload_week"):
+        lines.append("- **DELOAD WEEK active** — load ceiling 70%")
+    if state.get("travel_week"):
+        lines.append("- **TRAVEL WEEK active** — reduced frequency expected")
+    if state.get("injury_flag"):
+        lines.append(f"- **INJURY FLAG: {state['injury_flag']}**")
+
+    lines += [
+        "- Check `system/threads.json` for open decisions.",
+        "",
+    ]
+
+    # ------------------------------------------------------------------
+    # Footer
+    # ------------------------------------------------------------------
+    lines += [
+        "---",
+        "",
+        "Detail files: training_log.md | health_recovery.md | analysis.md | program_context.md",
     ]
 
     return "\n".join(lines)

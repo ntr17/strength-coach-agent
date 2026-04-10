@@ -38,10 +38,11 @@ jobs:
       - name: Run data pipeline
         env:
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
-          PROGRAM_SHEET_ID: ${{ secrets.PROGRAM_SHEET_ID }}
+          # DRIVE_FOLDER_ID: optional override. If not set as a secret, scripts fall back
+          # to the hardcoded default in drive_client.py / pipeline.py.
           DRIVE_FOLDER_ID: ${{ secrets.DRIVE_FOLDER_ID }}
           GARMIN_HISTORY_DAYS: "90"
-        run: python scripts/pipeline.py
+        run: python scripts/pipeline.py --skip-garmin
 
       - name: Commit coach.db changes (if any)
         run: |
