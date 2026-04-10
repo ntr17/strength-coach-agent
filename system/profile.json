@@ -1,61 +1,112 @@
 {
-  "_note": "Last updated: 2026-04-10. Fill nulls via conversation with Claude.",
+  "_note": "Last updated: 2026-04-11. Source of truth for all planning. Update when anything changes.",
   "name": "Nacho",
-  "age": null,
-  "height_cm": null,
+  "age": 25,
+  "height_cm": 173,
+  "body_weight_kg": 71,
   "location": "Spain",
   "languages": ["es", "en"],
   "coaching_style": "direct",
+
   "lifestyle": {
     "job": "Finance",
     "job_hours_per_day": "14-16",
     "travel_pattern": "Mon-Thu biweekly",
     "typical_training_days": 4,
-    "notes": "Very limited time. Training must be efficient. Travel weeks require hotel gym fallback."
+    "notes": "Very limited time. Training must be efficient. Travel weeks require hotel gym fallback. Sun exposure is a priority and tracked as a health metric."
   },
+
   "goals": {
+    "_note": "Goals are organized by horizon. The long-term arc document (system/plans/longterm.md) is the authoritative planning document.",
     "program_end_date": "2026-07-28",
-    "short_term": [
-      "Complete 30-week strength program",
-      "120kg squat by end of program",
-      "105kg bench by end of program"
+
+    "current_program": {
+      "squat_x5": 120,
+      "bench_x5": 105,
+      "notes": "30-week strength program, end Jul 2026"
+    },
+
+    "medium_term": [
+      {"goal": "16+ inch arms", "category": "aesthetics", "horizon": "1-2 years"},
+      {"goal": "80kg dips", "category": "calisthenics_strength", "horizon": "2-3 years"},
+      {"goal": "80kg pull-ups", "category": "calisthenics_strength", "horizon": "2-3 years"},
+      {"goal": "Muscle up with weight", "category": "calisthenics_strength", "horizon": "2-3 years"}
     ],
-    "long_term": [
-      "Transition to Olympic lifting after current program",
-      "Build a strength base that supports OLY movement patterns"
+
+    "long_term_strength": [
+      {"goal": "140kg squat x5", "category": "powerlifting"},
+      {"goal": "220kg deadlift x5", "category": "powerlifting"},
+      {"goal": "120kg bench x5", "category": "powerlifting"},
+      {"goal": "120kg hook grip row x5", "category": "back_strength"}
     ],
-    "target_lifts": {
-      "Squat":       {"start_kg": null, "target_kg": 120, "current_e1rm": null},
-      "Bench Press": {"start_kg": null, "target_kg": 105, "current_e1rm": null},
-      "Deadlift":    {"start_kg": null, "target_kg": null, "current_e1rm": null},
-      "OHP":         {"start_kg": null, "target_kg": null, "current_e1rm": null}
+
+    "long_term_athletic": [
+      {"goal": "Compete in Olympic weightlifting", "category": "sport"},
+      {"goal": "Learn boxing", "category": "sport"},
+      {"goal": "Sprint 100m in 11-12 seconds", "category": "speed"},
+      {"goal": "VO2 max 70", "category": "cardio"},
+      {"goal": "Resting HR 40 bpm", "category": "cardio"},
+      {"goal": "Run 5k sub-15min in a race (to win it)", "category": "running"}
+    ],
+
+    "current_e1rm": {
+      "Squat": 105,
+      "Bench Press": 92.5,
+      "Deadlift": 170,
+      "OHP": null
+    },
+
+    "current_e5rm_targets": {
+      "Squat": 120,
+      "Bench Press": 105,
+      "notes": "Program targets are x5 (not x1), confirmed by user"
     }
   },
-  "golden_rules": [
-    "Max 4 training days per week",
-    "Deload every 5 weeks (or when load index flags HIGH)",
-    "No training through sharp elbow pain — modify or skip"
-  ],
+
+  "golden_rules": {
+    "_note": "These are non-negotiable principles. CLAUDE must check these before making any planning recommendation.",
+    "principles": ["Longevity first", "Aesthetics and athleticism over pure strength numbers", "Health as a metric (sleep, sun, HRV)", "Sun exposure tracked daily"],
+    "hard_constraints": [
+      "Max 4 training days per week",
+      "Deload every 5 weeks or when load index flags HIGH",
+      "No training through sharp joint pain — modify or skip",
+      "Never sacrifice mobility or joint health for a lift PR"
+    ],
+    "questions_to_resolve": [
+      "What specific rules does 'longevity first' translate to in programming decisions?",
+      "What does 'health and sun' mean as a training constraint vs lifestyle priority?",
+      "Any dietary rules beyond insulin resistance / carb timing?"
+    ]
+  },
+
   "active_injuries": [
     {
       "injury_name": "Golfer's elbow",
       "body_part": "left elbow",
       "start_date": null,
-      "severity": null,
-      "notes": "Watch pull volume. Stop any pulling if sharp pain."
+      "severity": 3,
+      "cause": "Likely from arm training (curls, direct bicep work)",
+      "notes": "Watch pull volume. Limit direct arm training. Stop any exercise if sharp pain. Monitor — if severity goes to 4-5, take a full deload from pulling."
     }
   ],
+
   "health_context": {
     "insulin_resistance": true,
     "notes": "Carb timing matters. Higher carb around training. Avoid large carb meals before sleep.",
-    "wearable": "Garmin"
+    "wearable": "Garmin",
+    "health_targets": {
+      "resting_hr_target": 40,
+      "vo2max_target": 70,
+      "sun_exposure": "daily, tracked in health_log"
+    }
   },
+
   "current_program": {
     "name": "30-Week Strength",
     "sheet_id": "1UWTANkiCxWTl0gD1SEZA2dgn4-JukVoUZmxvoDQ0Wo8",
     "start_date": "2026-01-13",
     "total_weeks": 30,
     "days_per_week": 4,
-    "notes": "Periodized 6-block program. Main lifts: Squat, Bench, Deadlift, OHP."
+    "notes": "Periodized 6-block program. Main lifts: Squat, Bench, Deadlift, OHP. Program targets are x5 sets, not 1RM tests."
   }
 }
