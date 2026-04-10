@@ -1,0 +1,52 @@
+name: Data Pipeline
+
+on:
+  schedule:
+    # Run nightly at 06:30 UTC (after Garmin data is available)
+    - cron: "30 6 * * *"
+  workflow_dispatch:  # manual trigger from GitHub UI
+
+jobs:
+  run-pipeline:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Install Garmin (optional)
+        run: pip install "garminconnect>=0.2.22" || true
+
+      - name: Run Garmin sync
+        env:
+          GARMIN_EMAIL: ${{ secrets.GARMIN_EMAIL }}
+          GARMIN_PASSWORD: ${{ secrets.GARMIN_PASSWORD }}
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+        run: python scripts/garmin_sync.py
+        continue-on-error: true
+
+      - name: Run data pipeline
+        env:
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          PROGRAM_SHEET_ID: ${{ secrets.PROGRAM_SHEET_ID }}
+          DRIVE_FOLDER_ID: ${{ secrets.DRIVE_FOLDER_ID }}
+          GARMIN_HISTORY_DAYS: "90"
+        run: python scripts/pipeline.py
+
+      - name: Commit coach.db changes (if any)
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/coach.db
+          git diff --staged --quiet || git commit -m "chore: nightly Garmin sync [skip ci]"
+          git push || true

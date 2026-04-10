@@ -1,31 +1,61 @@
 {
-  "_note": "This file is populated by the initialization conversation. Run the init prompt in a new Claude chat to generate the initial content.",
-  "name": null,
+  "_note": "Last updated: 2026-04-10. Fill nulls via conversation with Claude.",
+  "name": "Nacho",
   "age": null,
   "height_cm": null,
-  "location": null,
+  "location": "Spain",
   "languages": ["es", "en"],
   "coaching_style": "direct",
   "lifestyle": {
-    "job_intensity": null,
-    "travel_frequency": null,
-    "typical_training_days": null,
-    "notes": null
+    "job": "Finance",
+    "job_hours_per_day": "14-16",
+    "travel_pattern": "Mon-Thu biweekly",
+    "typical_training_days": 4,
+    "notes": "Very limited time. Training must be efficient. Travel weeks require hotel gym fallback."
   },
   "goals": {
-    "short_term": [],
-    "long_term": [],
-    "target_lifts": {}
+    "program_end_date": "2026-07-28",
+    "short_term": [
+      "Complete 30-week strength program",
+      "120kg squat by end of program",
+      "105kg bench by end of program"
+    ],
+    "long_term": [
+      "Transition to Olympic lifting after current program",
+      "Build a strength base that supports OLY movement patterns"
+    ],
+    "target_lifts": {
+      "Squat":       {"start_kg": null, "target_kg": 120, "current_e1rm": null},
+      "Bench Press": {"start_kg": null, "target_kg": 105, "current_e1rm": null},
+      "Deadlift":    {"start_kg": null, "target_kg": null, "current_e1rm": null},
+      "OHP":         {"start_kg": null, "target_kg": null, "current_e1rm": null}
+    }
   },
-  "golden_rules": [],
-  "active_injuries": [],
+  "golden_rules": [
+    "Max 4 training days per week",
+    "Deload every 5 weeks (or when load index flags HIGH)",
+    "No training through sharp elbow pain — modify or skip"
+  ],
+  "active_injuries": [
+    {
+      "injury_name": "Golfer's elbow",
+      "body_part": "left elbow",
+      "start_date": null,
+      "severity": null,
+      "notes": "Watch pull volume. Stop any pulling if sharp pain."
+    }
+  ],
   "health_context": {
-    "notes": null
+    "insulin_resistance": true,
+    "notes": "Carb timing matters. Higher carb around training. Avoid large carb meals before sleep.",
+    "wearable": "Garmin"
   },
   "current_program": {
-    "name": null,
-    "structure": null,
-    "days_per_week": null,
-    "notes": null
+    "name": "30-Week Strength",
+    "sheet_id": "1UWTANkiCxWTl0gD1SEZA2dgn4-JukVoUZmxvoDQ0Wo8",
+    "start_date": "2026-01-13",
+    "total_weeks": 30,
+    "days_per_week": 4,
+    "notes": "Periodized 6-block program. Main lifts: Squat, Bench, Deadlift, OHP."
   }
 }

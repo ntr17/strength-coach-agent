@@ -1,8 +1,11 @@
-# Core
-anthropic>=0.18.0
-
-# Garmin sync (optional — install separately if needed)
-# pip install "garminconnect>=0.2.22"
+# Google APIs
+gspread>=6.0.0
+google-auth>=2.0.0
+google-auth-oauthlib>=1.0.0
+google-api-python-client>=2.0.0
 
 # Development / testing
 pytest>=7.4.0
+
+# Garmin sync (optional — install separately if needed)
+# pip install "garminconnect>=0.2.22"

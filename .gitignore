@@ -1,6 +1,18 @@
 # Secrets — NEVER commit
 .env
 *.key
+config/credentials.json
+config/token.json
+config/token_b64.txt
+config/*.json
+config/*.txt
+
+# Generated output (uploaded to Drive, not stored in git)
+output/
+
+# Large binary files (Excel programs)
+programs/*.xlsx
+programs/*.xls
 
 # Python
 __pycache__/
@@ -22,3 +34,4 @@ Thumbs.db
 
 # Pytest cache
 .pytest_cache/
+output/
