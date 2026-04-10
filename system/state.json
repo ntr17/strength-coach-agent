@@ -1,0 +1,16 @@
+{
+  "_note": "Updated by pipeline or manually. last_updated is always ISO date.",
+  "last_updated": "2026-04-10",
+  "current_week": 11,
+  "current_block": 3,
+  "program_name": "30-Week Strength",
+  "program_start_date": "2026-01-13",
+  "program_end_date": "2026-07-28",
+  "last_session_date": null,
+  "last_session_day": null,
+  "active_deload": false,
+  "travel_week": false,
+  "last_estimate_run": null,
+  "last_pipeline_run": null,
+  "open_thread_count": 0
+}

@@ -1,24 +1,37 @@
-# Credentials - NEVER commit
-config/
+# Secrets — NEVER commit
 .env
 *.key
-token.pickle
+config/credentials.json
+config/token.json
+config/token_b64.txt
+config/*.json
+config/*.txt
 
-# Keep .env.example (it's a template, no secrets)
-!.env.example
+# Generated output (uploaded to Drive, not stored in git)
+output/
 
-# Program files (personal data)
-programs/
+# Large binary files (Excel programs)
+programs/*.xlsx
+programs/*.xls
 
 # Python
 __pycache__/
 *.py[cod]
+*.pyo
 venv/
 .venv/
+
+# The database IS committed (it's the source of truth in this repo)
+# data/coach.db is tracked intentionally
+
+# OS
+.DS_Store
+Thumbs.db
 
 # IDE
 .vscode/
 .idea/
 
-# OS
-.DS_Store
+# Pytest cache
+.pytest_cache/
+output/
