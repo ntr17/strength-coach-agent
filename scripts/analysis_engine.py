@@ -51,14 +51,14 @@ def _muscle_group(exercise: str) -> str:
 def _volume_adjusted_e1rm_per_week(
     records: list[dict],
     exercise_key_fn,          # callable(r) -> str key (lift name) or None to skip
-    volume_factor: float = 0.025,
+    volume_factor: float = 0.005,
 ) -> dict[str, dict[int, float]]:
     """
     Group working sets by (exercise_key, week, date), count sets per session,
     apply +volume_factor per additional set beyond the first to the session's max e1RM,
     then return max adjusted e1RM per (exercise_key, week).
 
-    Example: 5x3 @ 100kg → base e1RM 110kg, n_sets=5 → 110 * (1 + 0.025*4) = 121kg
+    Example: 5x3 @ 100kg → base e1RM 110kg, n_sets=5 → 110 * (1 + 0.005*4) = 112.2kg
              1x3 @ 100kg → base e1RM 110kg, n_sets=1 → 110 * 1.0 = 110kg
     """
     from collections import defaultdict
