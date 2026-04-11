@@ -171,17 +171,27 @@ def main():
         print("[pipeline] Uploading to Drive...")
         try:
             from drive_client import upload_files_to_drive
-            # Include system files so Claude Project can read them
+            # Include system files so Claude Project can read them.
+            # Names have NO extensions — Drive search finds Google Docs by name,
+            # and extensions cause them to be invisible to Claude's integration.
             system_dir = Path(__file__).parent.parent / "system"
             system_files = {
-                "state.json":           (system_dir / "state.json").read_text(encoding="utf-8"),
-                "profile.json":         (system_dir / "profile.json").read_text(encoding="utf-8"),
-                "threads.json":         (system_dir / "threads.json").read_text(encoding="utf-8"),
-                "athlete_profile.md":   (system_dir / "athlete_profile.md").read_text(encoding="utf-8"),
-                "plans_longterm.md":    (system_dir / "plans" / "longterm.md").read_text(encoding="utf-8"),
-                "plans_annual.md":      (system_dir / "plans" / "annual.md").read_text(encoding="utf-8"),
+                "state":           (system_dir / "state.json").read_text(encoding="utf-8"),
+                "profile":         (system_dir / "profile.json").read_text(encoding="utf-8"),
+                "threads":         (system_dir / "threads.json").read_text(encoding="utf-8"),
+                "athlete_profile": (system_dir / "athlete_profile.md").read_text(encoding="utf-8"),
+                "plans_longterm":  (system_dir / "plans" / "longterm.md").read_text(encoding="utf-8"),
+                "plans_annual":    (system_dir / "plans" / "annual.md").read_text(encoding="utf-8"),
             }
-            upload_files_to_drive({**files, **system_files}, DRIVE_FOLDER_ID)
+            # Output files also without extensions for Drive
+            drive_files = {
+                "BRIEFING":        files["BRIEFING.md"],
+                "training_log":    files["training_log.md"],
+                "program_context": files["program_context.md"],
+                "health_recovery": files["health_recovery.md"],
+                "analysis":        files["analysis.md"],
+            }
+            upload_files_to_drive({**drive_files, **system_files}, DRIVE_FOLDER_ID)
         except Exception as e:
             print(f"[pipeline] Drive upload failed (non-fatal): {e}")
 
