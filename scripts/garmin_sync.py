@@ -10,6 +10,15 @@ If the API changed fundamentally, see: https://github.com/cyberjunky/python-garm
 Credentials (environment variables):
     GARMIN_EMAIL      your Garmin Connect email
     GARMIN_PASSWORD   your Garmin Connect password
+    GARMIN_TOKENS     base64-encoded token dir (avoids password re-auth in CI)
+
+Token-based auth (recommended for CI — avoids Garmin IP rate limiting):
+  1. Run locally once to export tokens:
+       python scripts/garmin_sync.py --export-tokens
+     This prints a base64 string.
+  2. Add it as GitHub secret GARMIN_TOKENS.
+  3. CI uses tokens automatically — no password auth, no rate limiting.
+  Tokens last weeks. When they expire, re-run --export-tokens.
 
 Behavior:
   - Pulls data for yesterday (or --date YYYY-MM-DD)
@@ -20,15 +29,20 @@ Behavior:
 
 Usage:
     python scripts/garmin_sync.py
+    python scripts/garmin_sync.py --export-tokens   # auth + print GARMIN_TOKENS value
     python scripts/garmin_sync.py --date 2026-04-07
-    python scripts/garmin_sync.py --days 7         # backfill last 7 days
-    GARMIN_MOCK=1 python scripts/garmin_sync.py    # test without credentials
+    python scripts/garmin_sync.py --days 7          # backfill last 7 days
+    GARMIN_MOCK=1 python scripts/garmin_sync.py     # test without credentials
 """
 
 import argparse
+import base64
+import io
 import os
 import sqlite3
 import sys
+import tempfile
+import zipfile
 from datetime import date, timedelta
 
 DEFAULT_DB_PATH = os.path.join(os.path.dirname(__file__), "..", "data", "coach.db")
@@ -52,10 +66,40 @@ def _mock_data(target_date: date) -> dict:
 # Garmin fetch
 # ---------------------------------------------------------------------------
 
-def _fetch_garmin(target_date: date, email: str, password: str) -> dict | None:
+def _token_dir_to_b64(token_dir: str) -> str:
+    """Zip all files in token_dir and return base64 string."""
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for fname in os.listdir(token_dir):
+            zf.write(os.path.join(token_dir, fname), fname)
+    return base64.b64encode(buf.getvalue()).decode("ascii")
+
+
+def _b64_to_token_dir(b64: str, target_dir: str) -> None:
+    """Decode base64 token zip into target_dir."""
+    data = base64.b64decode(b64)
+    with zipfile.ZipFile(io.BytesIO(data)) as zf:
+        zf.extractall(target_dir)
+
+
+def _login_garmin(email: str, password: str, tokenstore: str | None = None):
+    """Auth to Garmin. Uses tokenstore if provided (avoids password re-auth)."""
+    import garminconnect
+    client = garminconnect.Garmin(email or "", password or "")
+    if tokenstore:
+        client.login(tokenstore=tokenstore)
+    else:
+        client.login()
+    return client
+
+
+def _fetch_garmin(target_date: date, email: str, password: str,
+                  tokenstore: str | None = None) -> dict | None:
     """
     Fetch daily metrics from Garmin Connect for target_date.
     Returns a dict or None on any failure.
+
+    tokenstore: path to directory with cached OAuth tokens (avoids password auth).
 
     The garminconnect library's API surface:
       client.get_stats(datestr)     → daily steps, calories, etc.
@@ -74,8 +118,7 @@ def _fetch_garmin(target_date: date, email: str, password: str) -> dict | None:
     datestr = str(target_date)
 
     try:
-        client = garminconnect.Garmin(email, password)
-        client.login()
+        client = _login_garmin(email, password, tokenstore)
     except Exception as e:
         print(f"Garmin auth failed: {e}")
         return None
@@ -178,19 +221,40 @@ def main() -> None:
     parser.add_argument("--date", help="Target date YYYY-MM-DD (default: yesterday)")
     parser.add_argument("--days", type=int, default=1, help="Sync last N days (default: 1)")
     parser.add_argument("--db-path", default=DEFAULT_DB_PATH)
+    parser.add_argument("--export-tokens", action="store_true",
+                        help="Auth with email/password, export tokens as base64 for GARMIN_TOKENS secret")
     args = parser.parse_args()
+
+    email    = os.environ.get("GARMIN_EMAIL", "")
+    password = os.environ.get("GARMIN_PASSWORD", "")
+    tokens_b64 = os.environ.get("GARMIN_TOKENS", "").strip()
+    mock     = os.environ.get("GARMIN_MOCK", "").strip() in ("1", "true", "yes")
+
+    # --export-tokens: auth locally, print base64 for use as GARMIN_TOKENS secret
+    if args.export_tokens:
+        if not email or not password:
+            print("ERROR: GARMIN_EMAIL and GARMIN_PASSWORD must be set to export tokens.")
+            sys.exit(1)
+        with tempfile.TemporaryDirectory() as tdir:
+            print("Authenticating with Garmin...")
+            try:
+                _login_garmin(email, password, tokenstore=tdir)
+            except Exception as e:
+                print(f"Auth failed: {e}")
+                sys.exit(1)
+            b64 = _token_dir_to_b64(tdir)
+        print("\n--- Copy this value as your GARMIN_TOKENS GitHub secret ---")
+        print(b64)
+        print("-----------------------------------------------------------")
+        return
 
     db_path = os.path.abspath(args.db_path)
     if not os.path.isfile(db_path):
         print(f"ERROR: Database not found at {db_path}. Run: python scripts/init_db.py")
-        sys.exit(0)  # exit 0 so GH Actions doesn't spam
+        sys.exit(0)
 
-    email    = os.environ.get("GARMIN_EMAIL", "")
-    password = os.environ.get("GARMIN_PASSWORD", "")
-    mock     = os.environ.get("GARMIN_MOCK", "").strip() in ("1", "true", "yes")
-
-    if not mock and (not email or not password):
-        print("Garmin credentials not set (GARMIN_EMAIL / GARMIN_PASSWORD). Skipping sync.")
+    if not mock and not tokens_b64 and (not email or not password):
+        print("Garmin credentials not set (GARMIN_EMAIL/GARMIN_PASSWORD or GARMIN_TOKENS). Skipping.")
         sys.exit(0)
 
     # Build list of dates to sync
@@ -206,6 +270,19 @@ def main() -> None:
         yesterday = date.today() - timedelta(days=1)
         dates = [yesterday - timedelta(days=i) for i in range(args.days)]
 
+    # Set up tokenstore if GARMIN_TOKENS is available
+    token_tmpdir = None
+    tokenstore = None
+    if tokens_b64 and not mock:
+        token_tmpdir = tempfile.mkdtemp()
+        try:
+            _b64_to_token_dir(tokens_b64, token_tmpdir)
+            tokenstore = token_tmpdir
+            print("Using cached Garmin tokens (no password auth)")
+        except Exception as e:
+            print(f"Failed to decode GARMIN_TOKENS: {e}. Falling back to password auth.")
+            tokenstore = None
+
     conn = sqlite3.connect(db_path)
     inserted = 0
     try:
@@ -214,7 +291,7 @@ def main() -> None:
             if mock:
                 data = _mock_data(target_date)
             else:
-                data = _fetch_garmin(target_date, email, password)
+                data = _fetch_garmin(target_date, email, password, tokenstore=tokenstore)
 
             if data is None:
                 print(f"  No data returned for {target_date}.")
@@ -231,6 +308,9 @@ def main() -> None:
         conn.commit()
     finally:
         conn.close()
+        if token_tmpdir:
+            import shutil
+            shutil.rmtree(token_tmpdir, ignore_errors=True)
 
     print(f"Done. {inserted} row(s) written.")
 

@@ -31,23 +31,21 @@ jobs:
         env:
           GARMIN_EMAIL: ${{ secrets.GARMIN_EMAIL }}
           GARMIN_PASSWORD: ${{ secrets.GARMIN_PASSWORD }}
-          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          GARMIN_TOKENS: ${{ secrets.GARMIN_TOKENS }}
         run: python scripts/garmin_sync.py
         continue-on-error: true
 
       - name: Run data pipeline
         env:
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
-          # DRIVE_FOLDER_ID: optional override. If not set as a secret, scripts fall back
-          # to the hardcoded default in drive_client.py / pipeline.py.
           DRIVE_FOLDER_ID: ${{ secrets.DRIVE_FOLDER_ID }}
           GARMIN_HISTORY_DAYS: "90"
         run: python scripts/pipeline.py --skip-garmin
 
-      - name: Commit coach.db changes (if any)
+      - name: Commit pipeline output
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add data/coach.db
-          git diff --staged --quiet || git commit -m "chore: nightly Garmin sync [skip ci]"
+          git add data/coach.db output/ system/state.json
+          git diff --staged --quiet || git commit -m "chore: nightly pipeline [skip ci]"
           git push || true
