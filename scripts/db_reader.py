@@ -34,23 +34,23 @@ def _epley(weight_kg, reps):
 
 def load_lift_records(db_path=DEFAULT_DB, weeks=None) -> list[dict]:
     """
-    Read all completed sets from lift_sets (should_count=1).
+    Read all sets from lift_sets. should_count is passed through as a field
+    so callers can decide: strength estimates filter should_count=1,
+    volume/training-days metrics use all sets.
 
     Returns one dict per SET. analysis_engine handles aggregation.
 
     Args:
         db_path: path to coach.db
         weeks:   if given, return only the last N weeks by week_number
-
-    Dict keys match what analysis_engine.py and drive_export.py expect.
     """
     conn = _connect(db_path)
     try:
-        # Determine week filter
+        # Determine week filter based on all sets
         max_week = None
         if weeks is not None:
             row = conn.execute(
-                "SELECT MAX(week_number) FROM lift_sets WHERE should_count = 1"
+                "SELECT MAX(week_number) FROM lift_sets"
             ).fetchone()
             max_week = row[0] if row and row[0] is not None else None
 
@@ -60,12 +60,11 @@ def load_lift_records(db_path=DEFAULT_DB, weeks=None) -> list[dict]:
                 exercise, set_number, reps, weight_kg, is_amrap, should_count,
                 rpe, notes
             FROM lift_sets
-            WHERE should_count = 1
         """
         params: list = []
         if weeks is not None and max_week is not None:
             min_week = max_week - weeks + 1
-            query += " AND week_number >= ?"
+            query += " WHERE week_number >= ?"
             params.append(min_week)
 
         query += " ORDER BY session_date, week_number, day_number, exercise, set_number"
@@ -103,7 +102,8 @@ def load_lift_records(db_path=DEFAULT_DB, weeks=None) -> list[dict]:
             "actual_sets":      1,           # one row = one set
             "actual_reps":      float(reps) if reps is not None else None,
             "rpe":              row["rpe"],
-            "done":             True,         # all DB records are completed
+            "done":             True,         # all DB records are completed sets
+            "should_count":     int(row["should_count"]) if row["should_count"] is not None else 1,
             "session_notes":    row["notes"],
             "e1rm":             e1rm,
             "is_amrap":         bool(row["is_amrap"]),

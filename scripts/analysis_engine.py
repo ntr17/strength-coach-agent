@@ -66,9 +66,10 @@ def detect_stalls(records: list[dict], min_weeks: int = 3) -> dict[str, dict]:
     }
     """
     # Group e1RM by (exercise, week) — take the max e1RM per week
+    # Only use should_count=1 sets for strength estimates
     ex_week_e1rm: dict[str, dict[int, float]] = {}
     for r in records:
-        if r["done"] is not True or r["e1rm"] is None:
+        if r["done"] is not True or r["e1rm"] is None or r.get("should_count", 1) != 1:
             continue
         ex = r["exercise"]
         w = r["week"]
@@ -509,10 +510,10 @@ def compute_strength_trends(records: list[dict], key_lifts: list[str] = None, hi
     if key_lifts is None:
         key_lifts = ["Squat", "Bench Press", "Deadlift", "OHP"]
 
-    # Build max e1RM per week per lift
+    # Build max e1RM per week per lift — only should_count=1 sets for estimates
     ex_week: dict[str, dict[int, float]] = {}
     for r in records:
-        if r["done"] is not True or r["e1rm"] is None:
+        if r["done"] is not True or r["e1rm"] is None or r.get("should_count", 1) != 1:
             continue
         for lift in key_lifts:
             if lift.lower() in r["exercise"].lower():
@@ -760,6 +761,44 @@ def compute_health_trends(health_data: list[dict]) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Training days per week
+# ---------------------------------------------------------------------------
+
+def compute_training_days(records: list[dict], weeks: int = 8) -> dict:
+    """
+    Count distinct training days per week (all sets, regardless of should_count).
+
+    Returns:
+    {
+        "weeks": [w1, w2, ...],
+        "days_per_week": [int, ...],   # distinct session dates per week
+        "avg_days": float | None,      # average over the window
+    }
+    """
+    from collections import defaultdict
+    week_dates: dict[int, set] = defaultdict(set)
+    for r in records:
+        if r["done"] is not True or r["date"] is None:
+            continue
+        week_dates[r["week"]].add(r["date"])
+
+    if not week_dates:
+        return {"weeks": [], "days_per_week": [], "avg_days": None}
+
+    all_weeks = sorted(week_dates.keys())
+    latest = all_weeks[-1]
+    target_weeks = [w for w in all_weeks if w >= latest - weeks + 1]
+    days_per_week = [len(week_dates[w]) for w in target_weeks]
+    avg = round(sum(days_per_week) / len(days_per_week), 1) if days_per_week else None
+
+    return {
+        "weeks": target_weeks,
+        "days_per_week": days_per_week,
+        "avg_days": avg,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Combined runner
 # ---------------------------------------------------------------------------
 
@@ -818,6 +857,12 @@ def run_all(
     except Exception as e:
         results["adherence"] = None
         results["adherence_error"] = str(e)
+
+    try:
+        results["training_days"] = compute_training_days(records)
+    except Exception as e:
+        results["training_days"] = None
+        results["training_days_error"] = str(e)
 
     try:
         results["sleep_correlation"] = compute_sleep_correlation(records, garmin_data)

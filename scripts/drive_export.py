@@ -892,6 +892,13 @@ def generate_briefing_md_from_db(
         r4 = adh["last_4_weeks"]
         lines.append(f"Adherence (last 4w): {r4['done']}/{r4['planned']} ({r4['rate']*100:.0f}%)")
 
+    td = analysis.get("training_days") or {}
+    if td.get("weeks"):
+        history = " | ".join(f"W{w}:{d}d" for w, d in zip(td["weeks"], td["days_per_week"]))
+        avg = td.get("avg_days")
+        avg_str = f" (avg {avg}/week)" if avg is not None else ""
+        lines.append(f"Training days/week: {history}{avg_str}")
+
     corr = analysis.get("sleep_correlation")
     if corr:
         if corr.get("hrv_vs_rpe"):
