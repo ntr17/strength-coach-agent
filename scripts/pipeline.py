@@ -78,6 +78,7 @@ def main():
             [sys.executable, str(Path(__file__).parent / "estimate_strength.py"),
              "--write", "--db-path", str(DB_PATH)],
             capture_output=True, text=True, timeout=60,
+            env={**os.environ, "PYTHONIOENCODING": "utf-8"},
         )
         if result.returncode == 0:
             print("[pipeline] Strength estimates updated")
@@ -156,8 +157,9 @@ def main():
     # 6. Write output
     # ------------------------------------------------------------------
     if args.dry_run:
-        print("\n" + "=" * 60 + "\nDRY RUN — BRIEFING.md\n" + "=" * 60)
-        print(files["BRIEFING.md"])
+        header = "\n" + "=" * 60 + "\nDRY RUN — BRIEFING.md\n" + "=" * 60 + "\n"
+        sys.stdout.buffer.write((header + files["BRIEFING.md"]).encode("utf-8"))
+        sys.stdout.buffer.flush()
         return
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
