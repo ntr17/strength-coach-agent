@@ -45,6 +45,49 @@ def _muscle_group(exercise: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Volume-adjusted e1RM helper
+# ---------------------------------------------------------------------------
+
+def _volume_adjusted_e1rm_per_week(
+    records: list[dict],
+    exercise_key_fn,          # callable(r) -> str key (lift name) or None to skip
+    volume_factor: float = 0.025,
+) -> dict[str, dict[int, float]]:
+    """
+    Group working sets by (exercise_key, week, date), count sets per session,
+    apply +volume_factor per additional set beyond the first to the session's max e1RM,
+    then return max adjusted e1RM per (exercise_key, week).
+
+    Example: 5x3 @ 100kg → base e1RM 110kg, n_sets=5 → 110 * (1 + 0.025*4) = 121kg
+             1x3 @ 100kg → base e1RM 110kg, n_sets=1 → 110 * 1.0 = 110kg
+    """
+    from collections import defaultdict
+
+    # Group by (lift_key, week, date)
+    session: dict[tuple, dict] = defaultdict(lambda: {"max_e1rm": 0.0, "n_sets": 0})
+    for r in records:
+        if r["done"] is not True or r["e1rm"] is None or r.get("should_count", 1) != 1:
+            continue
+        key = exercise_key_fn(r)
+        if key is None:
+            continue
+        sk = (key, r["week"], r.get("date"))
+        session[sk]["n_sets"] += 1
+        if r["e1rm"] > session[sk]["max_e1rm"]:
+            session[sk]["max_e1rm"] = r["e1rm"]
+
+    # Apply volume correction, aggregate max per (lift_key, week)
+    ex_week: dict[str, dict[int, float]] = {}
+    for (lift_key, week, _date), data in session.items():
+        adjusted = round(data["max_e1rm"] * (1 + volume_factor * (data["n_sets"] - 1)), 1)
+        ex_week.setdefault(lift_key, {})
+        if adjusted > ex_week[lift_key].get(week, 0):
+            ex_week[lift_key][week] = adjusted
+
+    return ex_week
+
+
+# ---------------------------------------------------------------------------
 # Stall detection
 # ---------------------------------------------------------------------------
 
@@ -65,17 +108,12 @@ def detect_stalls(records: list[dict], min_weeks: int = 3) -> dict[str, dict]:
         "last_e1rm":   float | None,
     }
     """
-    # Group e1RM by (exercise, week) — take the max e1RM per week
+    # Group e1RM by (exercise, week) with volume correction
     # Only use should_count=1 sets for strength estimates
-    ex_week_e1rm: dict[str, dict[int, float]] = {}
-    for r in records:
-        if r["done"] is not True or r["e1rm"] is None or r.get("should_count", 1) != 1:
-            continue
-        ex = r["exercise"]
-        w = r["week"]
-        ex_week_e1rm.setdefault(ex, {})
-        if r["e1rm"] > ex_week_e1rm[ex].get(w, 0):
-            ex_week_e1rm[ex][w] = r["e1rm"]
+    ex_week_e1rm = _volume_adjusted_e1rm_per_week(
+        records,
+        exercise_key_fn=lambda r: r["exercise"],
+    )
 
     results: dict[str, dict] = {}
     for ex, week_map in ex_week_e1rm.items():
@@ -509,17 +547,15 @@ def compute_strength_trends(records: list[dict], key_lifts: list[str] = None, hi
     if key_lifts is None:
         key_lifts = ["Squat", "Bench Press", "Deadlift", "OHP"]
 
-    # Build max e1RM per week per lift — only should_count=1 sets for estimates
-    ex_week: dict[str, dict[int, float]] = {}
-    for r in records:
-        if r["done"] is not True or r["e1rm"] is None or r.get("should_count", 1) != 1:
-            continue
+    # Build volume-adjusted e1RM per week per lift — only should_count=1 sets
+    def _lift_key(r):
+        ex = r["exercise"].lower()
         for lift in key_lifts:
-            if lift.lower() in r["exercise"].lower():
-                ex_week.setdefault(lift, {})
-                w = r["week"]
-                if r["e1rm"] > ex_week[lift].get(w, 0):
-                    ex_week[lift][w] = r["e1rm"]
+            if lift.lower() in ex:
+                return lift
+        return None
+
+    ex_week = _volume_adjusted_e1rm_per_week(records, exercise_key_fn=_lift_key)
 
     def _linear_rate(points: list[tuple[int, float]]) -> float | None:
         """Simple linear regression slope (y per x unit)."""
