@@ -73,6 +73,7 @@ def upload_files_to_drive(files: dict, folder_id: str = None) -> None:
         if filename in existing:
             service.files().update(
                 fileId=existing[filename],
+                body={"mimeType": "application/vnd.google-apps.document"},
                 media_body=media,
             ).execute()
             print(f"  [drive] Updated: {filename}")
