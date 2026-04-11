@@ -486,6 +486,280 @@ def compute_sleep_correlation(
 
 
 # ---------------------------------------------------------------------------
+# Strength trends (week-by-week e1RM history + rate of gain + projection)
+# ---------------------------------------------------------------------------
+
+def compute_strength_trends(records: list[dict], key_lifts: list[str] = None, history_weeks: int = 12) -> dict:
+    """
+    For each key lift: week-by-week e1RM, rate of gain (kg/week from linear regression
+    on last 4-6 weeks), and projection (weeks to hit goal at current rate).
+
+    Returns:
+    {
+        "Squat": {
+            "history": [(week, e1rm), ...],   # sorted by week, last history_weeks
+            "rate_kg_per_week": float | None, # from linear regression last 4-6 data points
+            "projection_weeks": float | None, # weeks to hit goal at current rate
+            "goal_kg": float | None,
+            "current_e1rm": float | None,
+        },
+        ...
+    }
+    """
+    if key_lifts is None:
+        key_lifts = ["Squat", "Bench Press", "Deadlift", "OHP"]
+
+    # Build max e1RM per week per lift
+    ex_week: dict[str, dict[int, float]] = {}
+    for r in records:
+        if r["done"] is not True or r["e1rm"] is None:
+            continue
+        for lift in key_lifts:
+            if lift.lower() in r["exercise"].lower():
+                ex_week.setdefault(lift, {})
+                w = r["week"]
+                if r["e1rm"] > ex_week[lift].get(w, 0):
+                    ex_week[lift][w] = r["e1rm"]
+
+    def _linear_rate(points: list[tuple[int, float]]) -> float | None:
+        """Simple linear regression slope (y per x unit)."""
+        if len(points) < 2:
+            return None
+        n = len(points)
+        xs = [p[0] for p in points]
+        ys = [p[1] for p in points]
+        mx = sum(xs) / n
+        my = sum(ys) / n
+        denom = sum((x - mx) ** 2 for x in xs)
+        if denom == 0:
+            return None
+        slope = sum((xs[i] - mx) * (ys[i] - my) for i in range(n)) / denom
+        return round(slope, 2)
+
+    result = {}
+    for lift in key_lifts:
+        week_map = ex_week.get(lift, {})
+        all_weeks = sorted(week_map.keys())
+
+        # Keep last history_weeks
+        recent_weeks = all_weeks[-history_weeks:] if len(all_weeks) > history_weeks else all_weeks
+        history = [(w, week_map[w]) for w in recent_weeks]
+
+        current_e1rm = week_map[all_weeks[-1]] if all_weeks else None
+
+        # Rate from last 4-6 data points
+        rate_points = history[-6:] if len(history) >= 6 else history
+        rate = _linear_rate(rate_points)
+
+        result[lift] = {
+            "history": history,
+            "rate_kg_per_week": rate,
+            "projection_weeks": None,  # filled in by caller with goal info
+            "goal_kg": None,
+            "current_e1rm": current_e1rm,
+        }
+
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Body composition trends
+# ---------------------------------------------------------------------------
+
+def compute_body_comp_trends(health_data: list[dict], weeks: int = 12) -> dict:
+    """
+    Weekly body weight, fat %, visceral fat trends.
+
+    health_data: from load_health_records() — sorted date desc, has body_weight_kg, body_fat_pct, visceral_fat_index.
+
+    Returns:
+    {
+        "weight": {
+            "history": [(date_str, kg), ...],   # sorted date asc, last N entries with data
+            "rate_kg_per_week": float | None,   # positive = gaining, negative = losing
+            "current": float | None,
+            "flag": str | None,                 # e.g. "GAINING" | "LOSING" | "STABLE"
+        },
+        "body_fat_pct": {"history": [...], "current": float | None, "flag": str | None},
+        "visceral_fat": {"history": [...], "current": float | None, "flag": str | None},
+    }
+    """
+    from datetime import datetime, timedelta
+
+    def _trend(points):
+        """Points: list of (date_str, value). Returns rate per week."""
+        if len(points) < 2:
+            return None
+        # Convert date to day offset from first
+        try:
+            t0 = datetime.fromisoformat(points[0][0])
+            xs = [(datetime.fromisoformat(p[0]) - t0).days / 7.0 for p in points]
+            ys = [p[1] for p in points]
+        except Exception:
+            return None
+        n = len(xs)
+        mx = sum(xs) / n
+        my = sum(ys) / n
+        denom = sum((x - mx) ** 2 for x in xs)
+        if denom == 0:
+            return None
+        slope = sum((xs[i] - mx) * (ys[i] - my) for i in range(n)) / denom
+        return round(slope, 3)
+
+    def _flag_weight(rate):
+        if rate is None:
+            return None
+        if rate > 0.3:
+            return "GAINING_FAST"
+        if rate > 0.05:
+            return "GAINING"
+        if rate < -0.3:
+            return "LOSING_FAST"
+        if rate < -0.05:
+            return "LOSING"
+        return "STABLE"
+
+    # Sort ascending by date, filter last N weeks
+    sorted_data = sorted(health_data, key=lambda r: r["date"])
+
+    def _extract(field, max_entries=None):
+        pts = [(r["date"], r[field]) for r in sorted_data if r.get(field) is not None]
+        if max_entries:
+            pts = pts[-max_entries:]
+        return pts
+
+    w_pts = _extract("body_weight_kg", 4 * weeks)
+    f_pts = _extract("body_fat_pct", 4 * weeks)
+    v_pts = _extract("visceral_fat_index", 4 * weeks)
+
+    w_rate = _trend(w_pts)
+    f_rate = _trend(f_pts)
+    v_rate = _trend(v_pts)
+
+    return {
+        "weight": {
+            "history":         w_pts,
+            "rate_kg_per_week": w_rate,
+            "current":         w_pts[-1][1] if w_pts else None,
+            "flag":            _flag_weight(w_rate),
+        },
+        "body_fat_pct": {
+            "history": f_pts,
+            "rate_per_week": f_rate,
+            "current": f_pts[-1][1] if f_pts else None,
+        },
+        "visceral_fat": {
+            "history": v_pts,
+            "rate_per_week": v_rate,
+            "current": v_pts[-1][1] if v_pts else None,
+        },
+    }
+
+
+# ---------------------------------------------------------------------------
+# Health / recovery trends
+# ---------------------------------------------------------------------------
+
+def compute_health_trends(health_data: list[dict]) -> dict:
+    """
+    HRV, RHR, sleep: absolute values + vs 8-week personal baseline + trend direction.
+
+    Returns:
+    {
+        "hrv": {
+            "current": float | None,
+            "baseline_8w": float | None,    # 8-week rolling mean
+            "pct_vs_baseline": float | None, # (current - baseline) / baseline * 100
+            "recent_7": [float, ...],        # last 7 days sorted oldest->newest
+            "trend": "UP" | "DOWN" | "STABLE" | None,
+            "flag": str | None,             # "SUPPRESSED" if >15% below baseline
+        },
+        "rhr": { same structure },
+        "sleep": {
+            "current": float | None,
+            "recent_7": [float, ...],
+            "avg_7d": float | None,
+            "baseline_8w": float | None,
+            "trend": str | None,
+            "flag": str | None,  # "LOW" if avg < 6, "MARGINAL" if 6-7, "OK" if 7+
+        },
+    }
+    """
+    sorted_data = sorted(health_data, key=lambda r: r["date"])
+
+    def _vals(field, n=None):
+        pts = [r.get(field) for r in sorted_data if r.get(field) is not None]
+        return pts[-n:] if n else pts
+
+    def _avg(lst):
+        return round(sum(lst) / len(lst), 1) if lst else None
+
+    def _trend_dir(vals, window=7):
+        """Returns UP/DOWN/STABLE based on simple slope of last `window` points."""
+        pts = vals[-window:]
+        if len(pts) < 3:
+            return None
+        mid = len(pts) // 2
+        first_half = _avg(pts[:mid])
+        second_half = _avg(pts[mid:])
+        if first_half is None or second_half is None:
+            return None
+        diff = second_half - first_half
+        threshold = first_half * 0.03 if first_half else 0.5
+        if diff > threshold:
+            return "UP"
+        if diff < -threshold:
+            return "DOWN"
+        return "STABLE"
+
+    def _metric(field, flag_fn=None):
+        all_vals = _vals(field)
+        baseline_vals = all_vals[-56:] if len(all_vals) > 7 else all_vals  # ~8 weeks daily
+        recent_7 = all_vals[-7:]
+        current = all_vals[-1] if all_vals else None
+        baseline = _avg(baseline_vals[:-7]) if len(baseline_vals) > 7 else _avg(baseline_vals)
+        pct = round((current - baseline) / baseline * 100, 1) if (current and baseline and baseline != 0) else None
+        trend = _trend_dir(all_vals)
+        flag = flag_fn(current, baseline, pct, _avg(recent_7)) if flag_fn else None
+        return {
+            "current": current,
+            "baseline_8w": baseline,
+            "pct_vs_baseline": pct,
+            "recent_7": recent_7,
+            "avg_7d": _avg(recent_7),
+            "trend": trend,
+            "flag": flag,
+        }
+
+    def _hrv_flag(current, baseline, pct, avg7):
+        if pct is not None and pct < -15:
+            return "SUPPRESSED"
+        if pct is not None and pct < -10:
+            return "LOW"
+        return None
+
+    def _rhr_flag(current, baseline, pct, avg7):
+        if current and current > 65:
+            return "ELEVATED"
+        return None
+
+    def _sleep_flag(current, baseline, pct, avg7):
+        if avg7 is None:
+            return None
+        if avg7 < 6.0:
+            return "CRITICALLY_LOW"
+        if avg7 < 7.0:
+            return "MARGINAL"
+        return "OK"
+
+    return {
+        "hrv":   _metric("hrv_ms", _hrv_flag),
+        "rhr":   _metric("resting_hr", _rhr_flag),
+        "sleep": _metric("sleep_hrs", _sleep_flag),
+    }
+
+
+# ---------------------------------------------------------------------------
 # Combined runner
 # ---------------------------------------------------------------------------
 
@@ -495,10 +769,6 @@ def run_all(
     progression: dict,
     goals: dict,
 ) -> dict:
-    """
-    Run all analyses. Returns a single dict with all results.
-    Any analysis that fails is stored as None with an error note.
-    """
     results = {}
 
     try:
@@ -524,6 +794,24 @@ def run_all(
     except Exception as e:
         results["trajectory"] = None
         results["trajectory_error"] = str(e)
+
+    try:
+        results["strength_trends"] = compute_strength_trends(records)
+    except Exception as e:
+        results["strength_trends"] = None
+        results["strength_trends_error"] = str(e)
+
+    try:
+        results["body_comp"] = compute_body_comp_trends(garmin_data)
+    except Exception as e:
+        results["body_comp"] = None
+        results["body_comp_error"] = str(e)
+
+    try:
+        results["health_trends"] = compute_health_trends(garmin_data)
+    except Exception as e:
+        results["health_trends"] = None
+        results["health_trends_error"] = str(e)
 
     try:
         results["adherence"] = compute_adherence(records)

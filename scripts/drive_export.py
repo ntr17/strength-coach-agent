@@ -702,207 +702,218 @@ def generate_briefing_md_from_db(
     analysis: dict,
     week_num: int,
     total_weeks: int,
-    medical: dict = None,
 ) -> str:
     """
-    Generate a compact BRIEFING.md from DB data only (no Google Sheet).
+    Generate BRIEFING.md — the main document Claude reads at every conversation start.
 
-    This is the main file Claude reads at the start of every conversation.
-    Compact, structured, and information-dense.
-
-    Args:
-        state:       system/state.json contents
-        profile:     system/profile.json contents
-        estimates:   load_latest_estimates() output  {exercise: {e1rm_kg, e5rm_kg, ...}}
-        prs:         compute_personal_records() output
-        health_data: load_health_records() output (sorted date desc)
-        analysis:    run_all() output
-        week_num:    current week number
-        total_weeks: total program weeks
+    Designed for coaching intelligence, not dashboards:
+    - Absolute values + trends + context (not just snapshots)
+    - Strength: week-by-week trajectory + rate + projection
+    - Body comp: weight/fat history + trend
+    - Recovery: vs personal baseline, not 7-day avg in isolation
+    - Volume: weekly load trend
+    - No medical section (uploaded directly to Claude Project)
     """
     today        = date.today().isoformat()
-    block_num    = ((week_num - 1) // 5 + 1) if week_num else 1
+    block_num    = state.get("current_block", ((week_num - 1) // 5 + 1))
     program_name = profile.get("current_program", {}).get("name", "30-Week Strength")
+    goals_section = profile.get("goals", {})
+    target_e5rms  = goals_section.get("current_e5rm_targets", {})
 
     lines = [
         f"# BRIEFING — {today}",
-        f"Generated: {today} | Week {week_num}/{total_weeks} (Block {block_num}) | Program: {program_name}",
+        f"Week {week_num}/{total_weeks} (Block {block_num}) | {program_name}",
         "",
     ]
 
     # ------------------------------------------------------------------
-    # 1. Strength Estimates
+    # 1. STRENGTH TRAJECTORY
+    # Absolute + history + rate + projection per lift
     # ------------------------------------------------------------------
-    lines += ["## Strength Estimates", ""]
+    lines += ["## Strength Trajectory", ""]
 
+    strength_trends = analysis.get("strength_trends") or {}
+    main_lifts = ["Squat", "Bench Press", "Deadlift", "OHP"]
+
+    for lift in main_lifts:
+        trend = strength_trends.get(lift, {})
+        history = trend.get("history", [])  # [(week, e1rm), ...]
+        current_e1rm = trend.get("current_e1rm")
+        rate = trend.get("rate_kg_per_week")
+        goal_kg = None
+        try:
+            goal_kg = float(target_e5rms.get(lift, 0)) if target_e5rms.get(lift) else None
+        except (TypeError, ValueError):
+            pass
+
+        # Projection: weeks to hit goal at current rate
+        projection_str = ""
+        if current_e1rm and goal_kg and rate and rate > 0:
+            weeks_needed = (goal_kg - current_e1rm) / rate
+            projection_str = f" → goal in ~{weeks_needed:.0f}w at current rate"
+        elif current_e1rm and goal_kg and rate and rate <= 0:
+            projection_str = " → **NOT PROGRESSING toward goal**"
+
+        rate_str = f"{rate:+.1f}kg/w" if rate is not None else "no data"
+        current_str = f"{current_e1rm}kg" if current_e1rm else "no data"
+        goal_str = f"{goal_kg}kg" if goal_kg else "—"
+
+        lines.append(f"### {lift}")
+        lines.append(f"Current: **{current_str}** | Rate: {rate_str} | Goal: {goal_str}{projection_str}")
+        lines.append("")
+
+        if history:
+            # Show last 8 weeks of history
+            recent = history[-8:]
+            hist_str = " → ".join(f"W{w}:{e1rm}kg" for w, e1rm in recent)
+            lines.append(f"History: {hist_str}")
+        lines.append("")
+
+    # e5RM estimates table (for planning working weights)
     if estimates:
-        lines.append("| Exercise | e1RM | e5RM | CI (low–high) | Date |")
-        lines.append("|----------|------|------|---------------|------|")
-        for ex, est in sorted(estimates.items()):
-            e1rm = f"{est['e1rm_kg']}kg" if est.get("e1rm_kg") is not None else "—"
-            e5rm = f"{est['e5rm_kg']}kg" if est.get("e5rm_kg") is not None else "—"
-            lo   = est.get("confidence_low")
-            hi   = est.get("confidence_high")
-            ci   = f"{lo}–{hi}kg" if (lo is not None and hi is not None) else "—"
-            dt   = str(est.get("estimated_at", "—"))[:10]
-            lines.append(f"| {ex} | {e1rm} | {e5rm} | {ci} | {dt} |")
-    else:
-        lines.append(
-            "*No estimates yet — run: `python scripts/estimate_strength.py --write`*"
-        )
+        lines += ["**e5RM estimates (for programming):**", ""]
+        lines.append("| Lift | e1RM | e5RM | CI |")
+        lines.append("|------|------|------|-----|")
+        for ex in main_lifts:
+            est = estimates.get(ex)
+            if est:
+                e1 = f"{est['e1rm_kg']}kg" if est.get("e1rm_kg") else "—"
+                e5 = f"{est['e5rm_kg']}kg" if est.get("e5rm_kg") else "—"
+                lo = est.get("confidence_low")
+                hi = est.get("confidence_high")
+                ci = f"{lo}–{hi}kg" if lo and hi else "—"
+                lines.append(f"| {ex} | {e1} | {e5} | {ci} |")
+        lines.append("")
+
+    # ------------------------------------------------------------------
+    # 2. BODY COMPOSITION
+    # Weight + fat % + visceral — history + trend + rate
+    # ------------------------------------------------------------------
+    lines += ["## Body Composition", ""]
+
+    bc = analysis.get("body_comp") or {}
+    w_data  = bc.get("weight", {})
+    fat_data = bc.get("body_fat_pct", {})
+    visc_data = bc.get("visceral_fat", {})
+
+    def _bc_row(label, data, unit, good_direction="stable"):
+        current = data.get("current")
+        rate = data.get("rate_kg_per_week") or data.get("rate_per_week")
+        flag = data.get("flag", "")
+        history = data.get("history", [])[-8:]  # last 8 entries
+
+        if current is None:
+            return f"**{label}**: no data"
+
+        rate_str = f" ({rate:+.3f}{unit}/wk)" if rate else ""
+        flag_str = f" **[{flag}]**" if flag else ""
+        hist_pts = ", ".join(f"{v}{unit}" for _, v in history)
+        return f"**{label}**: {current}{unit}{rate_str}{flag_str} | History: {hist_pts}"
+
+    lines.append(_bc_row("Weight", w_data, "kg"))
+    if fat_data.get("current") is not None:
+        lines.append(_bc_row("Body fat", fat_data, "%"))
+    if visc_data.get("current") is not None:
+        lines.append(_bc_row("Visceral fat index", visc_data, ""))
     lines.append("")
 
     # ------------------------------------------------------------------
-    # 2. Personal Records (top 6 by e1RM)
+    # 3. RECOVERY / HEALTH
+    # Absolute + vs baseline + trend — not just 7-day avg
     # ------------------------------------------------------------------
-    lines += ["## Personal Records", ""]
+    lines += ["## Recovery & Health", ""]
 
-    if prs:
-        sorted_prs = sorted(
-            prs.items(),
-            key=lambda kv: kv[1].get("e1rm") or 0,
-            reverse=True,
-        )[:6]
-        lines.append("| Exercise | e1RM | Weight | Reps | Date | Week |")
-        lines.append("|----------|------|--------|------|------|------|")
-        for ex, pr in sorted_prs:
-            e1rm   = f"{pr['e1rm']}kg"      if pr.get("e1rm")       else "—"
-            weight = f"{pr['weight_kg']}kg"  if pr.get("weight_kg") else "—"
-            reps   = f"{pr['reps']:.0f}"     if pr.get("reps")       else "—"
-            dt     = str(pr["date"])         if pr.get("date")       else "—"
-            week   = f"W{pr['week']}"        if pr.get("week")       else "—"
-            lines.append(f"| {ex} | {e1rm} | {weight} | {reps} | {dt} | {week} |")
-    else:
-        lines.append("*No PR data yet.*")
+    ht = analysis.get("health_trends") or {}
+
+    def _health_row(label, data, unit, context_note=""):
+        if not data:
+            return f"**{label}**: no data"
+        current = data.get("current")
+        baseline = data.get("baseline_8w")
+        pct = data.get("pct_vs_baseline")
+        trend = data.get("trend")
+        flag = data.get("flag")
+        recent = data.get("recent_7", [])
+
+        current_str = f"{current}{unit}" if current else "—"
+        baseline_str = f"(baseline {baseline}{unit})" if baseline else ""
+        pct_str = f"{pct:+.0f}% vs baseline" if pct is not None else ""
+        trend_str = "↑" if trend == "UP" else ("↓" if trend == "DOWN" else "→" if trend else "")
+        flag_str = f" **[{flag}]**" if flag else ""
+        hist_str = ", ".join(str(v) for v in recent)
+
+        return f"**{label}**: {current_str} {baseline_str} {pct_str} {trend_str}{flag_str} | Last 7: {hist_str}"
+
+    lines.append(_health_row("HRV", ht.get("hrv"), "ms",
+                             "Suppressed HRV = underrecovery. <15% of baseline = flag."))
+    lines.append(_health_row("RHR", ht.get("rhr"), "bpm"))
+    lines.append(_health_row("Sleep", ht.get("sleep"), "h",
+                             "<6h = critical risk. 6-7h = marginal. 7h+ = OK."))
     lines.append("")
 
     # ------------------------------------------------------------------
-    # 3. Health (7-day)
+    # 4. VOLUME LOAD TREND
+    # Total kg lifted per week — trend matters
     # ------------------------------------------------------------------
-    lines += ["## Health (7-day)", ""]
+    lines += ["## Volume Load", ""]
 
-    recent_7 = health_data[:7]  # already sorted date desc by load_health_records
-    if recent_7:
-        def _avg(key):
-            vals = [g[key] for g in recent_7 if g.get(key) is not None]
-            return round(sum(vals) / len(vals), 1) if vals else None
+    li = analysis.get("load_index") or {}
+    volumes = li.get("volume_per_week", [])
+    weeks_v = li.get("weeks", [])
+    signal = li.get("signal", "INSUFFICIENT_DATA")
+    ratio = li.get("ratio")
 
-        sleep_avg = _avg("sleep_hrs")
-        steps_avg = _avg("steps")
-        rhr_avg   = _avg("resting_hr")
-        hrv_avg   = _avg("hrv_ms")
-        bw_latest = next(
-            (g["body_weight_kg"] for g in recent_7 if g.get("body_weight_kg") is not None),
-            None,
-        )
-
-        lines.append("| Metric | Value |")
-        lines.append("|--------|-------|")
-        lines.append(f"| Sleep avg (h) | {sleep_avg or '—'} |")
-        lines.append(f"| Steps avg | {int(steps_avg) if steps_avg else '—'} |")
-        lines.append(f"| RHR avg (bpm) | {rhr_avg or '—'} |")
-        lines.append(f"| HRV avg (ms) | {hrv_avg or '—'} |")
-        lines.append(f"| Bodyweight (latest) | {f'{bw_latest}kg' if bw_latest else '—'} |")
-
-        if sleep_avg is not None and sleep_avg < 6.5:
-            lines.append("")
-            lines.append(
-                f"**FLAG: avg sleep {sleep_avg}h < 6.5h threshold — recovery risk**"
-            )
+    if volumes and weeks_v:
+        vol_history = " → ".join(f"W{w}:{v:,}kg" for w, v in zip(weeks_v[-8:], volumes[-8:]))
+        ratio_str = f" | ratio {ratio} → **{signal}**" if ratio else ""
+        lines.append(f"Weekly kg·sets·reps: {vol_history}{ratio_str}")
     else:
-        lines.append("*No health data available.*")
+        lines.append("*Insufficient volume data*")
     lines.append("")
 
     # ------------------------------------------------------------------
-    # 4. Analysis
+    # 5. STALLS & ADHERENCE
     # ------------------------------------------------------------------
-    lines += ["## Analysis", ""]
+    lines += ["## Training Status", ""]
 
-    stalls      = analysis.get("stalls") or {}
-    stalled     = {k: v for k, v in stalls.items() if v["status"] == "STALL"}
+    stalls = analysis.get("stalls") or {}
+    stalled = {k: v for k, v in stalls.items() if v["status"] == "STALL"}
     progressing = {k: v for k, v in stalls.items() if v["status"] == "PROGRESSING"}
-    li          = analysis.get("load_index") or {}
-    load_signal = li.get("signal", "INSUFFICIENT_DATA")
-    load_ratio  = li.get("ratio")
-    adh         = analysis.get("adherence") or {}
 
     if stalled:
-        lines.append(
-            f"**Stalls ({len(stalled)}):** "
-            + ", ".join(
-                f"{ex} ({v['recent_peak']}kg e1RM, {v['delta']:+.1f}kg)"
-                for ex, v in stalled.items()
-            )
-        )
+        lines.append("**Stalls detected:** " + ", ".join(
+            f"{ex} ({v['delta']:+.1f}kg, {v['weeks_seen']}w)" for ex, v in stalled.items()
+        ))
     else:
-        lines.append("Stalls: none detected")
+        lines.append("Stalls: none")
 
-    if progressing:
-        lines.append(
-            f"**Progressing ({len(progressing)}):** "
-            + ", ".join(f"{ex} (+{v['delta']}kg)" for ex, v in progressing.items())
-        )
-
-    if load_ratio:
-        lines.append(f"Load index: {load_ratio} → **{load_signal}**")
-    else:
-        lines.append(f"Load index: {load_signal}")
-
+    adh = analysis.get("adherence") or {}
     if adh.get("last_4_weeks"):
         r4 = adh["last_4_weeks"]
-        lines.append(
-            f"Adherence (last 4w): {r4['done']}/{r4['planned']} ({r4['rate'] * 100:.0f}%)"
-        )
+        lines.append(f"Adherence (last 4w): {r4['done']}/{r4['planned']} ({r4['rate']*100:.0f}%)")
+
+    corr = analysis.get("sleep_correlation")
+    if corr:
+        if corr.get("hrv_vs_rpe"):
+            h = corr["hrv_vs_rpe"]
+            lines.append(f"HRV→RPE correlation: r={h['r']} ({h['strength']} {h['direction']}, n={corr['n']})")
     lines.append("")
 
     # ------------------------------------------------------------------
-    # 5. Medical (latest per test)
-    # ------------------------------------------------------------------
-    if medical:
-        lines += ["## Medical (latest values)", ""]
-        # Group by category
-        by_cat: dict = {}
-        for test_name, rec in sorted(medical.items()):
-            cat = rec.get("category", "other")
-            by_cat.setdefault(cat, []).append((test_name, rec))
-
-        for cat, items in sorted(by_cat.items()):
-            lines.append(f"**{cat.replace('_', ' ').title()}**")
-            lines.append("| Test | Value | Unit | Flag | Date |")
-            lines.append("|------|-------|------|------|------|")
-            for test_name, rec in items:
-                val   = str(rec["value"]) if rec.get("value") is not None else (rec.get("value_text") or "—")
-                unit  = rec.get("unit") or "—"
-                flag  = rec.get("flag") or "—"
-                dt    = rec.get("test_date", "—")
-                flag_marker = f"**{flag}**" if flag in ("LOW", "HIGH") else flag
-                lines.append(f"| {test_name} | {val} | {unit} | {flag_marker} | {dt} |")
-            lines.append("")
-
-    # ------------------------------------------------------------------
-    # 6. Open Items
+    # 6. OPEN ITEMS
     # ------------------------------------------------------------------
     lines += ["## Open Items", ""]
-
-    # Surface active state flags so Claude sees them immediately
     if state.get("deload_week"):
         lines.append("- **DELOAD WEEK active** — load ceiling 70%")
     if state.get("travel_week"):
-        lines.append("- **TRAVEL WEEK active** — reduced frequency expected")
+        lines.append("- **TRAVEL WEEK active**")
     if state.get("injury_flag"):
         lines.append(f"- **INJURY FLAG: {state['injury_flag']}**")
+    lines.append("- Check `system/threads.json` for open decisions.")
+    lines.append("")
 
-    lines += [
-        "- Check `system/threads.json` for open decisions.",
-        "",
-    ]
-
-    # ------------------------------------------------------------------
-    # Footer
-    # ------------------------------------------------------------------
     lines += [
         "---",
-        "",
         "Detail files: training_log.md | health_recovery.md | analysis.md | program_context.md",
     ]
 

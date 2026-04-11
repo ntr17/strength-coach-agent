@@ -56,6 +56,20 @@ def main():
             print(f"[pipeline] Garmin sync failed (non-fatal): {e}")
 
     # ------------------------------------------------------------------
+    # 1b. Import from Google Sheet (SESSION_INPUT + HEALTH_INPUT)
+    # ------------------------------------------------------------------
+    print("[pipeline] Importing from Google Sheet...")
+    try:
+        from import_from_sheet import main as import_sheet_main
+        import sys as _sys
+        old_argv = _sys.argv
+        _sys.argv = ["import_from_sheet.py"]
+        import_sheet_main()
+        _sys.argv = old_argv
+    except Exception as e:
+        print(f"[pipeline] Sheet import failed (non-fatal): {e}")
+
+    # ------------------------------------------------------------------
     # 2. Run estimate_strength (writes fresh e1RM/e5RM to strength_estimates)
     # ------------------------------------------------------------------
     print("[pipeline] Running strength estimation...")
@@ -81,7 +95,6 @@ def main():
         compute_personal_records,
         load_health_records,
         load_latest_estimates,
-        load_latest_medical,
         load_state,
         load_profile,
         compute_progression_targets,
@@ -92,7 +105,6 @@ def main():
     prs         = compute_personal_records(records)
     health_data = load_health_records(DB_PATH, days=args.days)
     estimates   = load_latest_estimates(DB_PATH)
-    medical     = load_latest_medical(DB_PATH)
     state       = load_state()
     profile     = load_profile()
     progression = compute_progression_targets(profile, state)
@@ -102,7 +114,7 @@ def main():
     total_weeks = profile.get("current_program", {}).get("total_weeks", 30)
 
     print(f"[pipeline] Week {week_num}/{total_weeks} | {len(records)} sets | {len(prs)} PRs | "
-          f"{len(health_data)} health records | {len(estimates)} estimates | {len(medical)} medical tests")
+          f"{len(health_data)} health records | {len(estimates)} estimates")
 
     # ------------------------------------------------------------------
     # 4. Run analysis
@@ -134,8 +146,7 @@ def main():
         "analysis.md":        generate_analysis_md(analysis),
         "BRIEFING.md":        generate_briefing_md_from_db(
                                   state, profile, estimates, prs,
-                                  health_data, analysis, week_num, total_weeks,
-                                  medical=medical),
+                                  health_data, analysis, week_num, total_weeks),
     }
 
     for name, content in files.items():

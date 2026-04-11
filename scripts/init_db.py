@@ -54,6 +54,7 @@ CREATE TABLE IF NOT EXISTS health_log (
   log_date          DATE NOT NULL UNIQUE,
   body_weight_kg    REAL,
   body_fat_pct      REAL,
+  visceral_fat_index REAL,
   sleep_hours       REAL,
   sleep_quality     INTEGER,
   steps             INTEGER,
@@ -117,6 +118,27 @@ CREATE TABLE IF NOT EXISTS medical_records (
   created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
+-- Cardio sessions (Garmin or manual)
+CREATE TABLE IF NOT EXISTS cardio_sessions (
+  id              INTEGER PRIMARY KEY AUTOINCREMENT,
+  session_date    DATE NOT NULL,
+  activity_type   TEXT NOT NULL,   -- 'run' | 'bike' | 'row' | 'swim' | 'other'
+  duration_min    REAL,
+  distance_km     REAL,
+  avg_hr          INTEGER,
+  max_hr          INTEGER,
+  avg_pace_sec_km REAL,            -- seconds per km
+  hr_zone1_min    REAL,
+  hr_zone2_min    REAL,
+  hr_zone3_min    REAL,
+  hr_zone4_min    REAL,
+  hr_zone5_min    REAL,
+  vo2max_estimate REAL,            -- Garmin's estimate if available
+  notes           TEXT,
+  source          TEXT DEFAULT 'garmin',
+  created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
 -- Indexes for common queries
 CREATE INDEX IF NOT EXISTS idx_lift_sets_date        ON lift_sets(session_date);
 CREATE INDEX IF NOT EXISTS idx_lift_sets_exercise    ON lift_sets(exercise);
@@ -125,6 +147,7 @@ CREATE INDEX IF NOT EXISTS idx_health_log_date       ON health_log(log_date);
 CREATE INDEX IF NOT EXISTS idx_strength_est_exercise ON strength_estimates(exercise, estimated_at);
 CREATE INDEX IF NOT EXISTS idx_medical_date         ON medical_records(test_date);
 CREATE INDEX IF NOT EXISTS idx_medical_name         ON medical_records(test_name, test_date);
+CREATE INDEX IF NOT EXISTS idx_cardio_date ON cardio_sessions(session_date);
 """
 
 
