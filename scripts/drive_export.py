@@ -735,28 +735,38 @@ def generate_briefing_md_from_db(
     strength_trends = analysis.get("strength_trends") or {}
     main_lifts = ["Squat", "Bench Press", "Deadlift", "OHP"]
 
+    # e5RM → e1RM conversion factor (Brzycki 5-rep: e1RM = e5RM / 0.8706)
+    E5_TO_E1 = 1 / 0.8706
+
     for lift in main_lifts:
         trend = strength_trends.get(lift, {})
         history = trend.get("history", [])  # [(week, e1rm), ...]
         current_e1rm = trend.get("current_e1rm")
         rate = trend.get("rate_kg_per_week")
-        goal_kg = None
+        goal_e5rm = None
         try:
-            goal_kg = float(target_e5rms.get(lift, 0)) if target_e5rms.get(lift) else None
+            goal_e5rm = float(target_e5rms.get(lift, 0)) if target_e5rms.get(lift) else None
         except (TypeError, ValueError):
             pass
 
-        # Projection: weeks to hit goal at current rate
+        # Convert e5RM goal → e1RM equivalent for apples-to-apples projection
+        goal_e1rm = round(goal_e5rm * E5_TO_E1, 1) if goal_e5rm else None
+
+        # Projection: weeks to hit goal e1RM at current rate
         projection_str = ""
-        if current_e1rm and goal_kg and rate and rate > 0:
-            weeks_needed = (goal_kg - current_e1rm) / rate
-            projection_str = f" → goal in ~{weeks_needed:.0f}w at current rate"
-        elif current_e1rm and goal_kg and rate and rate <= 0:
+        if current_e1rm and goal_e1rm and rate and rate > 0:
+            if current_e1rm >= goal_e1rm:
+                projection_str = " → **goal e1RM already reached**"
+            else:
+                weeks_needed = (goal_e1rm - current_e1rm) / rate
+                projection_str = f" → goal in ~{weeks_needed:.0f}w at current rate"
+        elif current_e1rm and goal_e1rm and rate is not None and rate <= 0:
             projection_str = " → **NOT PROGRESSING toward goal**"
 
         rate_str = f"{rate:+.1f}kg/w" if rate is not None else "no data"
         current_str = f"{current_e1rm}kg" if current_e1rm else "no data"
-        goal_str = f"{goal_kg}kg" if goal_kg else "—"
+        # Show e5RM goal to user (that's the program target), e1RM equivalent in parens
+        goal_str = f"{goal_e5rm}kg x5 (≈{goal_e1rm}kg e1RM)" if goal_e5rm else "—"
 
         lines.append(f"### {lift}")
         lines.append(f"Current: **{current_str}** | Rate: {rate_str} | Goal: {goal_str}{projection_str}")
