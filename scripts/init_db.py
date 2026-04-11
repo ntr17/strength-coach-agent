@@ -32,6 +32,7 @@ CREATE TABLE IF NOT EXISTS lift_sets (
   should_count      BOOLEAN DEFAULT 1,
   rpe               REAL,
   notes             TEXT,
+  source            TEXT NOT NULL DEFAULT 'sheet',  -- 'sheet' = real date | 'bootstrap' = approx date
   created_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 

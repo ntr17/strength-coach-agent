@@ -146,8 +146,9 @@ def compute_volume_trends(records: list[dict], weeks: int = 8) -> dict:
         "total_sets_per_week": [40, 44, ...],
     }
     """
-    # Find the most recent week in done records
-    done_weeks = sorted({r["week"] for r in records if r["done"] is True})
+    # Only real sessions (source='sheet') count for volume — bootstrap dates are approximate
+    real = [r for r in records if r.get("source", "sheet") == "sheet"]
+    done_weeks = sorted({r["week"] for r in real if r["done"] is True})
     if not done_weeks:
         return {"weeks": [], "groups": {}, "total_sets_per_week": []}
 
@@ -155,7 +156,7 @@ def compute_volume_trends(records: list[dict], weeks: int = 8) -> dict:
     target_weeks = [w for w in done_weeks if w >= latest - weeks + 1]
 
     group_sets: dict[str, dict[int, int]] = {}  # {group: {week: count}}
-    for r in records:
+    for r in real:
         if r["done"] is not True or r["week"] not in target_weeks:
             continue
         group = _muscle_group(r["exercise"])
@@ -200,9 +201,10 @@ def compute_load_index(records: list[dict]) -> dict:
         "signal": "HIGH" | "NORMAL" | "LOW" | "INSUFFICIENT_DATA",
     }
     """
+    # Only real sessions (source='sheet') count for load — bootstrap dates are approximate
     week_volume: dict[int, float] = {}
     for r in records:
-        if r["done"] is not True:
+        if r["done"] is not True or r.get("source", "sheet") != "sheet":
             continue
         w_kg = r["actual_weight_kg"] or r["planned_weight_kg"] or 0
         sets = r["actual_sets"] or r["planned_sets"] or 1
@@ -361,9 +363,10 @@ def compute_adherence(records: list[dict], planned_days_per_week: int = 4) -> di
     }
     """
     from collections import defaultdict
+    # Only real sessions (source='sheet') — bootstrap dates are approximate
     week_dates: dict[int, set] = defaultdict(set)
     for r in records:
-        if r["done"] is True and r.get("date") is not None:
+        if r["done"] is True and r.get("date") is not None and r.get("source", "sheet") == "sheet":
             week_dates[r["week"]].add(r["date"])
 
     def _rate(done: int, planned: int) -> float:
@@ -772,9 +775,10 @@ def compute_training_days(records: list[dict], weeks: int = 8) -> dict:
     }
     """
     from collections import defaultdict
+    # Only real sessions (source='sheet') — bootstrap dates are approximate
     week_dates: dict[int, set] = defaultdict(set)
     for r in records:
-        if r["done"] is not True or r["date"] is None:
+        if r["done"] is not True or r["date"] is None or r.get("source", "sheet") != "sheet":
             continue
         week_dates[r["week"]].add(r["date"])
 

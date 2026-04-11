@@ -120,8 +120,8 @@ def import_sessions(db_path: Path, sheet_id: str, state: dict, week_num: int, bl
                     INSERT INTO lift_sets
                       (session_date, week_number, block_number, day_number,
                        exercise, set_number, reps, weight_kg, is_amrap,
-                       should_count, rpe, notes)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                       should_count, rpe, notes, source)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'sheet')
                     """,
                     (
                         date_str.strip(), week_num, block_num, day_num,

@@ -58,7 +58,7 @@ def load_lift_records(db_path=DEFAULT_DB, weeks=None) -> list[dict]:
             SELECT
                 id, session_date, week_number, block_number, day_number,
                 exercise, set_number, reps, weight_kg, is_amrap, should_count,
-                rpe, notes
+                rpe, notes, source
             FROM lift_sets
         """
         params: list = []
@@ -104,6 +104,7 @@ def load_lift_records(db_path=DEFAULT_DB, weeks=None) -> list[dict]:
             "rpe":              row["rpe"],
             "done":             True,         # all DB records are completed sets
             "should_count":     int(row["should_count"]) if row["should_count"] is not None else 1,
+            "source":           row["source"] or "sheet",
             "session_notes":    row["notes"],
             "e1rm":             e1rm,
             "is_amrap":         bool(row["is_amrap"]),
