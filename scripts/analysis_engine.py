@@ -348,9 +348,10 @@ def compute_1rm_trajectory(
 # Adherence
 # ---------------------------------------------------------------------------
 
-def compute_adherence(records: list[dict]) -> dict:
+def compute_adherence(records: list[dict], planned_days_per_week: int = 4) -> dict:
     """
-    Ratio of done exercises to total planned (where done is not None).
+    Training sessions done vs planned (planned_days_per_week per week).
+    Counts distinct session dates per week — not individual sets.
 
     Returns:
     {
@@ -360,34 +361,29 @@ def compute_adherence(records: list[dict]) -> dict:
     }
     """
     from collections import defaultdict
-    by_week: dict[int, dict] = defaultdict(lambda: {"done": 0, "planned": 0})
-
+    week_dates: dict[int, set] = defaultdict(set)
     for r in records:
-        w = r["week"]
-        if r["done"] is None:
-            continue
-        by_week[w]["planned"] += 1
-        if r["done"] is True:
-            by_week[w]["done"] += 1
+        if r["done"] is True and r.get("date") is not None:
+            week_dates[r["week"]].add(r["date"])
 
-    def _rate(d: dict) -> float:
-        if d["planned"] == 0:
-            return 0.0
-        return round(d["done"] / d["planned"], 3)
+    def _rate(done: int, planned: int) -> float:
+        return 0.0 if planned == 0 else round(done / planned, 3)
 
-    # Overall
+    by_week = {w: {"done": len(dates), "planned": planned_days_per_week,
+                   "rate": _rate(len(dates), planned_days_per_week)}
+               for w, dates in sorted(week_dates.items())}
+
     total_done = sum(v["done"] for v in by_week.values())
     total_planned = sum(v["planned"] for v in by_week.values())
 
-    # Last 4 weeks
     recent_weeks = sorted(by_week.keys())[-4:]
     r4_done = sum(by_week[w]["done"] for w in recent_weeks)
     r4_planned = sum(by_week[w]["planned"] for w in recent_weeks)
 
     return {
-        "overall": {"done": total_done, "planned": total_planned, "rate": _rate({"done": total_done, "planned": total_planned})},
-        "last_4_weeks": {"done": r4_done, "planned": r4_planned, "rate": _rate({"done": r4_done, "planned": r4_planned})},
-        "by_week": {w: {**v, "rate": _rate(v)} for w, v in sorted(by_week.items())},
+        "overall": {"done": total_done, "planned": total_planned, "rate": _rate(total_done, total_planned)},
+        "last_4_weeks": {"done": r4_done, "planned": r4_planned, "rate": _rate(r4_done, r4_planned)},
+        "by_week": by_week,
     }
 
 
