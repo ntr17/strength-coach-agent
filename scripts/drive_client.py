@@ -7,7 +7,6 @@ The service account needs Editor access on the Drive folder.
 
 import json
 import os
-from pathlib import Path
 
 DRIVE_FOLDER_ID = os.environ.get("DRIVE_FOLDER_ID", "1Zi6dFQA2lCRickf6XYpfedIiFPRHrTpn")
 
@@ -67,14 +66,23 @@ def upload_files_to_drive(files: dict, folder_id: str = None) -> None:
             break
 
     for filename, content in files.items():
-        mime = "text/markdown" if filename.endswith(".md") else "application/json"
-        media = MediaInMemoryUpload(content.encode("utf-8"), mimetype=mime, resumable=False)
+        # Upload as Google Docs so Claude's Drive integration can read them.
+        # MediaInMemoryUpload uses text/plain as the source format;
+        # the body mimeType tells Drive to convert to a Google Doc on ingest.
+        media = MediaInMemoryUpload(content.encode("utf-8"), mimetype="text/plain", resumable=False)
         if filename in existing:
-            service.files().update(fileId=existing[filename], media_body=media).execute()
+            service.files().update(
+                fileId=existing[filename],
+                media_body=media,
+            ).execute()
             print(f"  [drive] Updated: {filename}")
         else:
             service.files().create(
-                body={"name": filename, "parents": [fid]},
+                body={
+                    "name": filename,
+                    "parents": [fid],
+                    "mimeType": "application/vnd.google-apps.document",
+                },
                 media_body=media,
                 fields="id",
             ).execute()
