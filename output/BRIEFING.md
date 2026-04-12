@@ -1,4 +1,4 @@
-# BRIEFING — 2026-04-11
+# BRIEFING — 2026-04-12
 Week 11/30 (Block 3) | 30-Week Strength
 
 ## Strength Trajectory
@@ -14,9 +14,9 @@ Current: **95.4kg** | Rate: +0.5kg/w | Goal: 105.0kg x5 (≈120.6kg e1RM) → go
 History: W3:91.3kg → W4:94.2kg → W6:92.1kg → W7:92.1kg → W8:94.9kg → W9:98.2kg → W10:91.3kg → W11:95.4kg
 
 ### Deadlift
-Current: **175.0kg** | Rate: +1.0kg/w | Goal: —
+Current: **177.9kg** | Rate: +1.4kg/w | Goal: —
 
-History: W3:157.5kg → W4:160.4kg → W6:163.3kg → W7:166.2kg → W8:169.2kg → W9:172.1kg → W10:157.5kg → W11:175.0kg
+History: W3:157.5kg → W4:160.4kg → W6:163.3kg → W7:166.2kg → W8:169.2kg → W9:172.1kg → W10:157.5kg → W11:177.9kg
 
 ### OHP
 Current: **64.6kg** | Rate: +0.1kg/w | Goal: —
@@ -44,7 +44,7 @@ History: W1:61.9kg → W2:61.9kg → W3:61.9kg → W4:64.8kg → W6:63.2kg → W
 
 ## Volume Load
 
-*Insufficient volume data*
+Weekly kg·sets·reps: W11:5,025kg | ratio 1.0 → **NORMAL**
 
 ## Training Status
 

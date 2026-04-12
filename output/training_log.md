@@ -1,5 +1,5 @@
 # Training Log
-Generated: 2026-04-11
+Generated: 2026-04-12
 
 ## Personal Records
 
@@ -13,9 +13,11 @@ Generated: 2026-04-11
 | Bench Press | 85.0kg | 4 | 96.3kg | 2026-03-10 | W9 | 30-Week Strength |
 | Bench Volume | 60.0kg | 10 | 80.0kg | 2026-03-07 | W8 | 30-Week Strength |
 | Chin-ups | 15.0kg | 5 | 17.5kg | 2026-02-07 | W4 | 30-Week Strength |
-| Deadlift | 150.0kg | 5 | 175.0kg | 2026-03-25 | W11 | 30-Week Strength |
+| Deadlift | 152.5kg | 5 | 177.9kg | — | W11 | 30-Week Strength |
+| Dips | 90.0kg | 5 | 105.0kg | — | W11 | 30-Week Strength |
 | Front Squat | 72.5kg | 4 | 82.2kg | 2026-03-13 | W9 | 30-Week Strength |
 | Hammer Curl | 12.5kg | 10 | 16.7kg | 2026-01-17 | W1 | 30-Week Strength |
+| Hang Power Clean | 62.5kg | 2 | 66.7kg | — | W11 | 30-Week Strength |
 | Lat Raise Power | 15.0kg | 8 | 19.0kg | 2026-01-21 | W2 | 30-Week Strength |
 | Lat Raise Strict | 7.5kg | 12 | 10.5kg | 2026-01-21 | W2 | 30-Week Strength |
 | Lunges | 35.0kg | 8 | 44.3kg | 2026-02-24 | W7 | 30-Week Strength |
@@ -36,6 +38,24 @@ Generated: 2026-04-11
 
 | Exercise | Planned | Actual | Sets | Reps | RPE | e1RM | Notes |
 |----------|---------|--------|------|------|-----|------|-------|
+| ✓ Bench Press | — | 85.0kg | 1 | 3 | 8.0 | 93.5kg |  |
+| ✓ Bench Press | — | 85.0kg | 1 | 3 | 8.0 | 93.5kg |  |
+| ✓ Bench Press | — | 85.0kg | 1 | 3 | 8.0 | 93.5kg |  |
+| ✓ Bench Press | — | 85.0kg | 1 | 3 | 8.0 | 93.5kg |  |
+| ✓ Bench Press | — | 85.0kg | 1 | 3 | 8.0 | 93.5kg |  |
+| ✓ Dips | — | 90.0kg | 1 | 5 | 6.0 | 105.0kg |  |
+| ✓ Dips | — | 90.0kg | 1 | 5 | 6.0 | 105.0kg |  |
+| ✓ Squat | — | 97.5kg | 1 | 3 | 8.0 | 107.3kg |  |
+| ✓ Squat | — | 97.5kg | 1 | 3 | 8.0 | 107.3kg |  |
+| ✓ Squat | — | 97.5kg | 1 | 3 | 8.0 | 107.3kg |  |
+| ✓ Squat | — | 97.5kg | 1 | 3 | 8.0 | 107.3kg |  |
+| ✓ Squat | — | 97.5kg | 1 | 3 | 8.0 | 107.3kg |  |
+| ✓ Deadlift | — | 152.5kg | 1 | 5 | 6.0 | 177.9kg |  |
+| ✓ Hang Power Clean | — | 62.5kg | 1 | 2 | 8.0 | 66.7kg |  |
+| ✓ Hang Power Clean | — | 62.5kg | 1 | 2 | 8.0 | 66.7kg |  |
+| ✓ Hang Power Clean | — | 62.5kg | 1 | 2 | 8.0 | 66.7kg |  |
+| ✓ Hang Power Clean | — | 62.5kg | 1 | 2 | 8.0 | 66.7kg |  |
+| ✓ Hang Power Clean | — | 62.5kg | 1 | 2 | 8.0 | 66.7kg |  |
 | ✓ Bench Press | — | 85.0kg | 1 | 3 | — | 93.5kg |  |
 | ✓ Bench Press | — | 85.0kg | 1 | 3 | — | 93.5kg |  |
 | ✓ Bench Press | — | 85.0kg | 1 | 3 | — | 93.5kg |  |

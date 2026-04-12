@@ -1,5 +1,5 @@
 # Analysis & Insights
-Generated: 2026-04-11
+Generated: 2026-04-12
 
 ## Stall Detection
 
@@ -13,7 +13,7 @@ Generated: 2026-04-11
 - **Bench Bilbo**: 85.0kg e1RM — +5.0kg vs prior period (W9)
 - **Bench Press**: 95.4kg e1RM — +3.3kg vs prior period (W11)
 - **Bench Volume**: 76.8kg e1RM — +10.4kg vs prior period (W11)
-- **Deadlift**: 175.0kg e1RM — +5.8kg vs prior period (W11)
+- **Deadlift**: 177.9kg e1RM — +8.7kg vs prior period (W11)
 - **Front Squat**: 81.4kg e1RM — +3.3kg vs prior period (W11)
 - **Lunges**: 44.5kg e1RM — +8.3kg vs prior period (W7)
 - **Power Clean**: 65.3kg e1RM — +2.8kg vs prior period (W11)
@@ -25,7 +25,9 @@ Generated: 2026-04-11
 ### Insufficient Data (<3 weeks)
 - Back Extension: 0 week(s) seen, last e1RM no data
 - Chin-ups: 1 week(s) seen, last e1RM 17.7kg
+- Dips: 1 week(s) seen, last e1RM 105.5kg
 - Hammer Curl: 2 week(s) seen, last e1RM 16.8kg
+- Hang Power Clean: 1 week(s) seen, last e1RM 68.0kg
 - Lat Raise Power: 3 week(s) seen, last e1RM 19.0kg
 - Lat Raise Strict: 1 week(s) seen, last e1RM 10.5kg
 - Nordic Curl (OPT): 0 week(s) seen, last e1RM no data
@@ -33,11 +35,21 @@ Generated: 2026-04-11
 
 ## Volume Trends (Working Sets per Muscle Group)
 
-*No volume data.*
+| Muscle Group | W11 |
+|---|---|
+| Arms | 2 |
+| Chest | 5 |
+| Legs | 5 |
+| Other | 5 |
+| Posterior | 1 |
+| **TOTAL** | 18 |
 
 ## Load Index
 
-*Insufficient data for load index (need 12+ weeks).*
+- Recent 4-week avg volume: 5,025 kg·sets·reps
+- 8-week baseline avg: 5,025 kg·sets·reps
+- Load ratio: 1.0 → **NORMAL**
+- *Ratio >1.3 = deload signal; <0.7 = undertraining*
 
 ## 1RM Trajectory vs Program Targets
 
