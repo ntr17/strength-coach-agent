@@ -935,3 +935,98 @@ def generate_briefing_md_from_db(
     ]
 
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# program.md — current week's program for coach Claude to read
+# ---------------------------------------------------------------------------
+
+def generate_program_md(state: dict, profile: dict, estimates: dict,
+                        week_num: int, total_weeks: int) -> str:
+    """
+    Generate the current week's programmed sessions + next week preview.
+    Uses generate_program.py logic with live e1RM estimates.
+    Uploaded to Drive as 'program' so the coach can read it.
+    """
+    import sys as _sys, os as _os
+    _sys.path.insert(0, _os.path.dirname(__file__))
+    from generate_program import generate_week
+
+    block_num = state.get("current_block", max(1, (week_num - 1) // 5 + 1))
+    phase_map = {1: "volume", 2: "strength", 3: "intensity",
+                 4: "intensity", 5: "peak", 6: "test"}
+    phase = phase_map.get(block_num, "strength")
+    if state.get("deload_week"):
+        phase = "deload"
+    elif state.get("travel_week"):
+        phase = "travel"
+
+    injuries = []
+    if isinstance(profile.get("active_injuries"), list):
+        injuries = [i.get("injury_name", "") for i in profile["active_injuries"]
+                    if i.get("injury_name")]
+
+    days = profile.get("lifestyle", {}).get("typical_training_days", 4)
+
+    # Use latest e1RM estimates for weight targets
+    lifts_e1rm = {}
+    for lift in ["Squat", "Bench Press", "Deadlift", "OHP"]:
+        est = estimates.get(lift, {})
+        if est.get("e1rm_kg"):
+            lifts_e1rm[lift] = est["e1rm_kg"]
+
+    # Determine next week's phase
+    week_in_block = (week_num - 1) % 5  # 0-4
+    if week_in_block == 4:
+        next_phase = "deload"
+        next_block = block_num
+    else:
+        next_phase = phase if phase not in ("deload", "travel") else phase
+        next_block = block_num
+
+    current_md = generate_week(week_num, block_num, phase, days, lifts_e1rm, injuries)
+    next_md    = generate_week(week_num + 1, next_block, next_phase, days, lifts_e1rm, injuries)
+
+    goals   = profile.get("goals", {})
+    targets = goals.get("current_e5rm_targets", {})
+
+    lines = [
+        "# Program",
+        f"Generated: {date.today().isoformat()}",
+        f"Week {week_num}/{total_weeks} | Block {block_num} | Phase: {phase.upper()}",
+        "",
+        "## Program Structure",
+        "- 30-week, 6-block: Volume → Strength → Intensity → Intensity → Peak → Test",
+        "- Each block: 4 working weeks + 1 deload (week 5 of each block)",
+        f"- Training days/week: {days}",
+        f"- Current phase: **{phase.upper()}**",
+        "- Elbow rule: max 3 pulling sets/session, no arm isolation, stop if sharp pain",
+        "",
+        "## Goal Lifts (e5RM targets by Jul 2026)",
+        "",
+        "| Lift | Target x5 | Current e1RM | Current e5RM |",
+        "|------|-----------|-------------|-------------|",
+    ]
+    for lift in ["Squat", "Bench Press", "Deadlift", "OHP"]:
+        tgt = targets.get(lift, "—")
+        est = estimates.get(lift, {})
+        e1 = f"{est['e1rm_kg']}kg" if est.get("e1rm_kg") else "—"
+        e5 = f"{est['e5rm_kg']}kg" if est.get("e5rm_kg") else "—"
+        lines.append(f"| {lift} | {tgt}kg | {e1} | {e5} |")
+
+    lines += [
+        "",
+        "---",
+        "",
+        "## This Week — Full Session Plan",
+        "",
+        current_md,
+        "",
+        "---",
+        "",
+        f"## Next Week Preview (Week {week_num + 1} — {next_phase.upper()})",
+        "",
+        next_md,
+    ]
+
+    return "\n".join(lines)

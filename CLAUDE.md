@@ -15,6 +15,7 @@ Read in this exact order. Do not skip any step.
 
 **Step 2 — Load context (if available):**
 - Read `BRIEFING` → auto-generated: strength estimates, health, analysis
+- Read `program` → current week's programmed sessions with weights + next week preview
 - If BRIEFING is missing or older than 7 days: say so explicitly at the start of your response
 
 **Step 3 — Long-term arc check:**
@@ -117,6 +118,7 @@ Do not proceed with any long-term recommendation. Instead:
 | `profile` | `system/profile.json` | Every conversation | On change |
 | `threads` | `system/threads.json` | Every conversation | Per event |
 | `BRIEFING` | `output/BRIEFING.md` | Every conversation | Nightly (pipeline) |
+| `program` | `output/program.md` | Every conversation | Nightly (pipeline) |
 | `athlete_profile` | `system/athlete_profile.md` | Every conversation | Once, updated as needed |
 
 **No monthly or weekly plan files.** Planning at those levels happens in conversation.

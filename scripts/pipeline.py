@@ -138,6 +138,7 @@ def main():
         generate_health_recovery_md,
         generate_analysis_md,
         generate_briefing_md_from_db,
+        generate_program_md,
     )
 
     files = {
@@ -148,6 +149,7 @@ def main():
         "BRIEFING.md":        generate_briefing_md_from_db(
                                   state, profile, estimates, prs,
                                   health_data, analysis, week_num, total_weeks),
+        "program.md":         generate_program_md(state, profile, estimates, week_num, total_weeks),
     }
 
     for name, content in files.items():
@@ -190,10 +192,30 @@ def main():
                 "program_context": files["program_context.md"],
                 "health_recovery": files["health_recovery.md"],
                 "analysis":        files["analysis.md"],
+                "program":         files["program.md"],
             }
             upload_files_to_drive({**drive_files, **system_files}, DRIVE_FOLDER_ID)
         except Exception as e:
             print(f"[pipeline] Drive upload failed (non-fatal): {e}")
+
+    # ------------------------------------------------------------------
+    # 7. Build dashboard
+    # ------------------------------------------------------------------
+    print("[pipeline] Building dashboard...")
+    try:
+        result = subprocess.run(
+            [sys.executable, str(Path(__file__).parent / "build_dashboard.py"),
+             "--db-path", str(DB_PATH),
+             "--output", str(OUTPUT_DIR / "dashboard.html")],
+            capture_output=True, text=True, timeout=30,
+            env={**os.environ, "PYTHONIOENCODING": "utf-8"},
+        )
+        if result.returncode == 0:
+            print(result.stdout.strip())
+        else:
+            print(f"[pipeline] Dashboard warning: {result.stderr[:200]}")
+    except Exception as e:
+        print(f"[pipeline] Dashboard failed (non-fatal): {e}")
 
     # Update state.json last_pipeline_run
     state_path = Path(__file__).parent.parent / "system" / "state.json"

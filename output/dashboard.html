@@ -1,0 +1,337 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Strength Coach — Week 11</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background: #0d1117; color: #e2e8f0;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Inter', sans-serif;
+      font-size: 14px; line-height: 1.5; padding: 24px 28px;
+    }
+    /* ── Header ── */
+    .header { margin-bottom: 20px; }
+    .header h1 { font-size: 1.4rem; font-weight: 700; letter-spacing: -0.02em; }
+    .header .meta { color: #64748b; font-size: 0.8rem; margin-top: 4px; }
+    .badges { display: flex; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
+    .badge {
+      padding: 3px 10px; border-radius: 9999px;
+      font-size: 0.7rem; font-weight: 600; letter-spacing: 0.04em;
+      text-transform: uppercase;
+    }
+    .badge-blue   { background: #1e3a5f; color: #60a5fa; }
+    .badge-green  { background: #052e16; color: #4ade80; }
+    .badge-orange { background: #431407; color: #fb923c; }
+    /* ── Summary cards ── */
+    .cards {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+      gap: 10px; margin-bottom: 20px;
+    }
+    .card {
+      background: #161b22; border: 1px solid #21262d;
+      border-radius: 10px; padding: 14px 16px;
+    }
+    .card-label { font-size: 0.68rem; color: #6e7681; text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 4px; }
+    .card-value { font-size: 1.6rem; font-weight: 700; line-height: 1; }
+    .card-unit  { font-size: 0.8rem; font-weight: 400; opacity: 0.7; }
+    .card-sub   { font-size: 0.68rem; color: #6e7681; margin-top: 4px; }
+    .c-green  { color: #4ade80; }
+    .c-blue   { color: #60a5fa; }
+    .c-orange { color: #fb923c; }
+    .c-purple { color: #a78bfa; }
+    .c-white  { color: #f1f5f9; }
+    /* ── Charts grid ── */
+    .charts-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+    }
+    @media (max-width: 860px) { .charts-grid { grid-template-columns: 1fr; } }
+    .chart-panel {
+      background: #161b22; border: 1px solid #21262d;
+      border-radius: 10px; padding: 18px 20px;
+    }
+    .chart-panel.wide { grid-column: 1 / -1; }
+    .chart-panel h2 {
+      font-size: 0.72rem; font-weight: 600; color: #6e7681;
+      text-transform: uppercase; letter-spacing: 0.07em; margin-bottom: 14px;
+    }
+    canvas { max-height: 260px; width: 100% !important; }
+    .wide canvas { max-height: 300px; }
+    /* ── Footer ── */
+    .footer {
+      text-align: center; color: #3d444d; font-size: 0.72rem;
+      margin-top: 28px; padding-top: 14px; border-top: 1px solid #21262d;
+    }
+  </style>
+</head>
+<body>
+
+<div class="header">
+  <h1>Strength Coach &mdash; Week 11 / 30</h1>
+  <p class="meta">
+    Generated: 2026-04-16 &nbsp;|&nbsp;
+    Last session: 2026-03-28 (19d ago) &nbsp;|&nbsp;
+    Bodyweight: —
+  </p>
+  <div class="badges">
+    <span class="badge badge-blue">Block 3</span>
+    <span class="badge badge-green">Intensity</span>
+    <span class="badge badge-orange">37% complete</span>
+  </div>
+</div>
+
+<div class="cards">
+  <div class="card">
+    <div class="card-label">Squat e1RM</div>
+    <div class="card-value c-green">104.5<span class="card-unit">kg</span></div>
+    <div class="card-sub">Target: 120kg &times;5</div>
+  </div>
+  <div class="card">
+    <div class="card-label">Bench e1RM</div>
+    <div class="card-value c-blue">92.0<span class="card-unit">kg</span></div>
+    <div class="card-sub">Target: 105kg &times;5</div>
+  </div>
+  <div class="card">
+    <div class="card-label">Deadlift e1RM</div>
+    <div class="card-value c-orange">164.0<span class="card-unit">kg</span></div>
+    <div class="card-sub">Long-term: 220kg</div>
+  </div>
+  <div class="card">
+    <div class="card-label">OHP e1RM</div>
+    <div class="card-value c-purple">61.5<span class="card-unit">kg</span></div>
+    <div class="card-sub">Shoulder health</div>
+  </div>
+  <div class="card">
+    <div class="card-label">Body Weight</div>
+    <div class="card-value c-white">—</div>
+    <div class="card-sub">Latest reading</div>
+  </div>
+  <div class="card">
+    <div class="card-label">Progress</div>
+    <div class="card-value c-white">37<span class="card-unit">%</span></div>
+    <div class="card-sub">19 weeks left</div>
+  </div>
+</div>
+
+<div class="charts-grid">
+
+  <div class="chart-panel wide">
+    <h2>Strength Trajectory &mdash; e1RM by Week</h2>
+    <canvas id="strengthChart"></canvas>
+  </div>
+
+  <div class="chart-panel">
+    <h2>Volume Load (tonnes / week)</h2>
+    <canvas id="volumeChart"></canvas>
+  </div>
+
+  <div class="chart-panel">
+    <h2>Training Days per Week</h2>
+    <canvas id="daysChart"></canvas>
+  </div>
+
+  <div class="chart-panel">
+    <h2>Body Composition</h2>
+    <canvas id="bodyCompChart"></canvas>
+  </div>
+
+  <div class="chart-panel">
+    <h2>Recovery &mdash; HRV &amp; RHR</h2>
+    <canvas id="recoveryChart"></canvas>
+  </div>
+
+  <div class="chart-panel">
+    <h2>Sleep (hours / night)</h2>
+    <canvas id="sleepChart"></canvas>
+  </div>
+
+</div>
+
+<p class="footer">Strength Coach Agent &mdash; pipeline.py &mdash; 2026-04-16</p>
+
+<script>
+const strengthData  = {"labels": [1, 2, 3, 4, 6, 7, 8, 9, 10, 11], "datasets": [{"label": "Squat", "data": [99.2, 102.1, 102.1, 105.0, 102.0, 104.8, 107.7, 107.7, 105.0, 107.3], "borderColor": "#4ade80", "backgroundColor": "#4ade8022", "tension": 0.35, "spanGaps": true, "pointRadius": 3}, {"label": "Bench Press", "data": [87.5, 87.5, 90.4, 93.3, 90.7, 90.7, 93.5, 96.3, 90.4, 93.5], "borderColor": "#60a5fa", "backgroundColor": "#60a5fa22", "tension": 0.35, "spanGaps": true, "pointRadius": 3}, {"label": "Deadlift", "data": [151.7, 154.6, 157.5, 160.4, 163.3, 166.3, 169.2, 172.1, 157.5, 175.0], "borderColor": "#fb923c", "backgroundColor": "#fb923c22", "tension": 0.35, "spanGaps": true, "pointRadius": 3}, {"label": "OHP", "data": [61.3, 61.3, 61.3, 64.2, 62.3, null, 62.3, 62.3, null, 63.3], "borderColor": "#a78bfa", "backgroundColor": "#a78bfa22", "tension": 0.35, "spanGaps": true, "pointRadius": 3}, {"label": "Squat target", "data": [137.8, 137.8, 137.8, 137.8, 137.8, 137.8, 137.8, 137.8, 137.8, 137.8], "borderColor": "#4ade80", "borderDash": [6, 3], "tension": 0, "spanGaps": true, "pointRadius": 0, "borderWidth": 1.5, "backgroundColor": "transparent"}, {"label": "Bench Press target", "data": [120.6, 120.6, 120.6, 120.6, 120.6, 120.6, 120.6, 120.6, 120.6, 120.6], "borderColor": "#60a5fa", "borderDash": [6, 3], "tension": 0, "spanGaps": true, "pointRadius": 0, "borderWidth": 1.5, "backgroundColor": "transparent"}]};
+const volumeData    = {"labels": [1, 2, 3, 4, 6, 7, 8, 9, 10, 11], "data": [13.82, 13.7, 11.09, 14.23, 14.57, 7.9, 14.48, 15.08, 7.08, 10.95]};
+const daysData      = {"labels": [1, 2, 3, 4, 6, 7, 8, 9, 10, 11], "data": [4, 4, 4, 4, 4, 2, 4, 4, 3, 4]};
+const bodyCompData  = {"labels": ["2026-04-07"], "weight": [null], "body_fat": [null]};
+const recoveryData  = {"labels": ["2026-04-07"], "hrv": [58.0], "rhr": [53]};
+const sleepData     = {"labels": ["2026-04-07"], "data": [7.1]};
+
+const GRID  = '#21262d';
+const TICK  = '#6e7681';
+const scalesBase = {
+  x: { ticks: { color: TICK, maxTicksLimit: 12 }, grid: { color: GRID } },
+  y: { ticks: { color: TICK }, grid: { color: GRID } },
+};
+const legendBase = { labels: { color: '#94a3b8', boxWidth: 12, padding: 12 } };
+
+// ── Strength ──────────────────────────────────────────────────────────────
+new Chart(document.getElementById('strengthChart'), {
+  type: 'line',
+  data: strengthData,
+  options: {
+    responsive: true, maintainAspectRatio: true,
+    interaction: { mode: 'index', intersect: false },
+    plugins: { legend: legendBase },
+    scales: {
+      x: {
+        title: { display: true, text: 'Week', color: TICK },
+        ticks: { color: TICK }, grid: { color: GRID },
+      },
+      y: {
+        title: { display: true, text: 'e1RM (kg)', color: TICK },
+        ticks: { color: TICK }, grid: { color: GRID },
+      },
+    },
+  },
+});
+
+// ── Volume ────────────────────────────────────────────────────────────────
+new Chart(document.getElementById('volumeChart'), {
+  type: 'bar',
+  data: {
+    labels: volumeData.labels,
+    datasets: [{
+      label: 'Volume (t)',
+      data: volumeData.data,
+      backgroundColor: '#3b82f644',
+      borderColor: '#3b82f6',
+      borderWidth: 1, borderRadius: 4,
+    }],
+  },
+  options: {
+    responsive: true, maintainAspectRatio: true,
+    plugins: { legend: legendBase },
+    scales: scalesBase,
+  },
+});
+
+// ── Days ──────────────────────────────────────────────────────────────────
+new Chart(document.getElementById('daysChart'), {
+  type: 'bar',
+  data: {
+    labels: daysData.labels,
+    datasets: [{
+      label: 'Days trained',
+      data: daysData.data,
+      backgroundColor: '#4ade8044',
+      borderColor: '#4ade80',
+      borderWidth: 1, borderRadius: 4,
+    }],
+  },
+  options: {
+    responsive: true, maintainAspectRatio: true,
+    plugins: { legend: legendBase },
+    scales: {
+      x: { ticks: { color: TICK }, grid: { color: GRID } },
+      y: { min: 0, max: 5, ticks: { color: TICK, stepSize: 1 }, grid: { color: GRID } },
+    },
+  },
+});
+
+// ── Body Comp ─────────────────────────────────────────────────────────────
+new Chart(document.getElementById('bodyCompChart'), {
+  type: 'line',
+  data: {
+    labels: bodyCompData.labels,
+    datasets: [
+      {
+        label: 'Weight (kg)', data: bodyCompData.weight,
+        borderColor: '#60a5fa', backgroundColor: '#60a5fa22',
+        tension: 0.3, spanGaps: true, pointRadius: 2, yAxisID: 'y',
+      },
+      {
+        label: 'Body Fat %', data: bodyCompData.body_fat,
+        borderColor: '#fb923c', backgroundColor: '#fb923c22',
+        tension: 0.3, spanGaps: true, pointRadius: 2, yAxisID: 'y2',
+      },
+    ],
+  },
+  options: {
+    responsive: true, maintainAspectRatio: true,
+    plugins: { legend: legendBase },
+    scales: {
+      x: { ticks: { color: TICK, maxTicksLimit: 8 }, grid: { color: GRID } },
+      y: {
+        position: 'left',
+        title: { display: true, text: 'kg', color: '#60a5fa' },
+        ticks: { color: '#60a5fa' }, grid: { color: GRID },
+      },
+      y2: {
+        position: 'right',
+        title: { display: true, text: '%', color: '#fb923c' },
+        ticks: { color: '#fb923c' }, grid: { drawOnChartArea: false },
+      },
+    },
+  },
+});
+
+// ── Recovery ──────────────────────────────────────────────────────────────
+new Chart(document.getElementById('recoveryChart'), {
+  type: 'line',
+  data: {
+    labels: recoveryData.labels,
+    datasets: [
+      {
+        label: 'HRV (ms)', data: recoveryData.hrv,
+        borderColor: '#4ade80', backgroundColor: '#4ade8022',
+        tension: 0.3, spanGaps: true, pointRadius: 2, yAxisID: 'y',
+      },
+      {
+        label: 'RHR (bpm)', data: recoveryData.rhr,
+        borderColor: '#f43f5e', backgroundColor: '#f43f5e22',
+        tension: 0.3, spanGaps: true, pointRadius: 2, yAxisID: 'y2',
+      },
+    ],
+  },
+  options: {
+    responsive: true, maintainAspectRatio: true,
+    plugins: { legend: legendBase },
+    scales: {
+      x: { ticks: { color: TICK, maxTicksLimit: 8 }, grid: { color: GRID } },
+      y: {
+        position: 'left',
+        title: { display: true, text: 'HRV (ms)', color: '#4ade80' },
+        ticks: { color: '#4ade80' }, grid: { color: GRID },
+      },
+      y2: {
+        position: 'right',
+        title: { display: true, text: 'RHR (bpm)', color: '#f43f5e' },
+        ticks: { color: '#f43f5e' }, grid: { drawOnChartArea: false },
+      },
+    },
+  },
+});
+
+// ── Sleep ─────────────────────────────────────────────────────────────────
+new Chart(document.getElementById('sleepChart'), {
+  type: 'line',
+  data: {
+    labels: sleepData.labels,
+    datasets: [{
+      label: 'Sleep (h)', data: sleepData.data,
+      borderColor: '#a78bfa', backgroundColor: '#a78bfa22',
+      tension: 0.3, spanGaps: true, pointRadius: 2,
+    }],
+  },
+  options: {
+    responsive: true, maintainAspectRatio: true,
+    plugins: { legend: legendBase },
+    scales: {
+      x: { ticks: { color: TICK, maxTicksLimit: 8 }, grid: { color: GRID } },
+      y: {
+        min: 4, max: 10,
+        ticks: { color: TICK }, grid: { color: GRID },
+        title: { display: true, text: 'hours', color: TICK },
+      },
+    },
+  },
+});
+</script>
+</body>
+</html>
