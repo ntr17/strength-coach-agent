@@ -1,4 +1,4 @@
-# BRIEFING — 2026-04-18
+# BRIEFING — 2026-04-19
 Week 11/30 (Block 3) | 30-Week Strength
 
 ## Strength Trajectory
