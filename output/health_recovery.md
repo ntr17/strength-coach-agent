@@ -1,5 +1,5 @@
 # Health & Recovery
-Generated: 2026-04-23
+Generated: 2026-04-24
 
 ## 7-Day Averages (Garmin)
 
