@@ -1,5 +1,5 @@
 # Program
-Generated: 2026-06-02
+Generated: 2026-06-03
 Week 11/30 | Block 3 | Phase: INTENSITY
 
 ## Program Structure
@@ -23,7 +23,7 @@ Week 11/30 | Block 3 | Phase: INTENSITY
 ## This Week — Full Session Plan
 
 # Week 11 — Block 3 (INTENSITY)
-Generated: 2026-06-02
+Generated: 2026-06-03
 
 > **Injury note:** Elbow: avoid direct tricep isolation. Stop any pulling if sharp pain.
 
@@ -78,7 +78,7 @@ Generated: 2026-06-02
 ## Next Week Preview (Week 12 — INTENSITY)
 
 # Week 12 — Block 3 (INTENSITY)
-Generated: 2026-06-02
+Generated: 2026-06-03
 
 > **Injury note:** Elbow: avoid direct tricep isolation. Stop any pulling if sharp pain.
 
