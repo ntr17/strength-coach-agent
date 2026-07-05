@@ -1,5 +1,5 @@
 # Program Context
-Generated: 2026-07-04
+Generated: 2026-07-05
 Program: 30-Week Strength
 Current Week: 11 of 30 (Block 3) — 37% done, 19w remaining
 
