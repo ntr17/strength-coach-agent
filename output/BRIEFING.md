@@ -1,4 +1,4 @@
-# BRIEFING — 2026-07-06
+# BRIEFING — 2026-07-07
 Week 11/30 (Block 3) | 30-Week Strength
 
 ## Strength Trajectory
@@ -38,9 +38,9 @@ History: W1:61.9kg → W2:61.9kg → W3:61.9kg → W4:64.8kg → W6:63.2kg → W
 
 ## Recovery & Health
 
-**HRV**: 58.0ms (baseline 58.0ms) +0% vs baseline  | Last 7: 58.0
-**RHR**: 53bpm (baseline 53.0bpm) +0% vs baseline  | Last 7: 53
-**Sleep**: 7.1h (baseline 7.1h) +0% vs baseline  **[OK]** | Last 7: 7.1
+**HRV**: —    | Last 7: 
+**RHR**: —    | Last 7: 
+**Sleep**: —    | Last 7: 
 
 ## Volume Load
 
