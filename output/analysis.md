@@ -1,5 +1,5 @@
 # Analysis & Insights
-Generated: 2026-11-27
+Generated: 2026-11-28
 
 ## Stall Detection
 
